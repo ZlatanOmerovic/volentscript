@@ -256,6 +256,15 @@ fn gc_churn() {
     run_golden("gcchurn");
 }
 
+/// P27 Part B (SPECS §7): the generational collector's write barrier keeps
+/// young objects reachable only through promoted (old) containers alive
+/// across minor collections. Fails loudly (corrupted sums) if any old→young
+/// edge is not remembered.
+#[test]
+fn gc_generational() {
+    run_golden("gcgen");
+}
+
 /// The Phase 10 milestone (SPECS §6): RegExp literals, methods, and the
 /// String regex integration.
 #[test]

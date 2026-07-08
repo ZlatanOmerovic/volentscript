@@ -880,6 +880,7 @@ pub unsafe extern "C" fn vs_arr_get(a: *const VsArray, index: f64, out: *mut VsA
 /// Pointers live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_arr_set(a: *const VsArray, index: f64, v: *const VsAny) {
+    let block = a as *mut u8;
     // SAFETY: caller contract.
     let a = unsafe { arr(a, "Array index") };
     if index < 0.0 {
@@ -892,6 +893,8 @@ pub unsafe extern "C" fn vs_arr_set(a: *const VsArray, index: f64, v: *const VsA
     }
     // SAFETY: caller contract.
     data[i] = unsafe { *v };
+    drop(data);
+    crate::gc::remember(block);
 }
 
 /// push (§15.4.4.7) — returns new length.
@@ -900,12 +903,16 @@ pub unsafe extern "C" fn vs_arr_set(a: *const VsArray, index: f64, v: *const VsA
 /// Pointers live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_arr_push(a: *const VsArray, argc: u32, args: *const VsAny) -> u32 {
+    let block = a as *mut u8;
     // SAFETY: caller contract.
     let a = unsafe { arr(a, "push") };
     let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
     let mut data = a.data.borrow_mut();
     data.extend_from_slice(items);
-    data.len() as u32
+    let n = data.len() as u32;
+    drop(data);
+    crate::gc::remember(block);
+    n
 }
 
 /// pop (§15.4.4.6).
@@ -946,6 +953,7 @@ pub unsafe extern "C" fn vs_arr_shift(a: *const VsArray, out: *mut VsAny) {
 /// Pointers live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_arr_unshift(a: *const VsArray, argc: u32, args: *const VsAny) -> u32 {
+    let block = a as *mut u8;
     // SAFETY: caller contract.
     let a = unsafe { arr(a, "unshift") };
     let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
@@ -953,7 +961,10 @@ pub unsafe extern "C" fn vs_arr_unshift(a: *const VsArray, argc: u32, args: *con
     for (i, it) in items.iter().enumerate() {
         data.insert(i, *it);
     }
-    data.len() as u32
+    let n = data.len() as u32;
+    drop(data);
+    crate::gc::remember(block);
+    n
 }
 
 /// slice (§15.4.4.10).
@@ -988,6 +999,7 @@ pub unsafe extern "C" fn vs_arr_splice(
     argc: u32,
     args: *const VsAny,
 ) -> *const VsArray {
+    let block = a as *mut u8;
     // SAFETY: caller contract.
     let a = unsafe { arr(a, "splice") };
     let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
@@ -996,6 +1008,10 @@ pub unsafe extern "C" fn vs_arr_splice(
     let del = delete_count.max(0.0) as usize;
     let e = (s + del).min(data.len());
     let removed: Vec<VsAny> = data.splice(s..e, items.iter().copied()).collect();
+    drop(data);
+    if argc > 0 {
+        crate::gc::remember(block);
+    }
     seq::new_array(removed)
 }
 
@@ -1132,6 +1148,7 @@ pub unsafe extern "C" fn vs_vec_get(v: *const VsVector, index: f64, out: *mut Vs
 /// Pointers live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_vec_set(v: *const VsVector, index: f64, value: *const VsAny) {
+    let block = v as *mut u8;
     // SAFETY: caller contract.
     let v = unsafe { vec_mut(v, "Vector index") };
     let i = index as usize;
@@ -1148,6 +1165,11 @@ pub unsafe extern "C" fn vs_vec_set(v: *const VsVector, index: f64, value: *cons
     } else {
         v.set_any(i, value);
     }
+    // Write barrier: only boxed vectors carry references (numeric vectors
+    // are GC leaves).
+    if v.kind == seq::VEC_BOXED {
+        crate::gc::remember(block);
+    }
 }
 
 /// Vector push — returns new length.
@@ -1156,11 +1178,15 @@ pub unsafe extern "C" fn vs_vec_set(v: *const VsVector, index: f64, value: *cons
 /// Pointers live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_vec_push(v: *const VsVector, argc: u32, args: *const VsAny) -> u32 {
+    let block = v as *mut u8;
     // SAFETY: caller contract.
     let v = unsafe { vec_mut(v, "push") };
     let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
     for &it in items {
         v.push_any(it);
+    }
+    if v.kind == seq::VEC_BOXED {
+        crate::gc::remember(block);
     }
     v.len
 }
@@ -1203,12 +1229,16 @@ pub unsafe extern "C" fn vs_vec_shift(v: *const VsVector, out: *mut VsAny) {
 /// Pointers live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_vec_unshift(v: *const VsVector, argc: u32, args: *const VsAny) -> u32 {
+    let block = v as *mut u8;
     // SAFETY: caller contract.
     let v = unsafe { vec_mut(v, "unshift") };
     let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
     let mut merged = items.to_vec();
     merged.extend(v.to_boxed());
     v.refill(&merged);
+    if v.kind == seq::VEC_BOXED {
+        crate::gc::remember(block);
+    }
     v.len
 }
 

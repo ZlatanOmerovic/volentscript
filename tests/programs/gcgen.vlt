@@ -1,0 +1,71 @@
+// P27 Part B: generational GC correctness under old->young edges.
+//
+// Long-lived containers are aged past several collections so they promote to
+// the old generation, then repeatedly mutated to point at freshly-allocated
+// (young) objects, with enough garbage churned between rounds to force a
+// minor collection each round. A minor collection traces only the nursery,
+// so a young child reachable *only* through an old container survives a minor
+// solely because the write barrier remembered that container. The mutation
+// runs in `mutate()`, whose frame is popped before the churn — so the child
+// pointers are not on the scanned stack, and a missing barrier would let the
+// minor sweep them (read-back would then see garbage, not the sums below).
+//   - `boxes[k].payload = child` exercises the compiled FieldSet barrier
+//   - `slots[k] = child`         exercises the runtime Vector-set barrier
+
+package gc {
+    public class Box {
+        public var payload:Box?;
+        public var tag:int;
+        public function Box(t:int) { tag = t; }
+    }
+}
+
+function mutate(boxes:Vector.<Box>, slots:Vector.<Box>, round:int):void {
+    var k:int = 0;
+    for (k = 0; k < 100; k++) {
+        boxes[k].payload = new Box(round * 100 + k); // old <- young (field)
+        slots[k] = new Box(round * 100 + k);         // old <- young (vector)
+    }
+}
+
+// Churn `n` short-lived objects (returns a value so the loop is not dead).
+function churn(n:int):int {
+    var s:int = 0;
+    var g:int = 0;
+    for (g = 0; g < n; g++) {
+        var w:Box = new Box(g);
+        s += w.tag & 1;
+    }
+    return s;
+}
+
+var boxes:Vector.<Box> = new Vector.<Box>();
+var slots:Vector.<Box> = new Vector.<Box>();
+var i:int = 0;
+for (i = 0; i < 100; i++) {
+    boxes.push(new Box(i));
+    slots.push(new Box(-1));
+}
+
+// Age the containers into the old generation.
+var sink:int = churn(300000);
+
+var round:int = 0;
+for (round = 0; round < 40; round++) {
+    mutate(boxes, slots, round);
+    // >2 MB of garbage: guarantees a minor collection this round, after
+    // mutate()'s frame (holding the only stack copies of the children) is
+    // gone.
+    sink += churn(80000);
+    var sum:int = 0;
+    var v:int = 0;
+    for (v = 0; v < 100; v++) {
+        var pl:Box? = boxes[v].payload;
+        if (pl != null) {
+            sum += pl.tag;
+        }
+        sum += slots[v].tag;
+    }
+    trace(sum);
+}
+trace(sink > 0);

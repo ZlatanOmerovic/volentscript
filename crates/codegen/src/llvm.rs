@@ -2081,6 +2081,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 self.unbox_any_ptr(copy, e.ty)
             }
             ExprKind::CaptureSet(i, value) => {
+                let vty = value.ty;
                 let v = self.expr(value);
                 let boxed = match v {
                     Val::Any(p) => p,
@@ -2093,6 +2094,11 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .build_load(cx.any_ty, boxed, "capset")
                     .expect("load");
                 self.cx.builder.build_store(cell, loaded).expect("store");
+                // Generational write barrier: the (possibly old) cell now
+                // holds a value that may point into the nursery.
+                if Self::ty_holds_ref(vty) {
+                    self.write_barrier(cell);
+                }
                 v
             }
             ExprKind::Closure(fn_id) => {
@@ -2607,6 +2613,11 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 let (p, ty) = self.field_ptr(obj, *class, *slot);
                 let basic = self.ref_tolerant_basic(v, ty);
                 self.cx.builder.build_store(p, basic).expect("store");
+                // Generational write barrier: `obj` may be old and now points
+                // at a nursery object through this field.
+                if Self::ty_holds_ref(ty) {
+                    self.write_barrier(obj);
+                }
                 self.wrap_basic(basic, ty)
             }
             ExprKind::CallVirtual {
@@ -2676,6 +2687,71 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             .builder
             .build_call(f, &[obj.into()], "")
             .expect("call");
+    }
+
+    /// Generational write barrier (SPECS §7): when a heap reference is stored
+    /// into `container` (a live GC object — an instance whose field is being
+    /// set, or a captured-variable cell), record `container` in the
+    /// remembered set *iff* it has already been promoted to the old
+    /// generation. The common (young) case is a single header-byte load and a
+    /// not-taken branch — no call. The `age` byte lives at `container - 9`
+    /// (GC block header layout: see runtime `gc::Hdr`, `GEN_OLD == 1`).
+    fn write_barrier(&mut self, container: PointerValue<'ctx>) {
+        let cx = self.cx;
+        let i8t = cx.context.i8_type();
+        let i64t = cx.context.i64_type();
+        // &header.age == container - 9
+        let genp = unsafe {
+            cx.builder.build_in_bounds_gep(
+                i8t,
+                container,
+                &[i64t.const_int((-9i64) as u64, true)],
+                "wb.agep",
+            )
+        }
+        .expect("gep");
+        let age = cx
+            .builder
+            .build_load(i8t, genp, "wb.age")
+            .expect("load")
+            .into_int_value();
+        let is_old = cx
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, age, i8t.const_int(1, false), "wb.old")
+            .expect("cmp");
+        let func = self.function;
+        let bb_do = cx.context.append_basic_block(func, "wb.remember");
+        let bb_cont = cx.context.append_basic_block(func, "wb.cont");
+        cx.builder
+            .build_conditional_branch(is_old, bb_do, bb_cont)
+            .expect("br");
+        cx.builder.position_at_end(bb_do);
+        let f = cx.runtime_fn("vs_gc_remember", None, &[cx.ptr().into()]);
+        cx.builder
+            .build_call(f, &[container.into()], "")
+            .expect("call");
+        cx.builder.build_unconditional_branch(bb_cont).expect("br");
+        cx.builder.position_at_end(bb_cont);
+    }
+
+    /// Whether a value of type `ty` can hold a GC pointer — i.e. a store of
+    /// it into a heap object may create an old→young edge and so needs the
+    /// [`write_barrier`](Self::write_barrier).
+    fn ty_holds_ref(ty: Ty) -> bool {
+        matches!(
+            ty,
+            Ty::Object(_)
+                | Ty::Iface(_)
+                | Ty::String
+                | Ty::Array
+                | Ty::Vector(_)
+                | Ty::Function
+                | Ty::RegExp
+                | Ty::Date
+                | Ty::Socket
+                | Ty::Namespace
+                | Ty::Any
+        )
     }
 
     /// Pointer to instance slot `slot` using the owning class's layout.
@@ -3014,6 +3090,11 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 .build_load(self.cx.any_ty, boxed, "boxval")
                 .expect("load");
             self.cx.builder.build_store(cell, value).expect("store");
+            // Generational write barrier: the (possibly old) cell now holds a
+            // value that may point into the nursery.
+            if Self::ty_holds_ref(ty) {
+                self.write_barrier(cell);
+            }
             return;
         }
         // Reference kinds (String/Object/Iface) interchange as pointers

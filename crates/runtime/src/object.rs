@@ -72,6 +72,9 @@ unsafe fn expando<'x>(obj: *const u8) -> Option<&'x mut PropMap> {
                 as *mut PropMap;
             p.write(PropMap::new());
             *slot = p;
+            // Write barrier: a possibly-old object now points at this fresh
+            // (young) expando map — record the edge for the minor collector.
+            crate::gc::remember(obj);
         }
         Some(&mut **slot)
     }
@@ -110,6 +113,9 @@ pub fn set_prop(obj: *const u8, name: &[u16], value: VsAny) -> bool {
             } else {
                 map.push((name.to_vec(), value));
             }
+            // Write barrier: the map (possibly old) now holds `value`, which
+            // may point into the nursery.
+            crate::gc::remember((map as *mut PropMap).cast());
             true
         }
         None => false,
