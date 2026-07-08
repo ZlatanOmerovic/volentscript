@@ -41,6 +41,10 @@ pub enum Ty {
     RegExp,
     /// ES3 §15.9 Date: reference type wrapping one time value (SPECS §6).
     Date,
+    /// TCP stream socket (SPECS §6 I/O — Redtamarin-shaped, not flash.net).
+    Socket,
+    /// TCP listener (`ServerSocket.bind` / `accept`).
+    ServerSocket,
     /// The AS3 `Function` type: callable, signature unchecked
     /// (AS3's `Function` class carries no signature).
     Function,
@@ -70,6 +74,8 @@ impl Ty {
                 | Ty::Vector(_)
                 | Ty::RegExp
                 | Ty::Date
+                | Ty::Socket
+                | Ty::ServerSocket
         )
     }
 }
@@ -93,6 +99,8 @@ impl fmt::Display for Ty {
             Ty::Function => "Function",
             Ty::RegExp => "RegExp",
             Ty::Date => "Date",
+            Ty::Socket => "Socket",
+            Ty::ServerSocket => "ServerSocket",
             Ty::Error => "<error>",
         })
     }

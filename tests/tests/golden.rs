@@ -290,3 +290,52 @@ fn cross_linux() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
     let _ = std::fs::remove_dir_all(&out_dir);
 }
+
+/// The Phase 15 milestone (SPECS §6 I/O): a TCP echo server and client
+/// compiled to native binaries talking over loopback — ephemeral bind,
+/// localPort, accept, readLine/write, EOF handling, close.
+#[test]
+fn sockets_echo() {
+    let root = workspace_root();
+    let out_dir = std::env::temp_dir().join(format!("vs-sock-{}", std::process::id()));
+    std::fs::create_dir_all(&out_dir).expect("temp dir");
+    let mut exes = Vec::new();
+    for name in ["echo_server", "echo_client"] {
+        let exe = out_dir.join(name);
+        driver::build(&driver::BuildOptions {
+            input: root.join(format!("tests/programs/{name}.as")),
+            output: Some(exe.clone()),
+            runtime_lib: Some(runtime_lib()),
+            opt: driver::OptLevel::default(),
+            target: None,
+        })
+        .unwrap_or_else(|e| panic!("build failed:\n{}", e.rendered.join("\n")));
+        exes.push(exe);
+    }
+
+    let mut server = Command::new(&exes[0])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn server");
+    // First line announces the ephemeral port.
+    let mut port_line = String::new();
+    {
+        use std::io::BufRead as _;
+        let stdout = server.stdout.as_mut().expect("server stdout");
+        std::io::BufReader::new(stdout)
+            .read_line(&mut port_line)
+            .expect("port line");
+    }
+    let port = port_line.trim().strip_prefix("PORT ").expect("PORT prefix");
+
+    let client = Command::new(&exes[1]).arg(port).output().expect("client");
+    assert_eq!(
+        String::from_utf8_lossy(&client.stdout),
+        "got: HELLO SOCKETS\ngot: SECOND LINE\ngot: bye\nclient done\n"
+    );
+    assert_eq!(client.status.code(), Some(0));
+    let server_out = server.wait_with_output().expect("server exit");
+    assert_eq!(String::from_utf8_lossy(&server_out.stdout), "server done\n");
+    assert_eq!(server_out.status.code(), Some(0));
+    let _ = std::fs::remove_dir_all(&out_dir);
+}

@@ -48,6 +48,8 @@ pub enum Kind {
     /// A `VsRegExp`; its source string is traced, the compiled program
     /// dropped on sweep.
     RegExp,
+    /// A `VsSocket`; dropping closes the descriptor.
+    Socket,
 }
 
 struct Block {
@@ -302,6 +304,8 @@ pub fn collect() {
                         work.push(start);
                     }
                 }
+                // Sockets hold no GC references.
+                Kind::Socket => {}
             }
         }
 
@@ -429,6 +433,9 @@ fn drop_side_storage(addr: usize, kind: Kind) {
             }
             Kind::RegExp => {
                 std::ptr::drop_in_place(addr as *mut crate::regexp::VsRegExp);
+            }
+            Kind::Socket => {
+                std::ptr::drop_in_place(addr as *mut crate::socket::VsSocket);
             }
         }
     }

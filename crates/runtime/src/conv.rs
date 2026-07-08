@@ -72,7 +72,7 @@ pub fn any_truthy(v: VsAny) -> bool {
             let f = f64::from_bits(v.data);
             f != 0.0 && !f.is_nan()
         }
-        Tag::RegExp | Tag::Date => v.data != 0,
+        Tag::RegExp | Tag::Date | Tag::Socket => v.data != 0,
         Tag::String => {
             // SAFETY: String-tagged payloads always hold a live VsString.
             unsafe { crate::string::deref(v.as_string_ptr()) }.is_some_and(|s| s.len > 0)
@@ -151,6 +151,7 @@ pub fn any_to_display(v: VsAny) -> String {
                     .unwrap_or_default()
             }
         }
+        Tag::Socket => "[object Socket]".to_string(),
     }
 }
 
@@ -163,7 +164,7 @@ pub fn any_typeof(v: VsAny) -> &'static str {
         Tag::Boolean => "boolean",
         Tag::Int | Tag::UInt | Tag::Number => "number",
         Tag::String => "string",
-        Tag::Object | Tag::Array | Tag::Vector | Tag::RegExp | Tag::Date => "object",
+        Tag::Object | Tag::Array | Tag::Vector | Tag::RegExp | Tag::Date | Tag::Socket => "object",
         Tag::Function => "function",
     }
 }
@@ -185,6 +186,7 @@ pub fn any_is(v: VsAny, target: Tag) -> bool {
         Tag::Function => v.tag() == Tag::Function,
         Tag::RegExp => v.tag() == Tag::RegExp,
         Tag::Date => v.tag() == Tag::Date,
+        Tag::Socket => v.tag() == Tag::Socket,
         Tag::Null | Tag::Undefined | Tag::Object | Tag::Array | Tag::Vector => false,
     }
 }

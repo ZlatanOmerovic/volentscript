@@ -26,6 +26,7 @@ mod natives;
 mod object;
 mod regexp;
 mod seq;
+mod socket;
 mod string;
 
 pub use any::{Tag, VsAny};

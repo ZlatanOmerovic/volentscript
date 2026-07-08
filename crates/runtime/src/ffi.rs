@@ -28,6 +28,7 @@ fn tag_from(raw: u32) -> Tag {
         10 => Tag::Function,
         11 => Tag::RegExp,
         12 => Tag::Date,
+        13 => Tag::Socket,
         _ => Tag::Undefined,
     }
 }
@@ -2543,5 +2544,139 @@ pub unsafe extern "C" fn vs_any_to_date(v: *const VsAny) -> *const VsDate {
             exc::ErrorKind::Type,
             &format!("cannot convert {} to Date", conv::any_to_display(v)),
         ),
+    }
+}
+
+// --- sockets (SPECS §6 I/O) ---------------------------------------------------
+
+use crate::socket::{self, VsSocket};
+
+/// Live socket or TypeError.
+///
+/// # Safety
+/// `s` null or a live VsSocket.
+unsafe fn sock_ref<'x>(s: *const VsSocket) -> &'x VsSocket {
+    if s.is_null() {
+        exc::throw_error(exc::ErrorKind::Type, "null Socket");
+    }
+    // SAFETY: caller contract.
+    unsafe { &*s }
+}
+
+/// `Socket.connect(host, port)`.
+///
+/// # Safety
+/// `host` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_socket_connect(host: *const VsString, port: i32) -> *const VsSocket {
+    // SAFETY: caller contract.
+    let host = match unsafe { string::deref(host) } {
+        Some(h) => h.to_rust(),
+        None => exc::throw_error(exc::ErrorKind::Type, "Socket.connect: null host"),
+    };
+    socket::connect(&host, port.clamp(0, 65535) as u16)
+}
+
+/// `ServerSocket.bind(port)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn vs_socket_bind(port: i32) -> *const VsSocket {
+    socket::bind(port.clamp(0, 65535) as u16)
+}
+
+/// `server.accept()`.
+///
+/// # Safety
+/// `s` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_socket_accept(s: *const VsSocket) -> *const VsSocket {
+    // SAFETY: caller contract.
+    socket::accept(unsafe { sock_ref(s) })
+}
+
+/// `socket.write(data)`.
+///
+/// # Safety
+/// Pointers null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_socket_write(s: *const VsSocket, data: *const VsString) {
+    // SAFETY: caller contract.
+    let sock = unsafe { sock_ref(s) };
+    match unsafe { string::deref(data) } {
+        Some(d) => socket::write(sock, d),
+        None => exc::throw_error(exc::ErrorKind::Type, "write: null data"),
+    }
+}
+
+/// `socket.readLine()` → line or null (EOF).
+///
+/// # Safety
+/// `s` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_socket_read_line(s: *const VsSocket) -> *const VsString {
+    // SAFETY: caller contract.
+    socket::read_line(unsafe { sock_ref(s) })
+}
+
+/// `socket.read(max)` → chunk or null (EOF).
+///
+/// # Safety
+/// `s` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_socket_read(s: *const VsSocket, max: i32) -> *const VsString {
+    // SAFETY: caller contract.
+    socket::read(unsafe { sock_ref(s) }, max.max(1) as usize)
+}
+
+/// `close()`.
+///
+/// # Safety
+/// `s` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_socket_close(s: *const VsSocket) {
+    // SAFETY: caller contract.
+    socket::close(unsafe { sock_ref(s) });
+}
+
+/// `localPort` (listener: bound port; useful with bind(0)).
+///
+/// # Safety
+/// `s` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_socket_local_port(s: *const VsSocket) -> i32 {
+    // SAFETY: caller contract.
+    socket::local_port(unsafe { sock_ref(s) })
+}
+
+/// Checked coerce of a boxed value to Socket (TypeError on mismatch).
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_to_socket(v: *const VsAny) -> *const VsSocket {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    match v.tag() {
+        Tag::Null | Tag::Undefined => std::ptr::null(),
+        Tag::Socket => v.data as *const VsSocket,
+        _ => exc::throw_error(
+            exc::ErrorKind::Type,
+            &format!("cannot convert {} to Socket", conv::any_to_display(v)),
+        ),
+    }
+}
+
+/// `v as Socket`-style pointer extraction for any pointer tag: the
+/// payload when tags match, else null (never throws).
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_as_ptr(v: *const VsAny, tag: u32) -> *const u8 {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    if v.tag() == tag_from(tag) && tag_from(tag) != Tag::Undefined {
+        v.data as *const u8
+    } else {
+        std::ptr::null()
     }
 }

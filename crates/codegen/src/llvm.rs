@@ -38,6 +38,7 @@ mod tag {
     pub const FUNCTION: u32 = 10;
     pub const REGEXP: u32 = 11;
     pub const DATE: u32 = 12;
+    pub const SOCKET: u32 = 13;
 }
 
 /// LLVM implementor of [`Backend`].
@@ -212,6 +213,8 @@ enum Val<'ctx> {
     Reg(PointerValue<'ctx>),
     /// Date pointer (possibly null).
     Dat(PointerValue<'ctx>),
+    /// Socket pointer (possibly null).
+    Sock(PointerValue<'ctx>),
     /// Pointer to an entry-block alloca holding a `{i32, i64}` box.
     Any(PointerValue<'ctx>),
     Void,
@@ -234,7 +237,8 @@ impl<'ctx> Cx<'ctx> {
             | Ty::Vector(_)
             | Ty::Function
             | Ty::RegExp
-            | Ty::Date => self.ptr().into(),
+            | Ty::Date
+            | Ty::Socket => self.ptr().into(),
             Ty::Any => self.any_ty.into(),
             Ty::Void => unreachable!("void has no storage"),
         }
@@ -416,7 +420,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     | Ty::Vector(_)
                     | Ty::Function
                     | Ty::RegExp
-                    | Ty::Date => cx.ptr().const_null().into(),
+                    | Ty::Date
+                    | Ty::Socket => cx.ptr().const_null().into(),
                     Ty::Any => cx.any_ty.const_zero().into(), // tag 0 = undefined
                     Ty::Void => unreachable!(),
                 };
@@ -475,7 +480,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             | Ty::Vector(_)
             | Ty::Function
             | Ty::RegExp
-            | Ty::Date => b
+            | Ty::Date
+            | Ty::Socket => b
                 .build_return(Some(&self.cx.ptr().const_null()))
                 .expect("ret"),
             Ty::Any => b
@@ -980,7 +986,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     | Ty::Vector(_)
                     | Ty::Function
                     | Ty::RegExp
-                    | Ty::Date => 1,
+                    | Ty::Date
+                    | Ty::Socket => 1,
                     Ty::Int | Ty::UInt | Ty::Number | Ty::Boolean | Ty::Void => continue,
                 };
                 let g = cx.classes[ci].statics[si];
@@ -1077,6 +1084,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             Ty::Function => Val::Fun(cx.ptr().const_null()),
             Ty::RegExp => Val::Reg(cx.ptr().const_null()),
             Ty::Date => Val::Dat(cx.ptr().const_null()),
+            Ty::Socket => Val::Sock(cx.ptr().const_null()),
             Ty::Any => {
                 let slot = self.entry_alloca(cx.any_ty, "undef");
                 self.cx
@@ -1298,6 +1306,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 )
             }
             ExprKind::CallDate(f, operands) => self.call_date(*f, operands),
+            ExprKind::CallSocket(op, operands) => self.call_socket(*op, operands),
             ExprKind::Str(s) => {
                 let global = self
                     .cx
@@ -2314,12 +2323,19 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 | Ty::Vector(_)
                 | Ty::Function
                 | Ty::RegExp
-                | Ty::Date,
+                | Ty::Date
+                | Ty::Socket,
                 Val::Str(p),
             ) => p.into(),
             (
                 Ty::String,
-                Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) | Val::Reg(p) | Val::Dat(p),
+                Val::Obj(p)
+                | Val::Arr(p)
+                | Val::VecP(p)
+                | Val::Fun(p)
+                | Val::Reg(p)
+                | Val::Dat(p)
+                | Val::Sock(p),
             ) => p.into(),
             _ => self.materialize(v),
         }
@@ -2627,6 +2643,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 | Ty::Function
                 | Ty::RegExp
                 | Ty::Date
+                | Ty::Socket
         ) {
             if let Val::Str(p)
             | Val::Obj(p)
@@ -2634,7 +2651,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             | Val::VecP(p)
             | Val::Fun(p)
             | Val::Reg(p)
-            | Val::Dat(p) = v
+            | Val::Dat(p)
+            | Val::Sock(p) = v
             {
                 self.cx.builder.build_store(slot, p).expect("store");
                 return;
@@ -2666,7 +2684,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             | Val::VecP(p)
             | Val::Fun(p)
             | Val::Reg(p)
-            | Val::Dat(p) => p.into(),
+            | Val::Dat(p)
+            | Val::Sock(p) => p.into(),
             Val::Any(p) => self
                 .cx
                 .builder
@@ -2689,6 +2708,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             Ty::Function => Val::Fun(v.into_pointer_value()),
             Ty::RegExp => Val::Reg(v.into_pointer_value()),
             Ty::Date => Val::Dat(v.into_pointer_value()),
+            Ty::Socket => Val::Sock(v.into_pointer_value()),
             Ty::Any => {
                 let slot = self.entry_alloca(self.cx.any_ty, "anyv");
                 self.cx.builder.build_store(slot, v).expect("store");
@@ -2874,6 +2894,27 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                         .into_pointer_value(),
                 )
             }
+            Conv::AnyToSocket => {
+                let Val::Any(p) = v else {
+                    unreachable!("AnyToSocket operand")
+                };
+                let f = cx.runtime_fn(
+                    "vs_any_to_socket",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "coerce_sk")
+                    .expect("call");
+                Val::Sock(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
             Conv::AnyToDate => {
                 let Val::Any(p) = v else {
                     unreachable!("AnyToDate operand")
@@ -3028,6 +3069,22 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 );
                 self.cx.builder.build_call(rf, &[p.into()], "re2s")
             }
+            Val::Sock(_) => {
+                let lit = self
+                    .cx
+                    .builder
+                    .build_global_string_ptr("[object Socket]", "sockstr")
+                    .expect("global");
+                let len = cx.context.i32_type().const_int(15, false);
+                let rf = cx.runtime_fn(
+                    "vs_string_from_utf8",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.context.i32_type().into()],
+                );
+                self.cx
+                    .builder
+                    .build_call(rf, &[lit.as_pointer_value().into(), len.into()], "s2s")
+            }
             Val::Dat(p) => {
                 let rf = cx.runtime_fn(
                     "vs_date_to_string",
@@ -3180,13 +3237,20 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .expect("cast");
                 (t, bits)
             }
-            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) | Val::Reg(p) | Val::Dat(p) => {
+            Val::Obj(p)
+            | Val::Arr(p)
+            | Val::VecP(p)
+            | Val::Fun(p)
+            | Val::Reg(p)
+            | Val::Dat(p)
+            | Val::Sock(p) => {
                 let full_tag = match v {
                     Val::Obj(_) => tag::OBJECT,
                     Val::Arr(_) => tag::ARRAY,
                     Val::Fun(_) => tag::FUNCTION,
                     Val::Reg(_) => tag::REGEXP,
                     Val::Dat(_) => tag::DATE,
+                    Val::Sock(_) => tag::SOCKET,
                     _ => tag::VECTOR,
                 };
                 // null pointers box as the null value.
@@ -3255,12 +3319,17 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     "tob",
                 )
                 .expect("cmp"),
-            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) | Val::Reg(p) | Val::Dat(p) => {
-                self.cx
-                    .builder
-                    .build_is_not_null(p, "objtrue")
-                    .expect("isnull")
-            }
+            Val::Obj(p)
+            | Val::Arr(p)
+            | Val::VecP(p)
+            | Val::Fun(p)
+            | Val::Reg(p)
+            | Val::Dat(p)
+            | Val::Sock(p) => self
+                .cx
+                .builder
+                .build_is_not_null(p, "objtrue")
+                .expect("isnull"),
             Val::Str(_) | Val::Any(_) => {
                 let p = match v {
                     Val::Any(p) => p,
@@ -4291,6 +4360,24 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                         .into_pointer_value(),
                 )
             }
+            Ty::Socket => {
+                let f = cx.runtime_fn(
+                    "vs_any_to_socket",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "skv")
+                    .expect("call");
+                Val::Sock(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
             Ty::Date => {
                 let f = cx.runtime_fn("vs_any_to_date", Some(cx.ptr().into()), &[cx.ptr().into()]);
                 let call = self
@@ -4553,6 +4640,112 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             self.cx.builder.build_store(slot, v).expect("store");
         }
         arr
+    }
+
+    /// Socket instance ops (mir::SocketOp; runtime socket.rs).
+    fn call_socket(&mut self, op: mir::SocketOp, operands: &[mir::Expr]) -> Val<'ctx> {
+        use mir::SocketOp as O;
+        let cx = self.cx;
+        let i32t = cx.context.i32_type();
+        let recv = match self.expr(&operands[0]) {
+            Val::Sock(p) => p,
+            _ => unreachable!("Socket receiver"),
+        };
+        match op {
+            O::Write => {
+                let data = self.str_arg(&operands[1]);
+                let f = cx.runtime_fn("vs_socket_write", None, &[cx.ptr().into(), cx.ptr().into()]);
+                self.cx
+                    .builder
+                    .build_call(f, &[recv.into(), data.into()], "")
+                    .expect("call");
+                Val::Void
+            }
+            O::ReadLine => {
+                let f = cx.runtime_fn(
+                    "vs_socket_read_line",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[recv.into()], "line")
+                    .expect("call");
+                Val::Str(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            O::Read => {
+                let max = match self.expr(&operands[1]) {
+                    Val::Int(i) | Val::UInt(i) => i,
+                    _ => unreachable!("read max"),
+                };
+                let f = cx.runtime_fn(
+                    "vs_socket_read",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), i32t.into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[recv.into(), max.into()], "chunk")
+                    .expect("call");
+                Val::Str(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            O::Close => {
+                let f = cx.runtime_fn("vs_socket_close", None, &[cx.ptr().into()]);
+                self.cx
+                    .builder
+                    .build_call(f, &[recv.into()], "")
+                    .expect("call");
+                Val::Void
+            }
+            O::Accept => {
+                let f = cx.runtime_fn(
+                    "vs_socket_accept",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[recv.into()], "client")
+                    .expect("call");
+                Val::Sock(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            O::LocalPort => {
+                let f = cx.runtime_fn(
+                    "vs_socket_local_port",
+                    Some(i32t.into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[recv.into()], "port")
+                    .expect("call");
+                Val::Int(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_int_value(),
+                )
+            }
+        }
     }
 
     /// Date instance ops (mir::DateFn; runtime date.rs).
@@ -5615,6 +5808,51 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 self.cx.builder.position_at_end(dead);
                 Val::Void
             }
+            N::SocketConnect => {
+                let host = self.str_arg(&args[0]);
+                let port = match self.expr(&args[1]) {
+                    Val::Int(i) | Val::UInt(i) => i,
+                    _ => unreachable!("port"),
+                };
+                let f = cx.runtime_fn(
+                    "vs_socket_connect",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.context.i32_type().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[host.into(), port.into()], "sock")
+                    .expect("call");
+                Val::Sock(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            N::ServerSocketBind => {
+                let port = match self.expr(&args[0]) {
+                    Val::Int(i) | Val::UInt(i) => i,
+                    _ => unreachable!("port"),
+                };
+                let f = cx.runtime_fn(
+                    "vs_socket_bind",
+                    Some(cx.ptr().into()),
+                    &[cx.context.i32_type().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[port.into()], "srv")
+                    .expect("call");
+                Val::Sock(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
             N::DateUTC => {
                 let arr = self.stage_f64_args(args, "utcparts");
                 let i32t = cx.context.i32_type();
@@ -6126,6 +6364,7 @@ fn ty_tag(ty: Ty) -> u32 {
         Ty::String => tag::STRING,
         Ty::RegExp => tag::REGEXP,
         Ty::Date => tag::DATE,
+        Ty::Socket => tag::SOCKET,
         // Class/interface/sequence targets dispatch through dedicated
         // runtime calls, never through core tags.
         Ty::Any

@@ -1,0 +1,10 @@
+var port:int = int(System.args()[0]);
+var s:Socket = Socket.connect("127.0.0.1", port);
+s.write("hello sockets\n");
+trace("got: " + s.readLine());
+s.write("second line\n");
+trace("got: " + s.readLine());
+s.write("quit\n");
+trace("got: " + s.readLine());
+s.close();
+trace("client done");

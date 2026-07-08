@@ -142,6 +142,8 @@ pub fn type_name(name: &str) -> Option<Ty> {
         "Function" => Ty::Function,
         "RegExp" => Ty::RegExp,
         "Date" => Ty::Date,
+        "Socket" => Ty::Socket,
+        "ServerSocket" => Ty::ServerSocket,
         _ => return None,
     })
 }
@@ -184,6 +186,8 @@ pub enum NativeFn {
     JsonParse,
     DateNow,
     DateUTC,
+    SocketConnect,
+    ServerSocketBind,
 }
 
 /// One native static method.
@@ -384,12 +388,24 @@ pub fn native_methods(class: &str) -> Option<&'static [NativeMethod]> {
             sig: nsig(&[N, N, N, N, N, N, N], 2, false, N),
         },
     ];
+    static SOCKET: &[NativeMethod] = &[NativeMethod {
+        name: "connect",
+        func: SocketConnect,
+        sig: nsig(&[Ty::String, Ty::Int], 2, false, Ty::Socket),
+    }];
+    static SERVER_SOCKET: &[NativeMethod] = &[NativeMethod {
+        name: "bind",
+        func: ServerSocketBind,
+        sig: nsig(&[Ty::Int], 1, false, Ty::ServerSocket),
+    }];
     Some(match class {
         "Math" => MATH,
         "System" => SYSTEM,
         "File" => FILE,
         "JSON" => JSON_M,
         "Date" => DATE,
+        "Socket" => SOCKET,
+        "ServerSocket" => SERVER_SOCKET,
         _ => return None,
     })
 }
@@ -438,7 +454,10 @@ pub fn native_consts(class: &str) -> Option<&'static [NativeConst]> {
 
 /// Whether a name is a native static class (unshadowed).
 pub fn is_native_class(name: &str) -> bool {
-    matches!(name, "Math" | "System" | "File" | "JSON" | "Date")
+    matches!(
+        name,
+        "Math" | "System" | "File" | "JSON" | "Date" | "Socket" | "ServerSocket"
+    )
 }
 
 /// A member (property or method) of a builtin type.
@@ -516,6 +535,14 @@ pub fn member(receiver: Ty, name: &str) -> Option<Member> {
         (Ty::Date, "toString" | "toDateString" | "toTimeString" | "toUTCString") => {
             Method(sig(&[], 0, Ty::String))
         }
+
+        // Sockets (SPECS §6 I/O). readLine/read return null at EOF.
+        (Ty::Socket, "write") => Method(sig(&[Ty::String], 1, Ty::Void)),
+        (Ty::Socket, "readLine") => Method(sig(&[], 0, Ty::String)),
+        (Ty::Socket, "read") => Method(sig(&[Ty::Int], 0, Ty::String)),
+        (Ty::Socket | Ty::ServerSocket, "close") => Method(sig(&[], 0, Ty::Void)),
+        (Ty::Socket | Ty::ServerSocket, "localPort") => Property(Ty::Int),
+        (Ty::ServerSocket, "accept") => Method(sig(&[], 0, Ty::Socket)),
         // String.as:182,194
         (Ty::String, "toLowerCase") => Method(sig(&[], 0, Ty::String)),
         (Ty::String, "toUpperCase") => Method(sig(&[], 0, Ty::String)),

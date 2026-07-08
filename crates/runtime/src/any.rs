@@ -27,6 +27,8 @@ pub enum Tag {
     RegExp = 11,
     /// Date; payload = VsDate pointer.
     Date = 12,
+    /// Socket / ServerSocket; payload = VsSocket pointer.
+    Socket = 13,
 }
 
 /// A boxed dynamic value (`*`). 16 bytes, passed/returned by value.
@@ -180,6 +182,7 @@ impl VsAny {
             10 => Tag::Function,
             11 => Tag::RegExp,
             12 => Tag::Date,
+            13 => Tag::Socket,
             _ => Tag::Undefined,
         }
     }

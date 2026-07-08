@@ -47,6 +47,9 @@ pub enum Ty {
     RegExp,
     /// Date pointer (ES3 §15.9; one time value).
     Date,
+    /// Socket / ServerSocket pointer (SPECS §6 I/O; one runtime type,
+    /// sema keeps the two nominal types apart).
+    Socket,
 }
 
 /// Index of a function in [`Program::functions`].
@@ -283,6 +286,18 @@ pub enum DateFn {
     Format(u32),
 }
 
+/// Socket instance operations (SPECS §6 I/O; runtime socket.rs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum SocketOp {
+    Write,
+    ReadLine,
+    Read,
+    Close,
+    Accept,
+    LocalPort,
+}
+
 /// String instance methods with runtime implementations (SPECS §6, P3 set;
 /// signatures per avmplus core/String.as).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -382,6 +397,8 @@ pub enum Conv {
     AnyToRegExp,
     /// Checked coercion to Date.
     AnyToDate,
+    /// Checked coercion to Socket/ServerSocket.
+    AnyToSocket,
 }
 
 /// Binary operators (operand types already made uniform by sema).
@@ -582,4 +599,6 @@ pub enum ExprKind {
     NewDate(Vec<Expr>),
     /// Date instance operation; receiver is operand 0.
     CallDate(DateFn, Vec<Expr>),
+    /// Socket instance operation; receiver is operand 0.
+    CallSocket(SocketOp, Vec<Expr>),
 }

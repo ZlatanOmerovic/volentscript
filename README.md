@@ -141,5 +141,14 @@ the showcase — runs byte-identical on both Linux architectures
 (validated in Debian containers). Opt-in e2e:
 `cargo test -p e2e --test golden cross_linux -- --ignored`.
 
-Remaining (backlog): runtime Namespace values, sockets, Cranelift
-backend. Phase plan: SPECS §11.
+P15 added TCP sockets (the last SPECS §6 I/O item): blocking,
+Redtamarin-shaped — `Socket.connect(host, port)`, instance
+`write`/`readLine`/`read`/`close`, `ServerSocket.bind(port)` (0 =
+ephemeral) with `accept()` and `localPort`. Reads return null at EOF
+(null-safety enforced); failures throw catchable Errors; unclosed
+sockets close on GC sweep. `&&`/`||` conditions now propagate null
+narrowing (`while (line != null && line != "quit")`). Verified with a
+native echo server/client pair over loopback on macOS and Linux.
+
+Remaining (backlog): runtime Namespace values, Cranelift backend.
+Phase plan: SPECS §11.

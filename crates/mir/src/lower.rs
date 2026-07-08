@@ -219,6 +219,7 @@ impl Lowerer<'_> {
             sema::Ty::Function => Ty::Function,
             sema::Ty::RegExp => Ty::RegExp,
             sema::Ty::Date => Ty::Date,
+            sema::Ty::Socket | sema::Ty::ServerSocket => Ty::Socket,
             sema::Ty::Error => {
                 // Sema fails the build before lowering on real errors.
                 unreachable!("error type survived sema")
@@ -590,6 +591,9 @@ impl Lowerer<'_> {
             E::Member(receiver, name) => {
                 if receiver.ty == sema::Ty::String && name == "length" {
                     ExprKind::StrLen(Box::new(self.expr(receiver)))
+                } else if matches!(receiver.ty, sema::Ty::Socket | sema::Ty::ServerSocket) {
+                    // Only `localPort` exists (sema member table).
+                    ExprKind::CallSocket(SocketOp::LocalPort, vec![self.expr(receiver)])
                 } else if receiver.ty == sema::Ty::RegExp {
                     let op = match name.as_str() {
                         "source" => RegexOp::Source,
@@ -713,6 +717,7 @@ impl Lowerer<'_> {
                         sema::Ty::Vector(i) => Conv::AnyToVector(i),
                         sema::Ty::RegExp => Conv::AnyToRegExp,
                         sema::Ty::Date => Conv::AnyToDate,
+                        sema::Ty::Socket | sema::Ty::ServerSocket => Conv::AnyToSocket,
                         _ => {
                             return self.gated_expr(
                                 span,
@@ -1353,6 +1358,33 @@ impl Lowerer<'_> {
                     kind: ExprKind::CallRegex(op, operands),
                 }
             }
+            sema::Ty::Socket | sema::Ty::ServerSocket => {
+                let op = match name {
+                    "write" => SocketOp::Write,
+                    "readLine" => SocketOp::ReadLine,
+                    "read" => {
+                        // Default chunk size (SPECS §6 read(max = 65536)).
+                        if lowered.is_empty() {
+                            lowered.push(Expr {
+                                ty: Ty::Int,
+                                span,
+                                kind: ExprKind::Int(65536),
+                            });
+                        }
+                        SocketOp::Read
+                    }
+                    "close" => SocketOp::Close,
+                    "accept" => SocketOp::Accept,
+                    other => unreachable!("sema admitted Socket.{other}()"),
+                };
+                let mut operands = vec![self.expr(receiver)];
+                operands.append(&mut lowered);
+                Expr {
+                    ty,
+                    span,
+                    kind: ExprKind::CallSocket(op, operands),
+                }
+            }
             sema::Ty::Date => {
                 // Index maps per runtime date.rs (avmplus getDateProperty
                 // ordering).
@@ -1476,6 +1508,7 @@ fn coerce_any_to(e: Expr, ty: Ty, span: Span) -> Expr {
         Ty::Vector(i) => Conv::AnyToVector(i),
         Ty::RegExp => Conv::AnyToRegExp,
         Ty::Date => Conv::AnyToDate,
+        Ty::Socket => Conv::AnyToSocket,
         Ty::Function | Ty::Void => return e,
     };
     Expr {

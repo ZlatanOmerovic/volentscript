@@ -249,9 +249,11 @@ Phase tags: **P3** = needed for first runnable binary, **P4** = classes/OOP,
   custom user `Error` subclasses.
 - **`Function`** (P4): `.length`, `.call`, `.apply`.
 - **I/O (non-Flash, new):** minimal CLI runtime — `print`/`trace` to stdout,
-  process args, exit code, env, file read/write, sockets. This is the
-  Redtamarin-shaped surface that makes it a *usable* language. Spec the API in a
-  later doc; **P7+**. Do not model it on `flash.*`.
+  process args, exit code, env, file read/write (P7), sockets (P15:
+  blocking TCP — `Socket.connect`, `write`/`readLine`/`read`/`close`,
+  `ServerSocket.bind`/`accept`/`localPort`; reads null at EOF, errors
+  throw). This is the Redtamarin-shaped surface that makes it a *usable*
+  language. Do not model it on `flash.*`.
 
 ---
 

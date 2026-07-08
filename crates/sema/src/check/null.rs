@@ -63,6 +63,8 @@ impl<'a> Checker<'a> {
             TExprKind::CallMethod(recv, name, _) => {
                 (recv.ty == Ty::RegExp && name == "exec")
                     || (recv.ty == Ty::String && name == "match")
+                    // Socket reads return null at EOF (SPECS §6).
+                    || (recv.ty == Ty::Socket && (name == "readLine" || name == "read"))
             }
             TExprKind::RegExp(..) | TExprKind::NewRegExp(_) | TExprKind::NewDate(_) => false,
             TExprKind::LocalGet(id) => {
@@ -201,6 +203,24 @@ impl<'a> Checker<'a> {
         let mut when_true = Vec::new();
         let mut when_false = Vec::new();
         match &cond.kind {
+            // `a && b` proves both sides' when-true facts when true;
+            // `a || b` proves both sides' when-false facts when false
+            // (short-circuit narrowing, SPECS §4.1).
+            TExprKind::Logical(op, l, r) => {
+                let (lt, lf) = Self::narrowing_of(l);
+                let (rt, rf) = Self::narrowing_of(r);
+                match op {
+                    BinaryOp::LogAnd => {
+                        when_true.extend(lt);
+                        when_true.extend(rt);
+                    }
+                    BinaryOp::LogOr => {
+                        when_false.extend(lf);
+                        when_false.extend(rf);
+                    }
+                    _ => {}
+                }
+            }
             // if (x) — truthy implies non-null.
             TExprKind::Coerce(Coercion::ToBoolean, v) => {
                 if let Some(id) = local_of(v) {
