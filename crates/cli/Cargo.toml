@@ -1,16 +1,15 @@
-# The language name is a placeholder (SPECS §12). It appears as a literal only
-# here (crate/binary name, help strings) and in the README — rename in those
-# places only.
+# The language name appears as a literal only here (crate/binary name, help
+# strings), in the README, and in the SPECS.md header (SPECS §12).
 [package]
-name = "asr"
+name = "vigorscript"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "AS3R compiler CLI"
+description = "VigorScript compiler CLI"
 
 [[bin]]
-name = "asr"
+name = "vigorscript"
 path = "src/main.rs"
 
 [dependencies]

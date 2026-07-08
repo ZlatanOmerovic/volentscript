@@ -1,0 +1,95 @@
+error[E0302]: cannot implicitly convert `String` to `int`
+  --> errors.as:4:17
+   |
+ 4 | var wrong:int = "twelve";          // E0302 String -> int
+   |                 ^^^^^^^^
+error[E0302]: cannot implicitly convert `null` to `Number`
+  --> errors.as:5:20
+   |
+ 5 | var zilch:Number = null;           // E0302 null -> machine type
+   |                    ^^^^
+error[E0301]: unknown type `Thing`
+  --> errors.as:6:13
+   |
+ 6 | var mystery:Thing = 1;             // E0301 unknown type
+   |             ^^^^^
+error[E0301]: cannot find `missing` in this scope
+  --> errors.as:7:7
+   |
+ 7 | trace(missing);                    // E0301 unresolved name
+   |       ^^^^^^^
+error[E0306]: value of type `int` is not callable
+  --> errors.as:9:1
+   |
+ 9 | five();                            // E0306 not callable
+   | ^^^^^^
+error[E0303]: `parseInt` takes at most 2 argument(s), got 3
+   --> errors.as:10:1
+    |
+ 10 | parseInt("1", 10, 16);             // E0303 too many args
+    | ^^^^^^^^^^^^^^^^^^^^^
+error[E0304]: cannot assign to const `FROZEN`
+   --> errors.as:12:1
+    |
+ 12 | FROZEN = 2;                        // E0304 assign to const
+    | ^^^^^^^^^^
+error[E0305]: `twice` is already declared as `int` in this function
+   --> errors.as:14:5
+    |
+ 14 | var twice:String = "again";        // E0305 conflicting redeclaration
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+error[E0302]: cannot implicitly convert `String` to `int`
+   --> errors.as:14:20
+    |
+ 14 | var twice:String = "again";        // E0305 conflicting redeclaration
+    |                    ^^^^^^^
+error[E0307]: no property `missing` on sealed type `String`
+   --> errors.as:15:1
+    |
+ 15 | "hello".missing;                   // E0307 unknown property on sealed String
+    | ^^^^^^^^^^^^^^^
+error[E0307]: cannot write property `length` on sealed type `String`
+   --> errors.as:16:1
+    |
+ 16 | "hello".length = 9;                // E0307 write to read-only member
+    | ^^^^^^^^^^^^^^^^^^
+error[E0302]: cannot implicitly convert `String` to `int`
+   --> errors.as:19:10
+    |
+ 19 | needsInt("nope");                  // E0302 in argument position
+    |          ^^^^^^
+error[E0308]: function `broken` must return `String` on all paths
+   --> errors.as:21:1
+    |
+ 21 | function broken(flag:Boolean):String {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+error[E0309]: a void expression has no value
+   --> errors.as:27:13
+    |
+ 27 | var v:int = voidness();            // E0309 void as value
+    |             ^^^^^^^^^^
+error[E0310]: `break` outside of a loop or switch
+   --> errors.as:29:1
+    |
+ 29 | break;                             // E0310 outside loop
+    | ^^^^^
+error[E0310]: `continue missing2`: no enclosing loop is labeled `missing2`
+   --> errors.as:31:1
+    |
+ 31 | continue missing2;                 // E0310 label not in scope (loop ended)
+    | ^^^^^^^^
+error[E0311]: the right side of `is`/`as` must be a type (core types only until Phase 4)
+   --> errors.as:33:28
+    |
+ 33 | var isIt:Boolean = five is missing3;   // E0311 not a type
+    |                            ^^^^^^^^
+warning: `instanceof` is deprecated; use `is`
+   --> errors.as:34:19
+    |
+ 34 | var old:Boolean = five instanceof int; // warning: deprecated
+    |                   ^^^^^^^^^^^^^^^^^^^
+error[E0001]: using a type as a value requires the Class type — Phase 4
+   --> errors.as:34:35
+    |
+ 34 | var old:Boolean = five instanceof int; // warning: deprecated
+    |                                   ^^^

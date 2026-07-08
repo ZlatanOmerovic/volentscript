@@ -1,5 +1,5 @@
 //! Compact, stable tree dump of the AST — the snapshot format for golden
-//! tests (SPECS §10) and the output of `asr parse`.
+//! tests (SPECS §10) and the output of the CLI `parse` subcommand.
 
 use std::fmt::Write as _;
 

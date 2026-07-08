@@ -1,0 +1,239 @@
+fn #0 <script> : void
+  local %0 var count : int
+  local %1 var total : Number
+  local %2 var ratio : Number
+  local %3 var bits : int
+  local %4 var high : uint
+  local %5 var label : String
+  local %6 var anything : *
+  local %7 var narrowed : int
+  local %8 var flag : Boolean
+  local %9 var maybe : String
+  local %10 const LIMIT : int
+  local %11 var e : String
+  local %12 var e : *
+  Init %0
+    [int] Int 0
+  Init %1
+    [Number] Coerce ToNumber
+      [int] LocalGet %0
+  Init %2
+    [Number] Binary Div
+      [Number] Coerce ToNumber
+        [int] LocalGet %0
+      [Number] Coerce ToNumber
+        [int] Int 3
+  Init %3
+    [int] Binary BitAnd
+      [int] LocalGet %0
+      [int] Int 255
+  Init %4
+    [uint] Binary Ushr
+      [uint] Coerce ToUInt
+        [int] LocalGet %0
+      [int] Int 1
+  Init %5
+    [String] Binary Add
+      [String] Str "n = "
+      [String] Coerce ToString
+        [int] LocalGet %0
+  Init %6
+    [*] Coerce ToAny
+      [String] LocalGet %5
+  Init %7
+    [int] Coerce ToInt
+      [*] LocalGet %6
+  Init %8
+    [Boolean] Is int
+      [*] LocalGet %6
+  Init %9
+    [String] As String
+      [*] LocalGet %6
+  Init %10
+    [int] Int 100
+  ExprStmt
+    [int] LocalSet %0
+      [int] Logical LogAnd
+        [int] LocalGet %0
+        [int] LocalGet %10
+  ExprStmt
+    [int] LocalSet %0
+      [int] Coerce ToInt
+        [Number] Logical LogOr
+          [Number] Coerce ToNumber
+            [int] LocalGet %0
+          [Number] CallBuiltin parseInt
+            [String] Str "42"
+            [int] Int 10
+  ExprStmt
+    [Number] LocalSet %1
+      [Number] CallFn #1
+        [Number] Coerce ToNumber
+          [int] LocalGet %0
+  ExprStmt
+    [void] CallFn #2
+      [String] CallFn #4
+        [int] LocalGet %0
+  ExprStmt
+    [void] CallBuiltin trace
+      [*] Coerce ToAny
+        [Number] CallFn #5
+          [*] Coerce ToAny
+            [int] Int 1
+          [*] Coerce ToAny
+            [Number] Number 2.5
+          [*] Coerce ToAny
+            [int] LocalGet %0
+      [*] Coerce ToAny
+        [String] CallMethod .toFixed
+          [Number] CallFn #3
+            [Boolean] Bool true
+            [int] Int 1
+            [Number] Number 2.5
+          [*] Coerce ToAny
+            [int] Int 2
+  Labeled outer
+    While
+      cond:
+        [Boolean] Binary Lt
+          [Number] Coerce ToNumber
+            [int] LocalGet %0
+          [Number] Coerce ToNumber
+            [int] LocalGet %10
+      body:
+        Block
+          ExprStmt
+            [int] Postfix Inc
+              [int] LocalGet %0
+          If
+            cond:
+              [Boolean] Binary Eq
+                [Number] Binary Rem
+                  [Number] Coerce ToNumber
+                    [int] LocalGet %0
+                  [Number] Coerce ToNumber
+                    [int] Int 7
+                [int] Int 0
+            then:
+              Continue outer
+          If
+            cond:
+              [Boolean] Binary Gt
+                [Number] Coerce ToNumber
+                  [int] LocalGet %0
+                [Number] Coerce ToNumber
+                  [int] Int 50
+            then:
+              Break outer
+  Try
+    block:
+      Throw
+        [*] Coerce ToAny
+          [String] Binary Add
+            [String] Str "level "
+            [String] Coerce ToString
+              [int] LocalGet %0
+    catch %11:
+      ExprStmt
+        [void] CallBuiltin trace
+          [*] Coerce ToAny
+            [String] Str "caught:"
+          [*] Coerce ToAny
+            [String] LocalGet %11
+    catch %12:
+      ExprStmt
+        [void] CallBuiltin trace
+          [*] Coerce ToAny
+            [String] Unary Typeof
+              [*] LocalGet %12
+    finally:
+      ExprStmt
+        [int] LocalSet %0
+          [int] Int 0
+fn #1 scale : Number
+  local %0 param value : Number
+  local %1 param factor : Number
+    default:
+      [Number] Coerce ToNumber
+        [int] Int 2
+  Return
+    [Number] Binary Mul
+      [Number] LocalGet %0
+      [Number] LocalGet %1
+fn #2 shout : void
+  local %0 param message : String
+  ExprStmt
+    [void] CallBuiltin trace
+      [*] Coerce ToAny
+        [String] CallMethod .toUpperCase
+          [String] LocalGet %0
+      [*] Coerce ToAny
+        [int] Member .length
+          [String] LocalGet %0
+fn #3 pick : Number
+  local %0 param useFirst : Boolean
+  local %1 param a : int
+  local %2 param b : Number
+  Return
+    [Number] Conditional
+      [Boolean] LocalGet %0
+      [Number] Coerce ToNumber
+        [int] LocalGet %1
+      [Number] LocalGet %2
+fn #4 classify : String
+  local %0 param n : int
+  If
+    cond:
+      [Boolean] Binary Lt
+        [Number] Coerce ToNumber
+          [int] LocalGet %0
+        [Number] Coerce ToNumber
+          [int] Int 0
+    then:
+      Block
+        Return
+          [String] Str "negative"
+    else:
+      If
+        cond:
+          [Boolean] Binary Eq
+            [int] LocalGet %0
+            [int] Int 0
+        then:
+          Block
+            Return
+              [String] Str "zero"
+  Switch
+    scrutinee:
+      [Number] Binary Rem
+        [Number] Coerce ToNumber
+          [int] LocalGet %0
+        [Number] Coerce ToNumber
+          [int] Int 2
+    Case
+      test:
+        [int] Int 0
+      Return
+        [String] Str "even"
+    Default
+      Return
+        [String] Str "odd"
+fn #5 sum : Number
+  local %0 rest-param values : *
+  local %1 var acc : Number
+  local %2 var v : Number
+  Init %1
+    [Number] Coerce ToNumber
+      [int] Int 0
+  ForEachIn target=%2
+    object:
+      [*] LocalGet %0
+    body:
+      Block
+        ExprStmt
+          [Number] LocalSet %1
+            [Number] Binary Add
+              [Number] LocalGet %1
+              [Number] LocalGet %2
+  Return
+    [Number] LocalGet %1

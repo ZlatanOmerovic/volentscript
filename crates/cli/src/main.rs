@@ -1,4 +1,4 @@
-//! `asr` — the AS3R compiler command-line interface.
+//! `vigorscript` — the VigorScript compiler command-line interface.
 
 #![forbid(unsafe_code)]
 
@@ -9,9 +9,9 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "asr",
+    name = "vigorscript",
     version,
-    about = "AS3R: ActionScript 3, revived — native AOT compiler"
+    about = "VigorScript: ActionScript 3, revived — native AOT compiler"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -38,6 +38,14 @@ enum Command {
         /// Entry .as source file
         input: PathBuf,
     },
+    /// Type-check a .as file without compiling
+    Check {
+        /// Entry .as source file
+        input: PathBuf,
+        /// Also print the typed AST
+        #[arg(long)]
+        dump: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -49,6 +57,22 @@ fn main() -> ExitCode {
             return match driver::parse_dump(&input) {
                 Ok(dump) => {
                     print!("{dump}");
+                    ExitCode::SUCCESS
+                }
+                Err(errors) => report(errors),
+            };
+        }
+        Command::Check { input, dump } => {
+            return match driver::check(&input) {
+                Ok(result) => {
+                    for w in &result.warnings {
+                        eprintln!("{w}");
+                    }
+                    if dump {
+                        print!("{}", result.dump);
+                    } else {
+                        println!("ok");
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(errors) => report(errors),

@@ -1,8 +1,8 @@
-# AS3R (working name)
+# VigorScript
 
 A native, ahead-of-time-compiled revival of ActionScript 3 / ECMAScript 4,
-decoupled from Flash. You write `.as` source; the `asr` compiler produces a
-native executable. Written in Rust; LLVM backend via `inkwell`.
+decoupled from Flash. You write `.as` source; the `vigorscript` compiler
+produces a native executable. Written in Rust; LLVM backend via `inkwell`.
 
 - **`SPECS.md`** — the language definition (what to build).
 - **`CLAUDE.md`** — process and phase gates (how it gets built).
@@ -10,8 +10,8 @@ native executable. Written in Rust; LLVM backend via `inkwell`.
   ECMA-262 3rd ed., AS3 guides). Git-ignored; `docs/SOURCES.md` records the
   set and `links.md` the origins.
 
-> The name **AS3R** / **`asr`** is a placeholder. It appears only in the `cli`
-> crate, this README, and the SPECS header (SPECS §12).
+> The name **VigorScript** appears only in the `cli` crate, this README, and
+> the SPECS header (SPECS §12).
 
 ## Toolchain (pinned)
 
@@ -31,7 +31,7 @@ and the CI check in the same change.
 brew install llvm        # keg-only; major must be 22
 cargo build --workspace
 cargo test --workspace
-cargo run -p asr -- --version
+cargo run -p vigorscript -- --version
 ```
 
 `.cargo/config.toml` sets `LLVM_SYS_221_PREFIX=/opt/homebrew/opt/llvm`
@@ -52,7 +52,7 @@ crates/
   codegen/      Backend trait + LLVM (inkwell) impl — only crate touching inkwell
   runtime/      native runtime static lib (GC, dispatch, builtins, entry shim)
   driver/       parse -> check -> lower -> codegen -> link orchestration
-  cli/          the `asr` binary
+  cli/          the `vigorscript` binary
 tests/          end-to-end golden tests (.as program + expected stdout/exit)
 ```
 
@@ -62,6 +62,8 @@ and `runtime`.
 
 ## Status
 
-Phase 0 (scaffold) done: workspace, crate stubs, CLI skeleton, CI, LLVM
-linkage smoke-tested. `asr build`/`asr run` intentionally report
-`error[E0001]` until later phases land. Phase plan: SPECS §11.
+Phases 0–2 done: scaffold + CI (P0); lexer + parser with AST snapshots and
+caret diagnostics (P1); semantic analysis — resolution, nominal type
+checking, coercion insertion, typed AST (P2). `vigorscript parse` dumps the
+AST, `vigorscript check [--dump]` type-checks; `build`/`run` report
+`error[E0001]` until codegen lands in Phase 3. Phase plan: SPECS §11.

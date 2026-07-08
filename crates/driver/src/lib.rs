@@ -45,21 +45,68 @@ fn load(input: &Path) -> Result<(SourceMap, SourceId), Errors> {
     Ok((sources, file))
 }
 
-/// Parses one file and returns its AST dump (`asr parse`, the P1 milestone
-/// surface).
+/// Parses one file and returns its AST dump (the CLI `parse` subcommand,
+/// the P1 milestone surface).
 pub fn parse_dump(input: &Path) -> Result<String, Errors> {
     let (sources, file) = load(input)?;
     let program = parser::parse(&sources, file).map_err(|d| Errors::new(d, &sources))?;
     Ok(ast::dump(&program))
 }
 
+/// Result of `check`: warnings (rendered) plus the typed-AST dump.
+#[derive(Debug)]
+pub struct CheckReport {
+    /// Rendered warnings (never errors — those go through [`Errors`]).
+    pub warnings: Vec<String>,
+    /// Typed-AST dump (`sema::dump`).
+    pub dump: String,
+}
+
+fn check_program(
+    sources: &SourceMap,
+    file: SourceId,
+) -> Result<(sema::TProgram, Vec<String>), Errors> {
+    let program = parser::parse(sources, file).map_err(|d| Errors::new(d, sources))?;
+    let outcome = sema::check(&program);
+    match outcome.program {
+        Some(typed) => {
+            let warnings = outcome
+                .diagnostics
+                .iter()
+                .map(|d| d.render_full(sources))
+                .collect();
+            Ok((typed, warnings))
+        }
+        None => Err(Errors::new(outcome.diagnostics, sources)),
+    }
+}
+
+/// Parses and type-checks one file (`check` subcommand — the P2 milestone
+/// surface).
+pub fn check(input: &Path) -> Result<CheckReport, Errors> {
+    let (sources, file) = load(input)?;
+    let (typed, warnings) = check_program(&sources, file)?;
+    Ok(CheckReport {
+        warnings,
+        dump: sema::dump(&typed),
+    })
+}
+
 /// Compiles one program to a native executable.
 ///
-/// P1: parses for real, then reports that semantic analysis is Phase 2.
+/// P2: parses and type-checks for real, then reports that code generation
+/// is Phase 3.
 pub fn build(opts: &BuildOptions) -> Result<PathBuf, Errors> {
     let (sources, file) = load(&opts.input)?;
-    let program = parser::parse(&sources, file).map_err(|d| Errors::new(d, &sources))?;
-    let typed = sema::check(program).map_err(|d| Errors::new(d, &sources))?;
+    let (typed, _warnings) = check_program(&sources, file)?;
     let _ = typed; // lower → codegen → link land in P3
-    unreachable!("sema stub always errors before P2");
+    Err(Errors {
+        rendered: vec![
+            diagnostics::Diagnostic::error(
+                diagnostics::ErrorCode::NOT_IMPLEMENTED,
+                "code generation is not implemented until Phase 3",
+            )
+            .render(),
+        ],
+    })
 }

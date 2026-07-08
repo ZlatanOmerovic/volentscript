@@ -59,15 +59,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
-name = "asr"
-version = "0.0.1"
-dependencies = [
- "clap",
- "diagnostics",
- "driver",
-]
-
-[[package]]
 name = "ast"
 version = "0.0.1"
 dependencies = [
@@ -325,6 +316,8 @@ version = "0.0.1"
 dependencies = [
  "ast",
  "diagnostics",
+ "expect-test",
+ "parser",
  "span",
 ]
 
@@ -392,6 +385,15 @@ name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
+
+[[package]]
+name = "vigorscript"
+version = "0.0.1"
+dependencies = [
+ "clap",
+ "diagnostics",
+ "driver",
+]
 
 [[package]]
 name = "windows-link"

@@ -11,5 +11,9 @@ span.workspace = true
 diagnostics.workspace = true
 ast.workspace = true
 
+[dev-dependencies]
+parser.workspace = true
+expect-test.workspace = true
+
 [lints]
 workspace = true

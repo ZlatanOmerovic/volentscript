@@ -40,6 +40,30 @@ impl ErrorCode {
     /// Ill-formed numeric literal.
     pub const MALFORMED_NUMBER: ErrorCode = ErrorCode(104);
 
+    // E03xx — semantic errors.
+    /// Name not found in any scope.
+    pub const UNRESOLVED_NAME: ErrorCode = ErrorCode(301);
+    /// Implicit conversion between the two types is not allowed.
+    pub const INCOMPATIBLE_TYPES: ErrorCode = ErrorCode(302);
+    /// Too few / too many call arguments.
+    pub const WRONG_ARG_COUNT: ErrorCode = ErrorCode(303);
+    /// Write to a `const` binding.
+    pub const ASSIGN_TO_CONST: ErrorCode = ErrorCode(304);
+    /// Redeclaration with a different type.
+    pub const CONFLICTING_DECL: ErrorCode = ErrorCode(305);
+    /// Call of a non-function value.
+    pub const NOT_CALLABLE: ErrorCode = ErrorCode(306);
+    /// Unknown or read-only member on a sealed type (SPECS §3.2).
+    pub const UNKNOWN_PROPERTY: ErrorCode = ErrorCode(307);
+    /// Function with a declared return type can complete without returning.
+    pub const MISSING_RETURN: ErrorCode = ErrorCode(308);
+    /// `void` used where a value is required.
+    pub const VOID_VALUE: ErrorCode = ErrorCode(309);
+    /// `break`/`continue` without a matching loop/label.
+    pub const BAD_JUMP: ErrorCode = ErrorCode(310);
+    /// `is`/`as` right side does not name a type.
+    pub const NOT_A_TYPE: ErrorCode = ErrorCode(311);
+
     // E02xx — syntax errors.
     /// Token cannot appear here.
     pub const UNEXPECTED_TOKEN: ErrorCode = ErrorCode(201);
@@ -72,6 +96,16 @@ impl Diagnostic {
         Self {
             severity: Severity::Error,
             code: Some(code),
+            message: message.into(),
+            span: None,
+        }
+    }
+
+    /// Creates a warning diagnostic (does not fail the build).
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self {
+            severity: Severity::Warning,
+            code: None,
             message: message.into(),
             span: None,
         }

@@ -1,0 +1,64 @@
+//! The P2 core type universe.
+//!
+//! Classes, interfaces, and generics widen this in P4/P5; the enum becomes an
+//! interned `TypeId` table then. Keeping it a plain enum now avoids premature
+//! machinery while the set is closed.
+
+use std::fmt;
+
+/// A semantic type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ty {
+    /// 32-bit signed integer (SPECS §3.3).
+    Int,
+    /// 32-bit unsigned integer.
+    UInt,
+    /// IEEE-754 double.
+    Number,
+    /// `true`/`false`.
+    Boolean,
+    /// Immutable UTF-16 string; a reference type (nullable in AS3).
+    String,
+    /// No value (function returns only).
+    Void,
+    /// `*` — the any type: dynamic escape hatch (SPECS §3.11).
+    Any,
+    /// The type of the `null` literal (bottom of reference types).
+    Null,
+    /// The AS3 `Function` type: callable, signature unchecked
+    /// (AS3's `Function` class carries no signature).
+    Function,
+    /// Produced after an error; compatible with everything to suppress
+    /// cascading diagnostics.
+    Error,
+}
+
+impl Ty {
+    /// int/uint/Number.
+    pub fn is_numeric(self) -> bool {
+        matches!(self, Ty::Int | Ty::UInt | Ty::Number)
+    }
+
+    /// Types whose storage is a reference and can hold `null` in AS3
+    /// (P5 null-safety narrows this; see SPECS §4.1).
+    pub fn is_reference(self) -> bool {
+        matches!(self, Ty::String | Ty::Function | Ty::Any | Ty::Null)
+    }
+}
+
+impl fmt::Display for Ty {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Ty::Int => "int",
+            Ty::UInt => "uint",
+            Ty::Number => "Number",
+            Ty::Boolean => "Boolean",
+            Ty::String => "String",
+            Ty::Void => "void",
+            Ty::Any => "*",
+            Ty::Null => "null",
+            Ty::Function => "Function",
+            Ty::Error => "<error>",
+        })
+    }
+}

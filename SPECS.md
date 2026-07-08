@@ -1,9 +1,9 @@
 # SPECS.md — Language Specification
 
-> **Working name:** `AS3R` (ActionScript, Revived). CLI tool: `asr`. Source
-> extension: `.as`. **The name is a placeholder** — it appears in exactly the
-> places listed in §12 so you can rename it with one find/replace pass. Do not
-> hard-code it anywhere else.
+> **Name:** `VigorScript`. CLI tool: `vigorscript`. Source extension: `.as`.
+> The name appears in exactly the places listed in §12. Do not hard-code it
+> anywhere else. (Former working name: `AS3R`/`asr` — renamed 2026-07-08;
+> note `asr` collides with macOS `/usr/bin/asr`, avoid reintroducing it.)
 
 This document defines the language, its type system, and the compiler pipeline.
 It is the source of truth for *what* to build. `CLAUDE.md` defines *how* to
