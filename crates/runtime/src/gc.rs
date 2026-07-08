@@ -294,8 +294,16 @@ pub fn collect() {
                 Kind::Vector => {
                     // SAFETY: block layout fixed by seq::new_vector.
                     let v = unsafe { &*(addr as *const crate::seq::VsVector) };
-                    for e in v.data.borrow().iter() {
-                        mark_any(&h, e, &mut work);
+                    // Numeric (unboxed) vectors are GC leaves — no references
+                    // to trace. Only boxed vectors carry `VsAny` elements.
+                    if v.kind == crate::seq::VEC_BOXED {
+                        // SAFETY: `data` holds `len` initialized `VsAny`s.
+                        let elems = unsafe {
+                            std::slice::from_raw_parts(v.data as *const VsAny, v.len as usize)
+                        };
+                        for e in elems {
+                            mark_any(&h, e, &mut work);
+                        }
                     }
                 }
                 Kind::PropMap => {

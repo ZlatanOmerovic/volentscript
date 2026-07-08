@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 export PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
 VS=../target/release/volentscript
-BENCHES=(fib nbody binarytrees mandelbrot strings)
+BENCHES=(fib nbody binarytrees mandelbrot strings spectralnorm)
 
 mkdir -p bin results
 echo "== building =="

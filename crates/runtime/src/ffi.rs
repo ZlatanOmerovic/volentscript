@@ -793,12 +793,13 @@ pub unsafe extern "C" fn vs_array_new(argc: u32, args: *const VsAny) -> *const V
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_vector_new(
     inst: u32,
+    kind: u32,
     argc: u32,
     args: *const VsAny,
 ) -> *const VsVector {
     // SAFETY: caller contract.
     let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
-    seq::new_vector(inst, items.to_vec())
+    seq::new_vector(inst, kind, items.to_vec())
 }
 
 /// # Safety
@@ -819,6 +820,17 @@ unsafe fn vec_ref<'x>(v: *const VsVector, what: &str) -> &'x VsVector {
     }
     // SAFETY: non-null vectors are live.
     unsafe { &*v }
+}
+
+/// # Safety
+/// `v` live; the caller holds no other reference to it (single-threaded).
+unsafe fn vec_mut<'x>(v: *const VsVector, what: &str) -> &'x mut VsVector {
+    if v.is_null() {
+        conv::type_error(&format!("null reference in {what}"));
+    }
+    // SAFETY: non-null vectors are live; VS is single-threaded so the
+    // exclusive borrow is sound for the duration of one runtime call.
+    unsafe { &mut *(v as *mut VsVector) }
 }
 
 /// `Array#length` / element count.
@@ -1080,24 +1092,22 @@ pub unsafe extern "C" fn vs_arr_sort(a: *const VsArray) -> *const VsArray {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_vec_len(v: *const VsVector) -> u32 {
     // SAFETY: caller contract.
-    unsafe { vec_ref(v, "Vector.length") }.data.borrow().len() as u32
+    unsafe { vec_ref(v, "Vector.length") }.len
 }
 
-/// Vector length set (extends with element-type zero boxed as undefined —
-/// codegen reads convert at access, so undefined converts to the default).
+/// Vector length set (extends with the element-kind zero value).
 ///
 /// # Safety
 /// Pointer null or live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_vec_set_len(v: *const VsVector, n: u32) {
     // SAFETY: caller contract.
-    unsafe { vec_ref(v, "Vector.length") }
-        .data
-        .borrow_mut()
-        .resize(n as usize, VsAny::UNDEFINED);
+    unsafe { vec_mut(v, "Vector.length") }.resize(n);
 }
 
-/// `vec[i]` read: out of range → RangeError (abort until P6).
+/// `vec[i]` read: out of range → RangeError. This is the slow path; for
+/// numeric kinds compiled code inlines the in-bounds load (P23) and only
+/// calls here to raise on an out-of-range index.
 ///
 /// # Safety
 /// Pointers live.
@@ -1105,30 +1115,27 @@ pub unsafe extern "C" fn vs_vec_set_len(v: *const VsVector, n: u32) {
 pub unsafe extern "C" fn vs_vec_get(v: *const VsVector, index: f64, out: *mut VsAny) {
     // SAFETY: caller contract.
     let v = unsafe { vec_ref(v, "Vector index") };
-    let data = v.data.borrow();
-    if index < 0.0 || index as usize >= data.len() {
-        drop(data);
+    if index < 0.0 || index as usize >= v.len as usize {
         exc::throw_error(
             exc::ErrorKind::Range,
             &format!("vector index {index} out of range"),
         );
     }
-    // SAFETY: caller contract.
-    unsafe { *out = data[index as usize] };
+    // SAFETY: caller contract; index proven in range.
+    unsafe { *out = v.get_any(index as usize) };
 }
 
 /// `vec[i] = x`: i == length appends, beyond → RangeError (AS3 Vector).
+/// Slow path; compiled code inlines the in-bounds numeric store (P23).
 ///
 /// # Safety
 /// Pointers live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_vec_set(v: *const VsVector, index: f64, value: *const VsAny) {
     // SAFETY: caller contract.
-    let v = unsafe { vec_ref(v, "Vector index") };
-    let mut data = v.data.borrow_mut();
+    let v = unsafe { vec_mut(v, "Vector index") };
     let i = index as usize;
-    if index < 0.0 || i > data.len() {
-        drop(data);
+    if index < 0.0 || i > v.len as usize {
         exc::throw_error(
             exc::ErrorKind::Range,
             &format!("vector index {index} out of range"),
@@ -1136,10 +1143,10 @@ pub unsafe extern "C" fn vs_vec_set(v: *const VsVector, index: f64, value: *cons
     }
     // SAFETY: caller contract.
     let value = unsafe { *value };
-    if i == data.len() {
-        data.push(value);
+    if i == v.len as usize {
+        v.push_any(value);
     } else {
-        data[i] = value;
+        v.set_any(i, value);
     }
 }
 
@@ -1150,11 +1157,12 @@ pub unsafe extern "C" fn vs_vec_set(v: *const VsVector, index: f64, value: *cons
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_vec_push(v: *const VsVector, argc: u32, args: *const VsAny) -> u32 {
     // SAFETY: caller contract.
-    let v = unsafe { vec_ref(v, "push") };
+    let v = unsafe { vec_mut(v, "push") };
     let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
-    let mut data = v.data.borrow_mut();
-    data.extend_from_slice(items);
-    data.len() as u32
+    for &it in items {
+        v.push_any(it);
+    }
+    v.len
 }
 
 /// Vector pop.
@@ -1164,10 +1172,8 @@ pub unsafe extern "C" fn vs_vec_push(v: *const VsVector, argc: u32, args: *const
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_vec_pop(v: *const VsVector, out: *mut VsAny) {
     // SAFETY: caller contract.
-    let value = unsafe { vec_ref(v, "pop") }
-        .data
-        .borrow_mut()
-        .pop()
+    let value = unsafe { vec_mut(v, "pop") }
+        .pop_any()
         .unwrap_or(VsAny::UNDEFINED);
     unsafe { *out = value };
 }
@@ -1179,12 +1185,14 @@ pub unsafe extern "C" fn vs_vec_pop(v: *const VsVector, out: *mut VsAny) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_vec_shift(v: *const VsVector, out: *mut VsAny) {
     // SAFETY: caller contract.
-    let v = unsafe { vec_ref(v, "shift") };
-    let mut data = v.data.borrow_mut();
-    let value = if data.is_empty() {
+    let v = unsafe { vec_mut(v, "shift") };
+    let value = if v.len == 0 {
         VsAny::UNDEFINED
     } else {
-        data.remove(0)
+        let mut items = v.to_boxed();
+        let first = items.remove(0);
+        v.refill(&items);
+        first
     };
     unsafe { *out = value };
 }
@@ -1196,13 +1204,12 @@ pub unsafe extern "C" fn vs_vec_shift(v: *const VsVector, out: *mut VsAny) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_vec_unshift(v: *const VsVector, argc: u32, args: *const VsAny) -> u32 {
     // SAFETY: caller contract.
-    let v = unsafe { vec_ref(v, "unshift") };
+    let v = unsafe { vec_mut(v, "unshift") };
     let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
-    let mut data = v.data.borrow_mut();
-    for (i, it) in items.iter().enumerate() {
-        data.insert(i, *it);
-    }
-    data.len() as u32
+    let mut merged = items.to_vec();
+    merged.extend(v.to_boxed());
+    v.refill(&merged);
+    v.len
 }
 
 /// Vector slice — same instantiation.
@@ -1213,19 +1220,14 @@ pub unsafe extern "C" fn vs_vec_unshift(v: *const VsVector, argc: u32, args: *co
 pub unsafe extern "C" fn vs_vec_slice(v: *const VsVector, start: f64, end: f64) -> *const VsVector {
     // SAFETY: caller contract.
     let v = unsafe { vec_ref(v, "slice") };
-    let data = v.data.borrow();
-    let (s, e) = (
-        seq::norm_index(start, data.len()),
-        seq::norm_index(end, data.len()),
-    );
-    seq::new_vector(
-        v.inst,
-        if s < e {
-            data[s..e].to_vec()
-        } else {
-            Vec::new()
-        },
-    )
+    let len = v.len as usize;
+    let (s, e) = (seq::norm_index(start, len), seq::norm_index(end, len));
+    let elems: Vec<VsAny> = if s < e {
+        (s..e).map(|i| v.get_any(i)).collect()
+    } else {
+        Vec::new()
+    };
+    seq::new_vector(v.inst, v.kind, elems)
 }
 
 /// Vector indexOf (strict equality).
@@ -1241,12 +1243,10 @@ pub unsafe extern "C" fn vs_vec_index_of(
     // SAFETY: caller contract.
     let v = unsafe { vec_ref(v, "indexOf") };
     let needle = unsafe { *needle };
-    let data = v.data.borrow();
-    let from = seq::norm_index(from, data.len());
-    data[from..]
-        .iter()
-        .position(|x| conv::any_strict_equals(*x, needle))
-        .map_or(-1, |p| (from + p) as i32)
+    let from = seq::norm_index(from, v.len as usize);
+    (from..v.len as usize)
+        .find(|&i| conv::any_strict_equals(v.get_any(i), needle))
+        .map_or(-1, |p| p as i32)
 }
 
 /// Vector join.
@@ -1261,7 +1261,7 @@ pub unsafe extern "C" fn vs_vec_join(v: *const VsVector, sep: *const VsString) -
         Some(s) => s.to_rust(),
         None => ",".to_string(),
     };
-    VsString::from_rust(&seq::join(&v.data.borrow(), &sep))
+    VsString::from_rust(&seq::join(&v.to_boxed(), &sep))
 }
 
 /// Vector reverse — in place, returns the vector.
@@ -1271,7 +1271,10 @@ pub unsafe extern "C" fn vs_vec_join(v: *const VsVector, sep: *const VsString) -
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_vec_reverse(v: *const VsVector) -> *const VsVector {
     // SAFETY: caller contract.
-    unsafe { vec_ref(v, "reverse") }.data.borrow_mut().reverse();
+    let vr = unsafe { vec_mut(v, "reverse") };
+    let mut items = vr.to_boxed();
+    items.reverse();
+    vr.refill(&items);
     v
 }
 
@@ -1298,7 +1301,7 @@ pub unsafe extern "C" fn vs_vec_to_string(v: *const VsVector) -> *const VsString
         return std::ptr::null();
     }
     // SAFETY: caller contract.
-    VsString::from_rust(&seq::join(&unsafe { &*v }.data.borrow(), ","))
+    VsString::from_rust(&seq::join(&unsafe { &*v }.to_boxed(), ","))
 }
 
 /// Boxed `is Array`.
@@ -1568,7 +1571,7 @@ pub unsafe extern "C" fn vs_enum_len(v: *const VsAny) -> i32 {
     let v = unsafe { *v };
     match v.tag() {
         Tag::Array => unsafe { &*v.as_array_ptr() }.data.borrow().len() as i32,
-        Tag::Vector => unsafe { &*v.as_vector_ptr() }.data.borrow().len() as i32,
+        Tag::Vector => unsafe { &*v.as_vector_ptr() }.len as i32,
         _ => 0,
     }
 }
@@ -1598,12 +1601,14 @@ pub unsafe extern "C" fn vs_enum_value(v: *const VsAny, index: i32, out: *mut Vs
             .get(index as usize)
             .copied()
             .unwrap_or(VsAny::UNDEFINED),
-        Tag::Vector => unsafe { &*v.as_vector_ptr() }
-            .data
-            .borrow()
-            .get(index as usize)
-            .copied()
-            .unwrap_or(VsAny::UNDEFINED),
+        Tag::Vector => {
+            let vec = unsafe { &*v.as_vector_ptr() };
+            if index >= 0 && (index as usize) < vec.len as usize {
+                vec.get_any(index as usize)
+            } else {
+                VsAny::UNDEFINED
+            }
+        }
         _ => VsAny::UNDEFINED,
     };
     // SAFETY: caller contract.
@@ -1690,7 +1695,7 @@ pub unsafe extern "C" fn vs_any_get_prop(v: *const VsAny, name: *const VsString,
         }
         Tag::Vector if name16 == "length".encode_utf16().collect::<Vec<u16>>() => {
             // SAFETY: vector live.
-            VsAny::uint(unsafe { &*v.as_vector_ptr() }.data.borrow().len() as u32)
+            VsAny::uint(unsafe { &*v.as_vector_ptr() }.len)
         }
         Tag::Null | Tag::Undefined => {
             conv::type_error("property access on null");
@@ -1753,7 +1758,7 @@ pub unsafe extern "C" fn vs_any_has_prop(key: *const VsAny, obj: *const VsAny) -
         Tag::Vector => {
             let n = conv::any_to_number(key);
             // SAFETY: vector live.
-            n >= 0.0 && (n as usize) < unsafe { &*obj.as_vector_ptr() }.data.borrow().len()
+            n >= 0.0 && (n as usize) < unsafe { &*obj.as_vector_ptr() }.len as usize
         }
         _ => false,
     };
@@ -1798,11 +1803,10 @@ pub unsafe extern "C" fn vs_any_index_get(v: *const VsAny, key: *const VsAny, ou
         Tag::Vector => {
             let i = conv::any_to_number(key);
             // SAFETY: vector live.
-            let data = unsafe { &*v.as_vector_ptr() }.data.borrow();
-            if i >= 0.0 && (i as usize) < data.len() {
-                data[i as usize]
+            let vec = unsafe { &*v.as_vector_ptr() };
+            if i >= 0.0 && (i as usize) < vec.len as usize {
+                vec.get_any(i as usize)
             } else {
-                drop(data);
                 exc::throw_error(exc::ErrorKind::Range, "vector index out of range");
             }
         }

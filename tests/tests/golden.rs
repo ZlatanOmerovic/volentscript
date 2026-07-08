@@ -114,6 +114,14 @@ fn closures_and_exceptions() {
     run_golden("closures");
 }
 
+/// P23: unboxed numeric Vector.<Number>/<int>/<uint> storage with inlined
+/// element access — inline read/write, append via runtime, RangeError on
+/// the fast path, join/pop/reverse/indexOf, and the boxed String fallback.
+#[test]
+fn vectors_unboxed() {
+    run_golden("vectors");
+}
+
 /// The Phase 7 milestone (SPECS §11): a real CLI tool — args, File I/O,
 /// dynamic objects, JSON round trip, Math, callbacks, exit codes.
 #[test]

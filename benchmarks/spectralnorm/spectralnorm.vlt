@@ -1,0 +1,58 @@
+// Spectral norm (benchmarks-game shape): dominated by Vector.<Number>
+// element reads/writes in the O(n^2) matrix-vector products. This is the
+// workload P23 (unboxed numeric Vectors) is built for — every v[j] is a
+// direct f64 load, no boxing, no runtime call.
+
+const N:int = 2500;
+
+function evalA(i:int, j:int):Number {
+    var ij:int = i + j;
+    return 1.0 / ((ij * (ij + 1)) / 2 + i + 1);
+}
+
+function multiplyAv(v:Vector.<Number>, av:Vector.<Number>):void {
+    for (var i:int = 0; i < N; i++) {
+        var sum:Number = 0.0;
+        for (var j:int = 0; j < N; j++) {
+            sum += evalA(i, j) * v[j];
+        }
+        av[i] = sum;
+    }
+}
+
+function multiplyAtv(v:Vector.<Number>, atv:Vector.<Number>):void {
+    for (var i:int = 0; i < N; i++) {
+        var sum:Number = 0.0;
+        for (var j:int = 0; j < N; j++) {
+            sum += evalA(j, i) * v[j];
+        }
+        atv[i] = sum;
+    }
+}
+
+function multiplyAtAv(v:Vector.<Number>, atav:Vector.<Number>, tmp:Vector.<Number>):void {
+    multiplyAv(v, tmp);
+    multiplyAtv(tmp, atav);
+}
+
+var u:Vector.<Number> = new <Number>[];
+var v:Vector.<Number> = new <Number>[];
+var tmp:Vector.<Number> = new <Number>[];
+for (var k:int = 0; k < N; k++) {
+    u[k] = 1.0;
+    v[k] = 0.0;
+    tmp[k] = 0.0;
+}
+
+for (var iter:int = 0; iter < 10; iter++) {
+    multiplyAtAv(u, v, tmp);
+    multiplyAtAv(v, u, tmp);
+}
+
+var vBv:Number = 0.0;
+var vv:Number = 0.0;
+for (var i:int = 0; i < N; i++) {
+    vBv += u[i] * v[i];
+    vv += v[i] * v[i];
+}
+trace(Math.sqrt(vBv / vv).toFixed(9));

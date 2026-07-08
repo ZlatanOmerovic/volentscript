@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VolentScript benchmarks</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; margin: 0; }
+  body { font: 16px/1.55 -apple-system, "Segoe UI", sans-serif; background: #FFFDF9; color: #241B14; max-width: 860px; margin: 0 auto; padding: 40px 20px 80px; }
+  h1 { font-size: 34px; letter-spacing: -0.5px; }
+  h1 span { color: #E85C0F; }
+  .meta { color: #7A6E60; margin: 8px 0 34px; font-size: 14px; }
+  section { margin: 34px 0; }
+  h2 { font-size: 20px; border-bottom: 3px solid #E85C0F; display: inline-block; padding-bottom: 2px; }
+  .sub { color: #7A6E60; font-size: 14px; margin: 6px 0 14px; }
+  .row { display: flex; align-items: center; gap: 10px; margin: 5px 0; }
+  .lang { width: 130px; font-size: 14px; text-align: right; flex: none; }
+  .track { flex: 1; background: #F0E7DC; border-radius: 4px; height: 20px; overflow: hidden; }
+  .bar { display: block; height: 100%; border-radius: 4px; }
+  .val { width: 130px; font-size: 13px; font-variant-numeric: tabular-nums; flex: none; }
+  .val em { color: #9A8C7C; font-style: normal; margin-left: 6px; font-size: 12px; }
+  .notes { background: #F7F3EC; border-left: 4px solid #FFAE3D; padding: 14px 18px; border-radius: 0 8px 8px 0; margin-top: 40px; font-size: 15px; }
+  .notes h3 { margin-bottom: 8px; }
+  .notes li { margin: 6px 0 6px 18px; }
+  code { background: #F0E7DC; padding: 1px 5px; border-radius: 4px; font-size: 90%; }
+  footer { margin-top: 44px; color: #9A8C7C; font-size: 13px; }
+  a { color: #E85C0F; }
+</style></head><body>
+<h1>Volent<span>Script</span> benchmarks</h1>
+<p class="meta">2026-07-08 &middot; Apple M4, 16 GB, macOS &middot; hyperfine, 3 warmup + 8 timed runs, mean process wall time (startup included) &middot; identical outputs verified across all runtimes before timing &middot; <a href="https://github.com/ZlatanOmerovic/volentscript/tree/main/benchmarks">sources &amp; runner</a></p>
+
+  <section>
+    <h2>fib</h2>
+    <p class="sub">fib(35), naive recursion &mdash; tests function-call overhead, int arithmetic</p>
+    
+      <div class="row"><span class="lang" style="font-weight:700">VolentScript</span>
+        <span class="track"><span class="bar" style="width:100.0%;background:#E85C0F"></span></span>
+        <span class="val">109.0 ms<em>5.9x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">C (clang -O2)</span>
+        <span class="track"><span class="bar" style="width:17.1%;background:#B9AC9E"></span></span>
+        <span class="val">18.6 ms<em>1.0x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Rust (-O)</span>
+        <span class="track"><span class="bar" style="width:15.6%;background:#B9AC9E"></span></span>
+        <span class="val">17.0 ms<em>0.9x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Go</span>
+        <span class="track"><span class="bar" style="width:20.7%;background:#B9AC9E"></span></span>
+        <span class="val">22.5 ms<em>1.2x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Java (OpenJDK)</span>
+        <span class="track"><span class="bar" style="width:31.1%;background:#B9AC9E"></span></span>
+        <span class="val">33.9 ms<em>1.8x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Bun</span>
+        <span class="track"><span class="bar" style="width:38.2%;background:#B9AC9E"></span></span>
+        <span class="val">41.7 ms<em>2.2x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Deno</span>
+        <span class="track"><span class="bar" style="width:59.1%;background:#B9AC9E"></span></span>
+        <span class="val">64.5 ms<em>3.5x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Node.js</span>
+        <span class="track"><span class="bar" style="width:69.1%;background:#B9AC9E"></span></span>
+        <span class="val">75.4 ms<em>4.1x C</em></span></div>
+  </section>
+  <section>
+    <h2>nbody</h2>
+    <p class="sub">n-body, 5M steps (CLBG shape) &mdash; tests float math on object fields, Vector indexing</p>
+    
+      <div class="row"><span class="lang" style="font-weight:700">VolentScript</span>
+        <span class="track"><span class="bar" style="width:100.0%;background:#E85C0F"></span></span>
+        <span class="val">1.72 s<em>8.7x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">C (clang -O2)</span>
+        <span class="track"><span class="bar" style="width:11.5%;background:#B9AC9E"></span></span>
+        <span class="val">197.0 ms<em>1.0x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Rust (-O)</span>
+        <span class="track"><span class="bar" style="width:11.0%;background:#B9AC9E"></span></span>
+        <span class="val">188.6 ms<em>1.0x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Go</span>
+        <span class="track"><span class="bar" style="width:10.5%;background:#B9AC9E"></span></span>
+        <span class="val">181.2 ms<em>0.9x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Java (OpenJDK)</span>
+        <span class="track"><span class="bar" style="width:27.9%;background:#B9AC9E"></span></span>
+        <span class="val">480.4 ms<em>2.4x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Bun</span>
+        <span class="track"><span class="bar" style="width:23.2%;background:#B9AC9E"></span></span>
+        <span class="val">399.6 ms<em>2.0x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Deno</span>
+        <span class="track"><span class="bar" style="width:17.5%;background:#B9AC9E"></span></span>
+        <span class="val">301.8 ms<em>1.5x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Node.js</span>
+        <span class="track"><span class="bar" style="width:16.6%;background:#B9AC9E"></span></span>
+        <span class="val">285.4 ms<em>1.4x C</em></span></div>
+  </section>
+  <section>
+    <h2>binarytrees</h2>
+    <p class="sub">binary trees, depth 16 (CLBG shape) &mdash; tests allocation churn, GC pressure</p>
+    
+      <div class="row"><span class="lang" style="font-weight:700">VolentScript</span>
+        <span class="track"><span class="bar" style="width:100.0%;background:#E85C0F"></span></span>
+        <span class="val">1.56 s<em>6.8x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">C (clang -O2)</span>
+        <span class="track"><span class="bar" style="width:14.8%;background:#B9AC9E"></span></span>
+        <span class="val">229.8 ms<em>1.0x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Rust (-O)</span>
+        <span class="track"><span class="bar" style="width:22.3%;background:#B9AC9E"></span></span>
+        <span class="val">347.0 ms<em>1.5x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Go</span>
+        <span class="track"><span class="bar" style="width:29.4%;background:#B9AC9E"></span></span>
+        <span class="val">457.3 ms<em>2.0x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Java (OpenJDK)</span>
+        <span class="track"><span class="bar" style="width:18.3%;background:#B9AC9E"></span></span>
+        <span class="val">285.3 ms<em>1.2x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Bun</span>
+        <span class="track"><span class="bar" style="width:13.2%;background:#B9AC9E"></span></span>
+        <span class="val">205.4 ms<em>0.9x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Deno</span>
+        <span class="track"><span class="bar" style="width:16.4%;background:#B9AC9E"></span></span>
+        <span class="val">255.7 ms<em>1.1x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Node.js</span>
+        <span class="track"><span class="bar" style="width:13.6%;background:#B9AC9E"></span></span>
+        <span class="val">211.5 ms<em>0.9x C</em></span></div>
+  </section>
+  <section>
+    <h2>mandelbrot</h2>
+    <p class="sub">mandelbrot 1500², 50 iters &mdash; tests tight numeric loops</p>
+    
+      <div class="row"><span class="lang" style="font-weight:700">VolentScript</span>
+        <span class="track"><span class="bar" style="width:35.4%;background:#E85C0F"></span></span>
+        <span class="val">78.9 ms<em>0.7x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">C (clang -O2)</span>
+        <span class="track"><span class="bar" style="width:47.5%;background:#B9AC9E"></span></span>
+        <span class="val">106.0 ms<em>1.0x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Rust (-O)</span>
+        <span class="track"><span class="bar" style="width:56.5%;background:#B9AC9E"></span></span>
+        <span class="val">126.1 ms<em>1.2x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Go</span>
+        <span class="track"><span class="bar" style="width:72.4%;background:#B9AC9E"></span></span>
+        <span class="val">161.6 ms<em>1.5x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Java (OpenJDK)</span>
+        <span class="track"><span class="bar" style="width:83.9%;background:#B9AC9E"></span></span>
+        <span class="val">187.2 ms<em>1.8x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Bun</span>
+        <span class="track"><span class="bar" style="width:84.5%;background:#B9AC9E"></span></span>
+        <span class="val">188.5 ms<em>1.8x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Deno</span>
+        <span class="track"><span class="bar" style="width:100.0%;background:#B9AC9E"></span></span>
+        <span class="val">223.2 ms<em>2.1x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Node.js</span>
+        <span class="track"><span class="bar" style="width:67.6%;background:#B9AC9E"></span></span>
+        <span class="val">150.9 ms<em>1.4x C</em></span></div>
+  </section>
+  <section>
+    <h2>strings</h2>
+    <p class="sub">split/join/case/search × 60k &mdash; tests string operations, UTF handling</p>
+    
+      <div class="row"><span class="lang" style="font-weight:700">VolentScript</span>
+        <span class="track"><span class="bar" style="width:100.0%;background:#E85C0F"></span></span>
+        <span class="val">212.6 ms<em>17.3x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">C (clang -O2)</span>
+        <span class="track"><span class="bar" style="width:5.8%;background:#B9AC9E"></span></span>
+        <span class="val">12.3 ms<em>1.0x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Rust (-O)</span>
+        <span class="track"><span class="bar" style="width:8.8%;background:#B9AC9E"></span></span>
+        <span class="val">18.8 ms<em>1.5x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Go</span>
+        <span class="track"><span class="bar" style="width:10.2%;background:#B9AC9E"></span></span>
+        <span class="val">21.7 ms<em>1.8x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Java (OpenJDK)</span>
+        <span class="track"><span class="bar" style="width:42.3%;background:#B9AC9E"></span></span>
+        <span class="val">89.9 ms<em>7.3x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Bun</span>
+        <span class="track"><span class="bar" style="width:8.8%;background:#B9AC9E"></span></span>
+        <span class="val">18.8 ms<em>1.5x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Deno</span>
+        <span class="track"><span class="bar" style="width:14.3%;background:#B9AC9E"></span></span>
+        <span class="val">30.4 ms<em>2.5x C</em></span></div>
+      <div class="row"><span class="lang" style="font-weight:400">Node.js</span>
+        <span class="track"><span class="bar" style="width:17.4%;background:#B9AC9E"></span></span>
+        <span class="val">37.0 ms<em>3.0x C</em></span></div>
+  </section>
+<div class="notes">
+  <h3>Reading the numbers honestly</h3>
+  <ul>
+    <li><b>Tight numeric loops</b> (mandelbrot): within ~2x of C, at JS-JIT level — LLVM -O2 works when code stays in registers.</li>
+    <li><b>Call-heavy code</b> (fib): ~6x C — a GC safepoint check per call, plus conservative-GC codegen constraints.</li>
+    <li><b>Object float math</b> (nbody): ~10x C — <code>Vector.&lt;T&gt;</code> element reads are runtime calls on boxed storage; safepoints block loop hoisting.</li>
+    <li><b>Allocation churn</b> (binarytrees): ~8x C; generational JIT collectors win this workload outright.</li>
+    <li><b>Strings</b>: ~12x C — every operation transcodes UTF-16 &harr; UTF-8 inside the runtime.</li>
+  </ul>
+  <p style="margin-top:10px">Each gap maps to a planned optimization: unboxed numeric Vectors, UTF-16-native string ops, allocation fast path + safepoint hoisting, generational GC. None require language changes. Same idiomatic-simple algorithm in every language; Java timed as a process like everything else (its binarytrees throughput still wins). TypeScript is not a separate row — it erases to the same JS.</p>
+</div>
+<footer>VolentScript — ActionScript 3, revived. Native, ahead-of-time, and entirely of its own will.</footer>
+</body></html>

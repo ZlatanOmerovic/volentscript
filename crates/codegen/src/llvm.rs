@@ -2226,10 +2226,12 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             ExprKind::VectorLit(inst, elements) => {
                 let staged: Vec<Option<&mir::Expr>> = elements.iter().map(Some).collect();
                 let buf = self.stage_any_array_opt(&staged);
+                let kind = self.vec_kind(*inst);
                 let f = cx.runtime_fn(
                     "vs_vector_new",
                     Some(cx.ptr().into()),
                     &[
+                        cx.context.i32_type().into(),
                         cx.context.i32_type().into(),
                         cx.context.i32_type().into(),
                         cx.ptr().into(),
@@ -2245,6 +2247,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                                 .i32_type()
                                 .const_int(u64::from(*inst), false)
                                 .into(),
+                            cx.context.i32_type().const_int(u64::from(kind), false).into(),
                             cx.context
                                 .i32_type()
                                 .const_int(elements.len() as u64, false)
@@ -2298,48 +2301,179 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 Val::UInt(n)
             }
             ExprKind::SeqGet(recv, idx) => {
-                let (p, is_vec) = self.seq_ptr(recv);
-                let i = self.num_arg(idx);
-                let out = self.entry_alloca(cx.any_ty, "seqget");
-                let name = if is_vec { "vs_vec_get" } else { "vs_arr_get" };
-                let f = cx.runtime_fn(
-                    name,
-                    None,
-                    &[
-                        cx.ptr().into(),
-                        cx.context.f64_type().into(),
-                        cx.ptr().into(),
-                    ],
-                );
-                self.cx
-                    .builder
-                    .build_call(f, &[p.into(), i.into(), out.into()], "")
-                    .expect("call");
-                self.unbox_any_ptr(out, e.ty)
+                // P23 fast path: an unboxed numeric Vector inlines the read as
+                // a bounds-checked load, no runtime call and no boxing.
+                if let Some((_kind, ety, _stride)) = self.unboxed_vec(recv) {
+                    let (p, _) = self.seq_ptr(recv);
+                    let idx_f = self.num_arg(idx);
+                    let (len, data) = self.vec_header(p);
+                    let f64t = cx.context.f64_type();
+                    let len_f = self
+                        .cx
+                        .builder
+                        .build_unsigned_int_to_float(len, f64t, "lenf")
+                        .expect("conv");
+                    let inb = self.idx_in_bounds(idx_f, len_f);
+                    let fast = self.new_block("vget.fast");
+                    let slow = self.new_block("vget.slow");
+                    self.cx
+                        .builder
+                        .build_conditional_branch(inb, fast, slow)
+                        .expect("br");
+                    // Out of range → runtime raises RangeError (never returns).
+                    self.cx.builder.position_at_end(slow);
+                    let out = self.entry_alloca(cx.any_ty, "seqget");
+                    let f = cx.runtime_fn(
+                        "vs_vec_get",
+                        None,
+                        &[cx.ptr().into(), f64t.into(), cx.ptr().into()],
+                    );
+                    self.cx
+                        .builder
+                        .build_call(f, &[p.into(), idx_f.into(), out.into()], "")
+                        .expect("call");
+                    self.cx.builder.build_unreachable().expect("unreachable");
+                    // In range → direct typed load.
+                    self.cx.builder.position_at_end(fast);
+                    let i = self
+                        .cx
+                        .builder
+                        .build_float_to_unsigned_int(idx_f, cx.context.i64_type(), "vi")
+                        .expect("conv");
+                    let ep = unsafe {
+                        self.cx
+                            .builder
+                            .build_in_bounds_gep(ety, data, &[i], "vep")
+                            .expect("gep")
+                    };
+                    let val = self.cx.builder.build_load(ety, ep, "vel").expect("load");
+                    match e.ty {
+                        Ty::Number => Val::Num(val.into_float_value()),
+                        Ty::Int => Val::Int(val.into_int_value()),
+                        Ty::UInt => Val::UInt(val.into_int_value()),
+                        _ => unreachable!("unboxed vector element type"),
+                    }
+                } else {
+                    let (p, is_vec) = self.seq_ptr(recv);
+                    let i = self.num_arg(idx);
+                    let out = self.entry_alloca(cx.any_ty, "seqget");
+                    let name = if is_vec { "vs_vec_get" } else { "vs_arr_get" };
+                    let f = cx.runtime_fn(
+                        name,
+                        None,
+                        &[
+                            cx.ptr().into(),
+                            cx.context.f64_type().into(),
+                            cx.ptr().into(),
+                        ],
+                    );
+                    self.cx
+                        .builder
+                        .build_call(f, &[p.into(), i.into(), out.into()], "")
+                        .expect("call");
+                    self.unbox_any_ptr(out, e.ty)
+                }
             }
             ExprKind::SeqSet(recv, idx, v) => {
-                let (p, is_vec) = self.seq_ptr(recv);
-                let i = self.num_arg(idx);
-                let value = self.expr(v);
-                let boxed = match value {
-                    Val::Any(p) => p,
-                    other => self.box_value(other),
-                };
-                let name = if is_vec { "vs_vec_set" } else { "vs_arr_set" };
-                let f = cx.runtime_fn(
-                    name,
-                    None,
-                    &[
-                        cx.ptr().into(),
-                        cx.context.f64_type().into(),
-                        cx.ptr().into(),
-                    ],
-                );
-                self.cx
-                    .builder
-                    .build_call(f, &[p.into(), i.into(), boxed.into()], "")
-                    .expect("call");
-                value
+                // P23 fast path: an unboxed numeric Vector inlines the in-range
+                // store; append (i == len) and out-of-range fall to the runtime.
+                if let Some((kind, ety, _stride)) = self.unboxed_vec(recv) {
+                    let value = self.expr(v);
+                    // Coerce the operand to the element's storage type so the
+                    // store is type-exact (sema already coerced to the element
+                    // AS3 type; this just picks the matching LLVM scalar).
+                    let scalar: BasicValueEnum<'ctx> = if kind == 1 {
+                        self.numeric_of(value).expect("numeric").into()
+                    } else {
+                        match value {
+                            Val::Int(i) | Val::UInt(i) => i.into(),
+                            other => {
+                                let f = self.numeric_of(other).expect("numeric");
+                                let conv = if kind == 2 { Conv::ToInt } else { Conv::ToUInt };
+                                match self.convert_num_to_int(f, conv) {
+                                    Val::Int(i) | Val::UInt(i) => i.into(),
+                                    _ => unreachable!("int conversion"),
+                                }
+                            }
+                        }
+                    };
+                    let (p, _) = self.seq_ptr(recv);
+                    let idx_f = self.num_arg(idx);
+                    let (len, data) = self.vec_header(p);
+                    let f64t = cx.context.f64_type();
+                    let len_f = self
+                        .cx
+                        .builder
+                        .build_unsigned_int_to_float(len, f64t, "lenf")
+                        .expect("conv");
+                    let inb = self.idx_in_bounds(idx_f, len_f);
+                    let fast = self.new_block("vset.fast");
+                    let slow = self.new_block("vset.slow");
+                    let cont = self.new_block("vset.cont");
+                    self.cx
+                        .builder
+                        .build_conditional_branch(inb, fast, slow)
+                        .expect("br");
+                    // In range → direct typed store.
+                    self.cx.builder.position_at_end(fast);
+                    let i = self
+                        .cx
+                        .builder
+                        .build_float_to_unsigned_int(idx_f, cx.context.i64_type(), "vi")
+                        .expect("conv");
+                    let ep = unsafe {
+                        self.cx
+                            .builder
+                            .build_in_bounds_gep(ety, data, &[i], "vep")
+                            .expect("gep")
+                    };
+                    self.cx.builder.build_store(ep, scalar).expect("store");
+                    self.cx
+                        .builder
+                        .build_unconditional_branch(cont)
+                        .expect("br");
+                    // Append or out of range → runtime (boxes, may grow/raise).
+                    self.cx.builder.position_at_end(slow);
+                    let boxed = self.box_value(value);
+                    let f = cx.runtime_fn(
+                        "vs_vec_set",
+                        None,
+                        &[cx.ptr().into(), f64t.into(), cx.ptr().into()],
+                    );
+                    self.cx
+                        .builder
+                        .build_call(f, &[p.into(), idx_f.into(), boxed.into()], "")
+                        .expect("call");
+                    self.cx
+                        .builder
+                        .build_unconditional_branch(cont)
+                        .expect("br");
+                    self.cx.builder.position_at_end(cont);
+                    value
+                } else {
+                    let (p, is_vec) = self.seq_ptr(recv);
+                    let i = self.num_arg(idx);
+                    let value = self.expr(v);
+                    let boxed = match value {
+                        Val::Any(p) => p,
+                        other => self.box_value(other),
+                    };
+                    let name = if is_vec { "vs_vec_set" } else { "vs_arr_set" };
+                    let f = cx.runtime_fn(
+                        name,
+                        None,
+                        &[
+                            cx.ptr().into(),
+                            cx.context.f64_type().into(),
+                            cx.ptr().into(),
+                        ],
+                    );
+                    self.cx
+                        .builder
+                        .build_call(f, &[p.into(), i.into(), boxed.into()], "")
+                        .expect("call");
+                    value
+                }
             }
             ExprKind::CaptureIncDec {
                 slot,
@@ -4457,6 +4591,75 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             Val::Arr(p) | Val::VecP(p) | Val::Str(p) | Val::Obj(p) => (p, is_vec),
             _ => unreachable!("sequence receiver"),
         }
+    }
+
+    /// Storage kind of a `Vector.<T>` instantiation (P23; must agree with
+    /// `runtime::seq::VEC_*`). Only the numeric kinds are stored unboxed
+    /// and get inlined element access; every other element type is boxed.
+    fn vec_kind(&self, inst: u32) -> u32 {
+        match self.program.vectors[inst as usize] {
+            Ty::Number => 1, // VEC_F64
+            Ty::Int => 2,    // VEC_I32
+            Ty::UInt => 3,   // VEC_U32
+            _ => 0,          // VEC_BOXED
+        }
+    }
+
+    /// If `recv` is a `Vector` with an unboxed numeric element kind,
+    /// returns `(kind, llvm_elem_ty, stride_bytes)`; otherwise `None`.
+    fn unboxed_vec(&self, recv: &mir::Expr) -> Option<(u32, BasicTypeEnum<'ctx>, u64)> {
+        let Ty::Vector(inst) = recv.ty else {
+            return None;
+        };
+        let cx = self.cx;
+        match self.vec_kind(inst) {
+            1 => Some((1, cx.context.f64_type().into(), 8)),
+            2 => Some((2, cx.context.i32_type().into(), 4)),
+            3 => Some((3, cx.context.i32_type().into(), 4)),
+            _ => None,
+        }
+    }
+
+    /// Loads `(len, data_ptr)` from a flat `VsVector` header (P23 layout:
+    /// `len` is the third `i32`, byte 8; `data` is the pointer at byte 16).
+    fn vec_header(&self, p: PointerValue<'ctx>) -> (IntValue<'ctx>, PointerValue<'ctx>) {
+        let cx = self.cx;
+        let i32t = cx.context.i32_type();
+        let i8t = cx.context.i8_type();
+        let len_ptr = unsafe {
+            cx.builder
+                .build_in_bounds_gep(i32t, p, &[i32t.const_int(2, false)], "vlen_p")
+                .expect("gep")
+        };
+        let len = cx
+            .builder
+            .build_load(i32t, len_ptr, "vlen")
+            .expect("load")
+            .into_int_value();
+        let data_pp = unsafe {
+            cx.builder
+                .build_in_bounds_gep(i8t, p, &[i8t.const_int(16, false)], "vdata_pp")
+                .expect("gep")
+        };
+        let data = cx
+            .builder
+            .build_load(cx.ptr(), data_pp, "vdata")
+            .expect("load")
+            .into_pointer_value();
+        (len, data)
+    }
+
+    /// `0.0 <= idx < len` as an `i1` (both bounds; `idx` is the raw f64 index).
+    fn idx_in_bounds(&self, idx_f: FloatValue<'ctx>, len_f: FloatValue<'ctx>) -> IntValue<'ctx> {
+        let b = &self.cx.builder;
+        let zero = self.cx.context.f64_type().const_float(0.0);
+        let ge0 = b
+            .build_float_compare(inkwell::FloatPredicate::OGE, idx_f, zero, "ge0")
+            .expect("cmp");
+        let lt = b
+            .build_float_compare(inkwell::FloatPredicate::OLT, idx_f, len_f, "lt")
+            .expect("cmp");
+        b.build_and(ge0, lt, "inb").expect("and")
     }
 
     /// Unboxes a `VsAny` alloca into a typed value (ES3 §9 conversions —

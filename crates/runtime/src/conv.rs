@@ -134,7 +134,7 @@ pub fn any_to_display(v: VsAny) -> String {
         Tag::Vector => {
             // SAFETY: Vector-tagged payloads hold live VsVectors.
             let vec = unsafe { &*v.as_vector_ptr() };
-            crate::seq::join(&vec.data.borrow(), ",")
+            crate::seq::join(&vec.to_boxed(), ",")
         }
         Tag::Function => "function Function() {}".to_string(),
         Tag::RegExp => {

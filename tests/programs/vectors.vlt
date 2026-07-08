@@ -1,0 +1,37 @@
+// P23: unboxed numeric Vector.<Number>/<int>/<uint> with inlined element
+// access, plus the boxed fallback (Vector.<String>) and RangeError.
+
+var nums:Vector.<Number> = new <Number>[1.5, 2.5, 3.5];
+nums[0] = nums[1] + nums[2];        // inline read + inline write
+trace(nums[0]);                      // 6
+trace(nums.length);                  // 3
+nums.push(10.0);                     // append (runtime slow path)
+trace(nums.length);                  // 4
+trace(nums[3]);                      // 10
+trace(nums.pop());                   // 10
+trace(nums.join(","));               // 6,2.5,3.5
+
+var ints:Vector.<int> = new <int>[];
+for (var i:int = 0; i < 5; i++) {
+    ints[i] = i * i;                 // append then in-range
+}
+trace(ints.join(" "));               // 0 1 4 9 16
+ints[2] = 99;                        // inline write
+trace(ints[2]);                      // 99
+trace(ints.indexOf(9));              // 3
+
+var us:Vector.<uint> = new <uint>[7, 8, 9];
+us.reverse();
+trace(us.join(","));                 // 9,8,7
+
+// out-of-range read raises RangeError even on the inlined fast path
+try {
+    trace(nums[100]);
+} catch (e:RangeError) {
+    trace("caught range");
+}
+
+// boxed element storage (non-numeric) still works
+var ss:Vector.<String> = new <String>["a", "b"];
+ss.push("c");
+trace(ss.join("-"));                 // a-b-c

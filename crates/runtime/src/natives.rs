@@ -45,7 +45,7 @@ pub fn stringify(v: VsAny, depth: usize) -> Option<String> {
         }
         Tag::Vector => {
             // SAFETY: vector payloads live.
-            let items = unsafe { &*v.as_vector_ptr() }.data.borrow().clone();
+            let items = unsafe { &*v.as_vector_ptr() }.to_boxed();
             json_array(&items, depth)
         }
         Tag::Object => {

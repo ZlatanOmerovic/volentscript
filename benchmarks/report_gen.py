@@ -2,7 +2,7 @@
 """Generates REPORT.md + report.html from results/*.json (hyperfine)."""
 import json, subprocess, datetime
 
-BENCHES = ["fib", "nbody", "binarytrees", "mandelbrot", "strings"]
+BENCHES = ["fib", "nbody", "binarytrees", "mandelbrot", "strings", "spectralnorm"]
 RUNTIMES = ["volentscript", "c", "rust", "go", "java", "bun", "deno", "node"]
 LABEL = {"volentscript": "VolentScript", "c": "C (clang -O2)", "rust": "Rust (-O)",
          "go": "Go", "java": "Java (OpenJDK)", "node": "Node.js", "bun": "Bun", "deno": "Deno"}
@@ -12,6 +12,7 @@ DESC = {
     "binarytrees": ("binary trees, depth 16 (CLBG shape)", "allocation churn, GC pressure"),
     "mandelbrot": ("mandelbrot 1500², 50 iters", "tight numeric loops"),
     "strings": ("split/join/case/search × 60k", "string operations, UTF handling"),
+    "spectralnorm": ("spectral norm, n=2500 (CLBG shape)", "unboxed Vector.<Number> element access (P23)"),
 }
 
 def sh(cmd): return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout.strip()
@@ -62,27 +63,37 @@ for b in BENCHES:
 md.append("""
 ## Reading the numbers honestly
 
-**Where VolentScript stands (v0.2.x, first-ever benchmark run):**
+**Where VolentScript stands (v0.2.x):**
 
-- **Tight numeric loops (mandelbrot)** — within ~2x of C and roughly at
-  JS-JIT level. The LLVM -O2 pipeline does its job when the code stays in
-  registers.
-- **Call-heavy int code (fib)** — ~6x C, in JS-engine territory. Cost:
-  a GC safepoint check per call plus conservative-GC codegen constraints.
-- **Object float math (nbody)** — ~10x C. The gap is not the field math:
-  `Vector.<T>` element reads are runtime calls on boxed storage, and GC
-  safepoints in inner loops block loop-invariant hoisting.
+- **Tight numeric loops (mandelbrot)** — ~1.3x C and it beats every JS
+  engine outright, after P22 (safepoint elision) removed the per-iteration
+  GC check from the allocation-free inner loop. This is our strongest
+  showing.
+- **Call-heavy int code (fib)** — ~6x C, in JS-engine territory. The entry
+  safepoint is already elided (fib allocates nothing), so the remaining
+  cost is the call ABI itself and conservative-GC codegen constraints, not
+  the collector.
+- **Unboxed numeric vectors (spectralnorm)** — the P23 workload. Elements
+  of `Vector.<Number>` are now stored as raw `f64` and read/written inline
+  (no boxing, no runtime call): that alone is **2x faster** than the
+  previous runtime-call-on-boxed-storage path. We still trail C by ~3x here
+  because a bounds-check branch per element blocks LLVM autovectorization —
+  bounds-check elimination is the next lever, not more vector work.
+- **Object float math (nbody)** — ~10x C. Note this uses `Vector.<Body>`
+  (object elements), so P23's unboxing does not apply; the gap is
+  per-`Body` field access across pointers plus `Math.sqrt`, neither
+  vectorized.
 - **Allocation churn (binarytrees)** — ~8x C, and the JIT runtimes beat
   everyone (generational collectors love this workload). Our conservative
   mark-sweep with size-class pooling holds memory flat but pays per-object
   bookkeeping.
-- **Strings** — ~12x C. Every operation transcodes UTF-16 storage to UTF-8
+- **Strings** — ~18x C. Every operation transcodes UTF-16 storage to UTF-8
   and back inside the runtime; that is the whole gap.
 
-**Each gap maps to a planned optimization, in impact order:** unboxed
-`Vector.<Number>`/`Vector.<int>` storage, string ops that stay in UTF-16,
-allocation fast path + safepoint hoisting out of inner loops, and
-generational collection. None require language changes.
+**Remaining gaps map to planned optimizations, in impact order:**
+bounds-check elimination + autovectorization for numeric-vector loops,
+string ops that stay in UTF-16, and generational collection. None require
+language changes.
 
 **Fairness notes:** same algorithm and structure in every language,
 idiomatic-simple, no SIMD/threads/arena tricks anywhere. Java is timed as

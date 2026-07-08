@@ -178,6 +178,16 @@ With §4.2, `Vector.<T>` is no longer a VM special case; it's a library generic
 `Vector.<T>` over the same machinery. Keep the surface syntax `Vector.<T>` and
 `new <T>[...]` literals for familiarity.
 
+**Storage (P23):** numeric instantiations — `Vector.<Number>`, `Vector.<int>`,
+`Vector.<uint>` — are stored **unboxed** as a contiguous `f64`/`i32`/`u32`
+buffer (a flat `#[repr(C)]` header the codegen reads), and compiled code
+**inlines** in-range element reads/writes as a bounds-checked load/store — no
+boxing, no runtime call (avmplus stores typed Vectors unboxed likewise). These
+vectors are also GC leaves (no element tracing). Reference-typed instantiations
+(`Vector.<String>`, `Vector.<SomeClass>`) keep boxed `VsAny` storage, traced
+precisely. This is the value-typed/reference-typed boundary of §4.2 made
+concrete for `Vector`.
+
 ### 4.4 Strings
 Keep AS3-observable string semantics (indexing, `length`, methods). Internal
 encoding may be UTF-8 with a UTF-16-compatible API surface **only if** all
