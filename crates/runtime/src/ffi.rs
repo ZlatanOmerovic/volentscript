@@ -206,13 +206,13 @@ str_method!(
 );
 
 str_method!(
-    /// `toLowerCase` (§15.5.4.16).
-    vs_str_to_lower, |s| VsString::from_rust(&s.to_rust().to_lowercase())
+    /// `toLowerCase` (§15.5.4.16) — UTF-16-native (P26).
+    vs_str_to_lower, |s| VsString::alloc(string::case_units(s.units(), false))
 );
 
 str_method!(
-    /// `toUpperCase` (§15.5.4.18).
-    vs_str_to_upper, |s| VsString::from_rust(&s.to_rust().to_uppercase())
+    /// `toUpperCase` (§15.5.4.18) — UTF-16-native (P26).
+    vs_str_to_upper, |s| VsString::alloc(string::case_units(s.units(), true))
 );
 
 str_method!(
@@ -1053,11 +1053,11 @@ pub unsafe extern "C" fn vs_arr_concat(
 pub unsafe extern "C" fn vs_arr_join(a: *const VsArray, sep: *const VsString) -> *const VsString {
     // SAFETY: caller contract.
     let a = unsafe { arr(a, "join") };
-    let sep = match unsafe { string::deref(sep) } {
-        Some(s) => s.to_rust(),
-        None => ",".to_string(),
-    };
-    VsString::from_rust(&seq::join(&a.data.borrow(), &sep))
+    // SAFETY: caller contract.
+    let sep: &[u16] = unsafe { string::deref(sep) }.map_or(&[b',' as u16], VsString::units);
+    // P26: join UTF-16 units directly (string elements are copied, not
+    // transcoded).
+    VsString::alloc(seq::join_units(&a.data.borrow(), sep))
 }
 
 /// reverse (§15.4.4.8) — in place, returns the array.
@@ -1257,11 +1257,9 @@ pub unsafe extern "C" fn vs_vec_index_of(
 pub unsafe extern "C" fn vs_vec_join(v: *const VsVector, sep: *const VsString) -> *const VsString {
     // SAFETY: caller contract.
     let v = unsafe { vec_ref(v, "join") };
-    let sep = match unsafe { string::deref(sep) } {
-        Some(s) => s.to_rust(),
-        None => ",".to_string(),
-    };
-    VsString::from_rust(&seq::join(&v.to_boxed(), &sep))
+    // SAFETY: caller contract.
+    let sep: &[u16] = unsafe { string::deref(sep) }.map_or(&[b',' as u16], VsString::units);
+    VsString::alloc(seq::join_units(&v.to_boxed(), sep))
 }
 
 /// Vector reverse — in place, returns the vector.
@@ -1288,7 +1286,7 @@ pub unsafe extern "C" fn vs_arr_to_string(a: *const VsArray) -> *const VsString 
         return std::ptr::null();
     }
     // SAFETY: caller contract.
-    VsString::from_rust(&seq::join(&unsafe { &*a }.data.borrow(), ","))
+    VsString::alloc(seq::join_units(&unsafe { &*a }.data.borrow(), &[b',' as u16]))
 }
 
 /// ToString for a bare Vector value.
@@ -1301,7 +1299,7 @@ pub unsafe extern "C" fn vs_vec_to_string(v: *const VsVector) -> *const VsString
         return std::ptr::null();
     }
     // SAFETY: caller contract.
-    VsString::from_rust(&seq::join(&unsafe { &*v }.to_boxed(), ","))
+    VsString::alloc(seq::join_units(&unsafe { &*v }.to_boxed(), &[b',' as u16]))
 }
 
 /// Boxed `is Array`.
@@ -1402,25 +1400,41 @@ pub unsafe extern "C" fn vs_str_split(
     limit: f64,
 ) -> *const VsArray {
     // SAFETY: caller contract.
-    let s = unsafe { require(this, "split") }.to_rust();
+    let s = unsafe { require(this, "split") };
+    let hay = s.units();
     let limit = if limit.is_nan() || limit < 0.0 {
         u32::MAX as usize
     } else {
         limit as usize
     };
+    // P26: split on UTF-16 code units, no UTF-8 round-trip.
     // SAFETY: caller contract.
     let parts: Vec<VsAny> = match unsafe { string::deref(delim) } {
-        None => vec![VsAny::string(VsString::from_rust(&s))],
-        Some(d) if d.len == 0 => s
-            .chars()
+        None => vec![VsAny::string(VsString::alloc(hay.to_vec()))],
+        // Empty separator splits into individual code units (§15.5.4.14).
+        Some(d) if d.len == 0 => hay
+            .iter()
             .take(limit)
-            .map(|c| VsAny::string(VsString::from_rust(&c.to_string())))
+            .map(|&u| VsAny::string(VsString::alloc(vec![u])))
             .collect(),
-        Some(d) => s
-            .split(&d.to_rust())
-            .take(limit)
-            .map(|part| VsAny::string(VsString::from_rust(part)))
-            .collect(),
+        Some(d) => {
+            let dn = d.units();
+            let mut parts = Vec::new();
+            let mut cursor = 0usize;
+            while parts.len() < limit {
+                match string::find_units(hay, dn, cursor) {
+                    Some(pos) => {
+                        parts.push(VsAny::string(VsString::alloc(hay[cursor..pos].to_vec())));
+                        cursor = pos + dn.len();
+                    }
+                    None => {
+                        parts.push(VsAny::string(VsString::alloc(hay[cursor..].to_vec())));
+                        break;
+                    }
+                }
+            }
+            parts
+        }
     };
     seq::new_array(parts)
 }
@@ -2145,14 +2159,29 @@ pub unsafe extern "C" fn vs_str_replace(
     repl: *const VsString,
 ) -> *const VsString {
     // SAFETY: caller contract.
-    let s = unsafe { require(this, "replace") }.to_rust();
-    let search = unsafe { string::deref(search) }
-        .map(|s| s.to_rust())
-        .unwrap_or_default();
-    let repl = unsafe { string::deref(repl) }
-        .map(|s| s.to_rust())
-        .unwrap_or_default();
-    VsString::from_rust(&s.replacen(&search, &repl, 1))
+    let s = unsafe { require(this, "replace") };
+    let hay = s.units();
+    // SAFETY: caller contract.
+    let search: &[u16] = unsafe { string::deref(search) }.map_or(&[], VsString::units);
+    let repl: &[u16] = unsafe { string::deref(repl) }.map_or(&[], VsString::units);
+    // P26: first-match replace on UTF-16 units (§15.5.4.11, string search).
+    // An empty search inserts the replacement at the front, matching Rust's
+    // `replacen` and ES semantics.
+    let out = if search.is_empty() {
+        let mut v = Vec::with_capacity(repl.len() + hay.len());
+        v.extend_from_slice(repl);
+        v.extend_from_slice(hay);
+        v
+    } else if let Some(pos) = string::find_units(hay, search, 0) {
+        let mut v = Vec::with_capacity(hay.len() - search.len() + repl.len());
+        v.extend_from_slice(&hay[..pos]);
+        v.extend_from_slice(repl);
+        v.extend_from_slice(&hay[pos + search.len()..]);
+        v
+    } else {
+        hay.to_vec()
+    };
+    VsString::alloc(out)
 }
 
 /// Array iteration with callbacks: mode 0 forEach, 1 map, 2 filter,

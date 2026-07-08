@@ -229,6 +229,28 @@ pub fn join(data: &[VsAny], sep: &str) -> String {
         .join(sep)
 }
 
+/// UTF-16-native join (P26): string elements copy their code units directly;
+/// only non-string elements pay a transcode. Avoids the round-trip through
+/// UTF-8 that dominates `arr.join`/`vec.join` on string arrays.
+pub fn join_units(data: &[VsAny], sep: &[u16]) -> Vec<u16> {
+    use crate::any::Tag;
+    let mut out = Vec::new();
+    for (i, v) in data.iter().enumerate() {
+        if i > 0 {
+            out.extend_from_slice(sep);
+        }
+        match v.tag() {
+            Tag::Null | Tag::Undefined => {}
+            Tag::String => {
+                // SAFETY: String-tagged payloads hold live VsStrings.
+                out.extend_from_slice(unsafe { &*v.as_string_ptr() }.units());
+            }
+            _ => out.extend(conv::any_to_display(*v).encode_utf16()),
+        }
+    }
+    out
+}
+
 /// ES3 §15.4.4.12 splice / §15.4.4.10 slice index normalization.
 pub fn norm_index(v: f64, len: usize) -> usize {
     if v.is_nan() {

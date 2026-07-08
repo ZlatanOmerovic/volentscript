@@ -1,0 +1,35 @@
+// P26: UTF-16-native string ops must match ES semantics on the edge cases
+// that a naive UTF-8 round-trip would get wrong.
+
+// split on a multi-char delimiter
+var a:Array = "a::b::c".split("::");
+trace(a.length + " " + a.join("|"));         // 3 a|b|c
+
+// split on empty separator = individual code units (not scalars)
+trace("abc".split("").join("-"));            // a-b-c
+
+// split with no delimiter argument = whole string
+trace("hello".split(null as String).length); // 1
+
+// replace: first match only; not-found returns original; empty search prepends
+trace("one two two".replace("two", "2"));    // one 2 two
+trace("abc".replace("x", "y"));              // abc
+trace("abc".replace("", "@"));               // @abc
+
+// case mapping: ASCII fast path
+trace("Hello, World!".toUpperCase());        // HELLO, WORLD!
+trace("Hello, World!".toLowerCase());        // hello, world!
+
+// case mapping: non-ASCII (Unicode default case mapping, UTF-16-native)
+trace("café Ünïcode".toUpperCase());         // CAFÉ ÜNÏCODE
+trace("STRASSE".toLowerCase());              // strasse
+
+// a surrogate-pair character (U+1F600) survives split/join round-trips
+var emoji:String = "x\u{1F600}y";
+trace(emoji.length);                         // 4 (2 BMP + 1 surrogate pair)
+trace(emoji.split("").length);               // 4 code units
+trace(emoji.toUpperCase());                  // X<emoji>Y
+
+// indexOf / lastIndexOf on the joined result
+var j:String = "the-quick-brown-fox".split("-").join(" ");
+trace(j.indexOf("brown") + " " + j.lastIndexOf("o"));

@@ -43,6 +43,54 @@ impl VsString {
     }
 }
 
+/// First index of `nee` in `hay` at or after `from` (UTF-16 code-unit
+/// subsequence search). An empty needle matches at `from` (clamped).
+/// P26: keeps string ops on `u16` instead of transcoding to UTF-8.
+pub fn find_units(hay: &[u16], nee: &[u16], from: usize) -> Option<usize> {
+    if nee.is_empty() {
+        return Some(from.min(hay.len()));
+    }
+    if from > hay.len() || nee.len() > hay.len() - from {
+        return None;
+    }
+    hay[from..].windows(nee.len()).position(|w| w == nee).map(|p| from + p)
+}
+
+/// UTF-16-native case mapping (ES-262 §15.5.4.16/§15.5.4.18). ASCII strings
+/// take a byte-wise fast path; others decode surrogate pairs to scalars,
+/// apply the Unicode default case mapping, and re-encode — never touching
+/// UTF-8.
+pub fn case_units(u: &[u16], upper: bool) -> Vec<u16> {
+    if u.iter().all(|&c| c < 0x80) {
+        return u
+            .iter()
+            .map(|&c| {
+                let b = c as u8;
+                u16::from(if upper {
+                    b.to_ascii_uppercase()
+                } else {
+                    b.to_ascii_lowercase()
+                })
+            })
+            .collect();
+    }
+    let mut out = Vec::with_capacity(u.len());
+    let mut buf = [0u16; 2];
+    for ch in char::decode_utf16(u.iter().copied()) {
+        let c = ch.unwrap_or('\u{FFFD}');
+        if upper {
+            for m in c.to_uppercase() {
+                out.extend_from_slice(m.encode_utf16(&mut buf));
+            }
+        } else {
+            for m in c.to_lowercase() {
+                out.extend_from_slice(m.encode_utf16(&mut buf));
+            }
+        }
+    }
+    out
+}
+
 /// Reads a possibly-null string pointer. `None` = AS3 `null`.
 ///
 /// # Safety

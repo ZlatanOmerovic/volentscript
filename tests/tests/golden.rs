@@ -138,6 +138,15 @@ fn module_const_inlining() {
     run_golden("modconst");
 }
 
+/// P26: UTF-16-native string ops (split/replace/case/join) match ES on the
+/// edge cases a UTF-8 round-trip mishandles — multi-char and empty-separator
+/// splits, first-match/empty-search replace, non-ASCII case mapping, and
+/// surrogate-pair round-trips.
+#[test]
+fn strings_utf16_native() {
+    run_golden("strutf16");
+}
+
 /// The Phase 7 milestone (SPECS §11): a real CLI tool — args, File I/O,
 /// dynamic objects, JSON round trip, Math, callbacks, exit codes.
 #[test]

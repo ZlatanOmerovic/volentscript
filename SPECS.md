@@ -226,10 +226,18 @@ both precisely because a wrong range proof there is memory-unsafety, not a
 wrong result.
 
 ### 4.4 Strings
-Keep AS3-observable string semantics (indexing, `length`, methods). Internal
-encoding may be UTF-8 with a UTF-16-compatible API surface **only if** all
-observable behavior (`.length`, `charCodeAt`, surrogate handling) matches AS3.
-Default to UTF-16 storage to avoid semantic drift; revisit as an optimization.
+Keep AS3-observable string semantics (indexing, `length`, methods). Storage is
+**UTF-16 code units** (`VsString` = `{ len, *const u16 }`) so `.length`,
+`charCodeAt`, indexing, and surrogate handling match AS3 exactly.
+
+**UTF-16-native ops (P26):** string methods operate on the `u16` buffer
+directly — `split`, `replace`, `toUpperCase`/`toLowerCase`, and `Array`/
+`Vector` `join` no longer round-trip through UTF-8 (`indexOf`, `lastIndexOf`,
+and `+` already did). Case mapping takes an ASCII fast path and otherwise
+decodes surrogate pairs to scalars, applies the Unicode default case mapping,
+and re-encodes — never touching UTF-8. This removed the transcode cost; the
+remaining `strings`-benchmark gap is per-operation allocation churn (§7 GC
+work), not encoding.
 
 ### 4.5 Nominal, not structural **[DECISION — default: nominal]**
 Type compatibility is **nominal** (by declared name/identity), matching AS3 and

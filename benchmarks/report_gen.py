@@ -92,16 +92,22 @@ md.append("""
   everyone (generational collectors love this workload). Our conservative
   mark-sweep with size-class pooling holds memory flat but pays per-object
   bookkeeping.
-- **Strings** — ~18x C. Every operation transcodes UTF-16 storage to UTF-8
-  and back inside the runtime; that is the whole gap.
+- **Strings** — ~13x C, down from ~18x after P26 made split/replace/case/join
+  operate on UTF-16 code units directly instead of transcoding to UTF-8 and
+  back (indexOf and `+` were already native). The transcode was only ~a
+  quarter of the cost, though: the benchmark allocates ~12 strings per
+  iteration, so what remains is allocation/GC churn, not encoding — the same
+  gap as binarytrees, addressed by the allocation fast path + generational
+  collection, not more string work.
 
-**Remaining gaps map to planned optimizations, in impact order:** string ops
-that stay in UTF-16 instead of transcoding (strings), module-level global
-storage so mutable top-level `var`s stop closure-converting their readers
-(P25 already did this for `const`s), and generational collection
-(binarytrees). fib's ~6x is the call ABI itself and nbody's ~10x is per-field
-pointer chasing plus `Math.sqrt`, neither of which is a collector or closure
-issue. None require language changes.
+**Remaining gaps map to planned optimizations, in impact order:** an
+allocation fast path plus generational collection — the dominant cost in
+both binarytrees and strings (which allocates ~12 short-lived strings per
+iteration) — and module-level global storage so mutable top-level `var`s stop
+closure-converting their readers (P25 already did this for `const`s). fib's
+~6x is the call ABI itself and nbody's ~10x is per-field pointer chasing plus
+`Math.sqrt`, neither a collector nor a closure issue. None require language
+changes.
 
 **Fairness notes:** same algorithm and structure in every language,
 idiomatic-simple, no SIMD/threads/arena tricks anywhere. Java is timed as
