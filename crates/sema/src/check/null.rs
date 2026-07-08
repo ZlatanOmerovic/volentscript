@@ -106,7 +106,10 @@ impl<'a> Checker<'a> {
             // Natives: only File.read / System.getenv return null.
             TExprKind::CallNative(nf, _) => matches!(
                 nf,
-                crate::builtins::NativeFn::FileRead | crate::builtins::NativeFn::SystemGetenv
+                crate::builtins::NativeFn::FileRead
+                    | crate::builtins::NativeFn::SystemGetenv
+                    | crate::builtins::NativeFn::FileList
+                    | crate::builtins::NativeFn::SystemReadLine
             ),
             TExprKind::Coerce(_, v) => self.expr_nullable(v),
             TExprKind::Comma(_, b) => self.expr_nullable(b),

@@ -1,0 +1,20 @@
+mkdir true
+isDirectory true true
+write true
+append true
+read true
+size 11
+mtime>0 true
+copy true
+rename true
+list a.txt,nested
+nested c.txt
+list-missing true
+size-missing -1
+remove true
+remove-c true
+rmdir-nonempty false
+rmdir-nested true
+rmdir true
+gone true
+fileio done

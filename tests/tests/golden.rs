@@ -348,3 +348,47 @@ fn sockets_echo() {
 fn namespace_values() {
     run_golden("nsvalues");
 }
+
+/// P18: File IO expansion — directory lifecycle, metadata, copy/rename/
+/// append/remove, sorted listing (self-contained scratch dir).
+#[test]
+fn fileio() {
+    run_golden("fileio");
+}
+
+/// P18: System.readLine() consumes stdin line-by-line until EOF.
+#[test]
+fn stdin_lines() {
+    let root = workspace_root();
+    let out_dir = std::env::temp_dir().join(format!("vs-stdin-{}", std::process::id()));
+    std::fs::create_dir_all(&out_dir).expect("temp dir");
+    let exe = out_dir.join("stdin_upper");
+    driver::build(&driver::BuildOptions {
+        input: root.join("tests/programs/stdin_upper.as"),
+        output: Some(exe.clone()),
+        runtime_lib: Some(runtime_lib()),
+        opt: driver::OptLevel::default(),
+        target: None,
+    })
+    .unwrap_or_else(|e| panic!("build failed:\n{}", e.rendered.join("\n")));
+
+    use std::io::Write as _;
+    let mut child = Command::new(&exe)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"hello\nfile io\n")
+        .expect("write");
+    let out = child.wait_with_output().expect("wait");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "HELLO\nFILE IO\neof\n"
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let _ = std::fs::remove_dir_all(&out_dir);
+}

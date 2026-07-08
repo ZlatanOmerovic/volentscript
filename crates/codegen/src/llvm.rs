@@ -6204,6 +6204,104 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     ),
                 )
             }
+            // P18 File IO expansion: one-path and two-path Boolean ops
+            // share shapes; list returns Array (null = error), size/mtime
+            // return Number.
+            N::FileRemove | N::FileMkdir | N::FileRmdir | N::FileIsDirectory => {
+                let name = match nf {
+                    N::FileRemove => "vs_file_remove",
+                    N::FileMkdir => "vs_file_mkdir",
+                    N::FileRmdir => "vs_file_rmdir",
+                    _ => "vs_file_is_directory",
+                };
+                let path = self.str_arg(&args[0]);
+                let f = cx.runtime_fn(name, Some(cx.context.i32_type().into()), &[cx.ptr().into()]);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[path.into()], "fio")
+                    .expect("call");
+                Val::Bool(
+                    self.nonzero(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("value")
+                            .into_int_value(),
+                    ),
+                )
+            }
+            N::FileAppend | N::FileCopy | N::FileRename => {
+                let name = match nf {
+                    N::FileAppend => "vs_file_append",
+                    N::FileCopy => "vs_file_copy",
+                    _ => "vs_file_rename",
+                };
+                let a = self.str_arg(&args[0]);
+                let b = self.str_arg(&args[1]);
+                let f = cx.runtime_fn(
+                    name,
+                    Some(cx.context.i32_type().into()),
+                    &[cx.ptr().into(), cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[a.into(), b.into()], "fio2")
+                    .expect("call");
+                Val::Bool(
+                    self.nonzero(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("value")
+                            .into_int_value(),
+                    ),
+                )
+            }
+            N::FileList => {
+                let path = self.str_arg(&args[0]);
+                let f = cx.runtime_fn("vs_file_list", Some(cx.ptr().into()), &[cx.ptr().into()]);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[path.into()], "flist")
+                    .expect("call");
+                Val::Arr(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            N::FileSize | N::FileMtime => {
+                let name = if nf == N::FileSize {
+                    "vs_file_size"
+                } else {
+                    "vs_file_mtime"
+                };
+                let path = self.str_arg(&args[0]);
+                let f = cx.runtime_fn(name, Some(cx.context.f64_type().into()), &[cx.ptr().into()]);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[path.into()], "fstat")
+                    .expect("call");
+                Val::Num(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_float_value(),
+                )
+            }
+            N::SystemReadLine => {
+                let f = cx.runtime_fn("vs_system_read_line", Some(cx.ptr().into()), &[]);
+                let call = self.cx.builder.build_call(f, &[], "rl").expect("call");
+                Val::Str(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
             N::FileExists => {
                 let path = self.str_arg(&args[0]);
                 let f = cx.runtime_fn(

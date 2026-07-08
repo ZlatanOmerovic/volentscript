@@ -2807,3 +2807,163 @@ pub unsafe extern "C" fn vs_ns_call(
     // SAFETY: caller contract.
     unsafe { namespace::call(recv.as_object_ptr(), &*ns, name, argc, args, out) }
 }
+
+// --- File IO expansion (SPECS §6, P18) ----------------------------------------
+
+/// File.append(path, text) → success (creates the file if absent).
+///
+/// # Safety
+/// Pointers live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_file_append(path: *const VsString, text: *const VsString) -> u32 {
+    use std::io::Write as _;
+    // SAFETY: caller contract.
+    let path = unsafe { require(path, "File.append") }.to_rust();
+    let text = unsafe { string::deref(text) }
+        .map(|s| s.to_rust())
+        .unwrap_or_default();
+    let ok = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .is_ok();
+    u32::from(ok)
+}
+
+/// File.remove(path) → success (files only; directories use rmdir).
+///
+/// # Safety
+/// Pointer live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_file_remove(path: *const VsString) -> u32 {
+    // SAFETY: caller contract.
+    let path = unsafe { require(path, "File.remove") }.to_rust();
+    u32::from(std::fs::remove_file(&path).is_ok())
+}
+
+/// File.copy(from, to) → success.
+///
+/// # Safety
+/// Pointers live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_file_copy(from: *const VsString, to: *const VsString) -> u32 {
+    // SAFETY: caller contract.
+    let from = unsafe { require(from, "File.copy") }.to_rust();
+    let to = unsafe { require(to, "File.copy") }.to_rust();
+    u32::from(std::fs::copy(&from, &to).is_ok())
+}
+
+/// File.rename(from, to) → success (also moves).
+///
+/// # Safety
+/// Pointers live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_file_rename(from: *const VsString, to: *const VsString) -> u32 {
+    // SAFETY: caller contract.
+    let from = unsafe { require(from, "File.rename") }.to_rust();
+    let to = unsafe { require(to, "File.rename") }.to_rust();
+    u32::from(std::fs::rename(&from, &to).is_ok())
+}
+
+/// File.mkdir(path) → success (recursive, like `mkdir -p`).
+///
+/// # Safety
+/// Pointer live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_file_mkdir(path: *const VsString) -> u32 {
+    // SAFETY: caller contract.
+    let path = unsafe { require(path, "File.mkdir") }.to_rust();
+    u32::from(std::fs::create_dir_all(&path).is_ok())
+}
+
+/// File.rmdir(path) → success (empty directories only — no recursive
+/// delete footgun; remove files first).
+///
+/// # Safety
+/// Pointer live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_file_rmdir(path: *const VsString) -> u32 {
+    // SAFETY: caller contract.
+    let path = unsafe { require(path, "File.rmdir") }.to_rust();
+    u32::from(std::fs::remove_dir(&path).is_ok())
+}
+
+/// File.list(path) → sorted Array of entry names, or null on error.
+///
+/// # Safety
+/// Pointer live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_file_list(path: *const VsString) -> *const seq::VsArray {
+    // SAFETY: caller contract.
+    let path = unsafe { require(path, "File.list") }.to_rust();
+    let Ok(entries) = std::fs::read_dir(&path) else {
+        return std::ptr::null();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect();
+    names.sort();
+    let items: Vec<VsAny> = names
+        .iter()
+        .map(|n| VsAny::string(VsString::from_rust(n)))
+        .collect();
+    seq::new_array(items)
+}
+
+/// File.isDirectory(path).
+///
+/// # Safety
+/// Pointer live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_file_is_directory(path: *const VsString) -> u32 {
+    // SAFETY: caller contract.
+    let path = unsafe { require(path, "File.isDirectory") }.to_rust();
+    u32::from(std::path::Path::new(&path).is_dir())
+}
+
+/// File.size(path) → bytes, or -1 on error.
+///
+/// # Safety
+/// Pointer live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_file_size(path: *const VsString) -> f64 {
+    // SAFETY: caller contract.
+    let path = unsafe { require(path, "File.size") }.to_rust();
+    std::fs::metadata(&path)
+        .map(|m| m.len() as f64)
+        .unwrap_or(-1.0)
+}
+
+/// File.mtime(path) → epoch milliseconds, or -1 on error.
+///
+/// # Safety
+/// Pointer live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_file_mtime(path: *const VsString) -> f64 {
+    // SAFETY: caller contract.
+    let path = unsafe { require(path, "File.mtime") }.to_rust();
+    std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(-1.0)
+}
+
+/// System.readLine() → next stdin line without its terminator, or null
+/// at EOF.
+#[unsafe(no_mangle)]
+pub extern "C" fn vs_system_read_line() -> *const VsString {
+    use std::io::BufRead as _;
+    let mut line = String::new();
+    match std::io::stdin().lock().read_line(&mut line) {
+        Ok(0) | Err(_) => std::ptr::null(),
+        Ok(_) => {
+            while line.ends_with('\n') || line.ends_with('\r') {
+                line.pop();
+            }
+            VsString::from_rust(&line)
+        }
+    }
+}

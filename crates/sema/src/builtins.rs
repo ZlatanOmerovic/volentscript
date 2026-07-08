@@ -189,6 +189,17 @@ pub enum NativeFn {
     DateUTC,
     SocketConnect,
     ServerSocketBind,
+    FileAppend,
+    FileRemove,
+    FileCopy,
+    FileRename,
+    FileMkdir,
+    FileRmdir,
+    FileList,
+    FileIsDirectory,
+    FileSize,
+    FileMtime,
+    SystemReadLine,
 }
 
 /// One native static method.
@@ -346,6 +357,12 @@ pub fn native_methods(class: &str) -> Option<&'static [NativeMethod]> {
             func: SystemGcLiveBytes,
             sig: nsig(&[], 0, false, N),
         },
+        // Next stdin line, null at EOF (nullable in §4.1 flow).
+        NativeMethod {
+            name: "readLine",
+            func: SystemReadLine,
+            sig: nsig(&[], 0, false, Ty::String),
+        },
     ];
     static FILE: &[NativeMethod] = &[
         NativeMethod {
@@ -362,6 +379,57 @@ pub fn native_methods(class: &str) -> Option<&'static [NativeMethod]> {
             name: "exists",
             func: FileExists,
             sig: nsig(&[Ty::String], 1, false, Ty::Boolean),
+        },
+        NativeMethod {
+            name: "append",
+            func: FileAppend,
+            sig: nsig(&[Ty::String, Ty::String], 2, false, Ty::Boolean),
+        },
+        NativeMethod {
+            name: "remove",
+            func: FileRemove,
+            sig: nsig(&[Ty::String], 1, false, Ty::Boolean),
+        },
+        NativeMethod {
+            name: "copy",
+            func: FileCopy,
+            sig: nsig(&[Ty::String, Ty::String], 2, false, Ty::Boolean),
+        },
+        NativeMethod {
+            name: "rename",
+            func: FileRename,
+            sig: nsig(&[Ty::String, Ty::String], 2, false, Ty::Boolean),
+        },
+        NativeMethod {
+            name: "mkdir",
+            func: FileMkdir,
+            sig: nsig(&[Ty::String], 1, false, Ty::Boolean),
+        },
+        NativeMethod {
+            name: "rmdir",
+            func: FileRmdir,
+            sig: nsig(&[Ty::String], 1, false, Ty::Boolean),
+        },
+        // Sorted entry names; null on error (nullable in §4.1 flow).
+        NativeMethod {
+            name: "list",
+            func: FileList,
+            sig: nsig(&[Ty::String], 1, false, Ty::Array),
+        },
+        NativeMethod {
+            name: "isDirectory",
+            func: FileIsDirectory,
+            sig: nsig(&[Ty::String], 1, false, Ty::Boolean),
+        },
+        NativeMethod {
+            name: "size",
+            func: FileSize,
+            sig: nsig(&[Ty::String], 1, false, N),
+        },
+        NativeMethod {
+            name: "mtime",
+            func: FileMtime,
+            sig: nsig(&[Ty::String], 1, false, N),
         },
     ];
     static JSON_M: &[NativeMethod] = &[

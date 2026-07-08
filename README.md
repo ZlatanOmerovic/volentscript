@@ -82,7 +82,8 @@ runtime-computed qualification via per-class reflection tables;
 RegExp (backtracking engine: backreferences, lazy quantifiers, UTF-16
 indices), Date (constructors, local+UTC getters, avmplus string forms,
 `Date.UTC`), and the CLI runtime: `trace`, `System.args/exit/getenv/
-time/gc`, `File.read/write/exists`, blocking TCP sockets
+time/gc/readLine`, File IO (`read/write/append/exists/remove/copy/
+rename/mkdir/rmdir/list/isDirectory/size/mtime`), blocking TCP sockets
 (`Socket.connect`, `ServerSocket.bind/accept`, line-oriented reads).
 
 **Runtime.** Conservative mark-sweep GC (safepoint-triggered,
