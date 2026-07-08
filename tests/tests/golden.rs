@@ -103,3 +103,11 @@ fn oop_polymorphism() {
 fn generic_collections() {
     run_golden("generics");
 }
+
+/// The Phase 6 milestone: closures + exceptions — captured state, bound
+/// methods, call/apply, comparator sort, for each, typed catch dispatch,
+/// runtime errors as catchable objects, finally on every path.
+#[test]
+fn closures_and_exceptions() {
+    run_golden("closures");
+}

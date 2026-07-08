@@ -50,10 +50,22 @@ pub struct TFunction {
     pub locals: Vec<Local>,
     /// Number of leading `locals` that are parameters.
     pub param_count: usize,
+    /// Free variables captured from enclosing frames, in environment order.
+    pub captures: Vec<CapSrc>,
     /// Body statements.
     pub body: Vec<TStmt>,
     /// Source range.
     pub span: Span,
+}
+
+/// Where a captured variable lives in the *defining* function's frame
+/// (closure conversion, SPECS §3.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapSrc {
+    /// A local (cell) of the immediately enclosing function.
+    ParentLocal(LocalId),
+    /// A capture slot of the immediately enclosing function (multi-level).
+    ParentCapture(usize),
 }
 
 /// One local slot (parameter or hoisted `var`).
@@ -71,6 +83,8 @@ pub struct Local {
     pub default: Option<TExpr>,
     /// Rest parameter (`...args`).
     pub is_rest: bool,
+    /// Captured by a nested function — storage becomes a heap cell.
+    pub captured: bool,
 }
 
 /// A checked statement.
@@ -291,6 +305,22 @@ pub enum TExprKind {
     SeqLen(Box<TExpr>),
     /// `length = n` on Array/Vector (truncates/extends).
     SeqSetLen(Box<TExpr>, Box<TExpr>),
+    /// Read/write of a variable captured from an enclosing frame
+    /// (index into the current function's `captures`).
+    CaptureGet(usize),
+    CaptureSet(usize, Box<TExpr>),
+    /// Closure creation over a checked function (env from current frame).
+    Closure(FnId),
+    /// `obj.method` extraction — permanently bound method closure
+    /// (SPECS §3.7).
+    BoundMethod(Box<TExpr>, ClassId, usize),
+    /// `f.call(thisArg, ...)` / `f.apply(thisArg, argsArray)`.
+    CallFunctionValue {
+        callee: Box<TExpr>,
+        this_arg: Option<Box<TExpr>>,
+        args: Vec<TExpr>,
+        is_apply: bool,
+    },
     /// Implicit conversion made explicit; `ty` is the target.
     Coerce(Coercion, Box<TExpr>),
     Array(Vec<Option<TExpr>>),

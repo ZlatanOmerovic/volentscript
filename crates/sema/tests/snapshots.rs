@@ -66,12 +66,13 @@ fn as_with_machine_type_yields_any() {
 }
 
 #[test]
-fn closures_gated_until_p6() {
+fn closures_capture_cleanly() {
     let out = run(
         "d.as",
-        "function outer():void { var x:int = 1; var f:Function = function():int { return x; }; }",
+        "function outer():Function { var x:int = 1; return function():int { return x; }; }",
     );
-    assert!(out.contains("Phase 6"), "{out}");
+    assert!(!out.contains("error"), "{out}");
+    assert!(out.contains("Closure"), "{out}");
 }
 
 /// P4 negative corpus: override enforcement, final, conformance,

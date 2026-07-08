@@ -51,6 +51,22 @@ fn load(input: &Path) -> Result<(SourceMap, SourceId), Errors> {
     Ok((sources, file))
 }
 
+/// Parses the user file with the prelude spliced in front.
+fn parse_with_prelude(
+    sources: &mut SourceMap,
+    file: SourceId,
+) -> Result<ast::Program, Vec<diagnostics::Diagnostic>> {
+    let prelude_id = sources.add("<prelude>", PRELUDE.to_string());
+    let prelude = parser::parse(sources, prelude_id)?;
+    let mut program = parser::parse(sources, file)?;
+    let mut directives = prelude.directives;
+    directives.append(&mut program.directives);
+    Ok(ast::Program {
+        directives,
+        span: program.span,
+    })
+}
+
 /// Result of `check`: warnings (rendered) plus the typed-AST dump.
 #[derive(Debug)]
 pub struct CheckReport {
@@ -60,11 +76,47 @@ pub struct CheckReport {
     pub dump: String,
 }
 
+/// The Error hierarchy (SPECS §6 P6), compiled into every program. The
+/// field layout (message, name, errorID = slots 0..2) is an ABI contract
+/// with runtime/src/exc.rs — internal faults are built from it.
+const PRELUDE: &str = r#"
+public class Error {
+    public var message:String?;
+    public var name:String? = "Error";
+    public var errorID:int;
+    public function Error(message:* = "", id:int = 0) {
+        this.message = "" + message;
+        errorID = id;
+    }
+    public function toString():String {
+        var n:String = name == null ? "Error" : "" + name;
+        if (message == null || message == "")
+            return n;
+        return n + ": " + message;
+    }
+}
+public class TypeError extends Error {
+    public function TypeError(m:* = "", id:int = 0) { super(m, id); name = "TypeError"; }
+}
+public class RangeError extends Error {
+    public function RangeError(m:* = "", id:int = 0) { super(m, id); name = "RangeError"; }
+}
+public class ReferenceError extends Error {
+    public function ReferenceError(m:* = "", id:int = 0) { super(m, id); name = "ReferenceError"; }
+}
+public class ArgumentError extends Error {
+    public function ArgumentError(m:* = "", id:int = 0) { super(m, id); name = "ArgumentError"; }
+}
+public class SyntaxError extends Error {
+    public function SyntaxError(m:* = "", id:int = 0) { super(m, id); name = "SyntaxError"; }
+}
+"#;
+
 fn check_program(
-    sources: &SourceMap,
+    sources: &mut SourceMap,
     file: SourceId,
 ) -> Result<(sema::TProgram, Vec<String>), Errors> {
-    let program = parser::parse(sources, file).map_err(|d| Errors::new(d, sources))?;
+    let program = parse_with_prelude(sources, file).map_err(|d| Errors::new(d, sources))?;
     let outcome = sema::check(&program);
     match outcome.program {
         Some(typed) => {
@@ -90,8 +142,8 @@ pub fn parse_dump(input: &Path) -> Result<String, Errors> {
 /// Parses and type-checks one file (`check` subcommand — the P2 milestone
 /// surface).
 pub fn check(input: &Path) -> Result<CheckReport, Errors> {
-    let (sources, file) = load(input)?;
-    let (typed, warnings) = check_program(&sources, file)?;
+    let (mut sources, file) = load(input)?;
+    let (typed, warnings) = check_program(&mut sources, file)?;
     Ok(CheckReport {
         warnings,
         dump: sema::dump(&typed),
@@ -102,8 +154,8 @@ pub fn check(input: &Path) -> Result<CheckReport, Errors> {
 /// LLVM codegen → link against the runtime static lib → ad-hoc codesign
 /// (macOS arm64, CLAUDE.md §3).
 pub fn build(opts: &BuildOptions) -> Result<PathBuf, Errors> {
-    let (sources, file) = load(&opts.input)?;
-    let (typed, warnings) = check_program(&sources, file)?;
+    let (mut sources, file) = load(&opts.input)?;
+    let (typed, warnings) = check_program(&mut sources, file)?;
     for w in &warnings {
         eprintln!("{w}");
     }

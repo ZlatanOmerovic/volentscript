@@ -35,6 +35,7 @@ mod tag {
     pub const OBJECT: u32 = 7;
     pub const ARRAY: u32 = 8;
     pub const VECTOR: u32 = 9;
+    pub const FUNCTION: u32 = 10;
 }
 
 /// LLVM implementor of [`Backend`].
@@ -66,6 +67,9 @@ impl Backend for LlvmBackend {
                 false,
             ),
             classes: Vec::new(),
+            wrappers: Default::default(),
+            vwrappers: Default::default(),
+            bwrappers: Default::default(),
         };
 
         // Declare every function first (mutual recursion), then emit bodies.
@@ -129,6 +133,12 @@ struct Cx<'ctx> {
     any_ty: StructType<'ctx>,
     /// Per-class artifacts (RTTI globals, layouts, statics); index = class.
     classes: Vec<ClassArt<'ctx>>,
+    /// Boxed-ABI wrappers for functions used as values (lazy, memoized).
+    wrappers: std::cell::RefCell<std::collections::HashMap<u32, FunctionValue<'ctx>>>,
+    /// Virtual-dispatch wrappers for bound methods, keyed (class, vslot).
+    vwrappers: std::cell::RefCell<std::collections::HashMap<(u32, usize), FunctionValue<'ctx>>>,
+    /// Builtin wrappers keyed by discriminant.
+    bwrappers: std::cell::RefCell<std::collections::HashMap<u32, FunctionValue<'ctx>>>,
 }
 
 /// Per-class codegen artifacts.
@@ -161,6 +171,8 @@ enum Val<'ctx> {
     Arr(PointerValue<'ctx>),
     /// Vector pointer (possibly null).
     VecP(PointerValue<'ctx>),
+    /// Function value (closure pointer, possibly null).
+    Fun(PointerValue<'ctx>),
     /// Pointer to an entry-block alloca holding a `{i32, i64}` box.
     Any(PointerValue<'ctx>),
     Void,
@@ -177,7 +189,9 @@ impl<'ctx> Cx<'ctx> {
             Ty::Number => self.context.f64_type().into(),
             Ty::Boolean => self.context.bool_type().into(),
             Ty::String => self.ptr().into(),
-            Ty::Object(_) | Ty::Iface(_) | Ty::Array | Ty::Vector(_) => self.ptr().into(),
+            Ty::Object(_) | Ty::Iface(_) | Ty::Array | Ty::Vector(_) | Ty::Function => {
+                self.ptr().into()
+            }
             Ty::Any => self.any_ty.into(),
             Ty::Void => unreachable!("void has no storage"),
         }
@@ -190,8 +204,12 @@ impl<'ctx> Cx<'ctx> {
         } else {
             format!("vs_fn{index}")
         };
-        // Instance methods/constructors receive `this` first.
+        // Leading implicit params: environment (capturing functions),
+        // then `this` (instance methods/constructors).
         let mut params: Vec<BasicMetadataTypeEnum> = Vec::new();
+        if !f.captures.is_empty() {
+            params.push(self.ptr().into());
+        }
         if f.this_class.is_some() {
             params.push(self.ptr().into());
         }
@@ -231,6 +249,9 @@ struct Frame<'ctx> {
     break_bb: BasicBlock<'ctx>,
     /// `None` for switch frames (continue skips them).
     continue_bb: Option<BasicBlock<'ctx>>,
+    /// Exit-action stack depth at frame creation (cleanups above this run
+    /// when jumping out to this frame).
+    exit_depth: usize,
 }
 
 /// Per-function emission state.
@@ -240,9 +261,23 @@ struct FnCx<'a, 'ctx> {
     program: &'a mir::Program,
     function: FunctionValue<'ctx>,
     mir_fn: &'a mir::Function,
-    locals: Vec<(PointerValue<'ctx>, Ty)>,
+    locals: Vec<(PointerValue<'ctx>, Ty, bool)>,
     frames: Vec<Frame<'ctx>>,
     entry: BasicBlock<'ctx>,
+    /// Environment parameter (array of cell pointers), when capturing.
+    env_param: Option<PointerValue<'ctx>>,
+    /// Cleanup obligations for early exits crossing `try` regions,
+    /// innermost last.
+    exit_actions: Vec<ExitAction<'a>>,
+}
+
+/// One pending cleanup on an early exit (return/break/continue) that
+/// crosses a `try` region.
+struct ExitAction<'a> {
+    /// Pop the active setjmp handler (true while inside the try body).
+    pop_handler: bool,
+    /// Inline this `finally` block.
+    finally: Option<&'a [Stmt]>,
 }
 
 impl<'a, 'ctx> FnCx<'a, 'ctx> {
@@ -265,14 +300,46 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             locals: Vec::new(),
             frames: Vec::new(),
             entry,
+            env_param: (!mir_fn.captures.is_empty())
+                .then(|| function.get_nth_param(0).expect("env").into_pointer_value()),
+            exit_actions: Vec::new(),
         };
-        // Local slots. Parameters copy their incoming values.
+        // Local slots. Parameters copy their incoming values. Captured
+        // locals are heap cells holding boxed values (closure conversion).
+        let implicit =
+            u32::from(!mir_fn.captures.is_empty()) + u32::from(mir_fn.this_class.is_some());
         for (i, &ty) in mir_fn.locals.iter().enumerate() {
+            let is_cell = mir_fn.captured.get(i).copied().unwrap_or(false);
+            if is_cell {
+                let slot = fcx.entry_alloca(cx.ptr(), &format!("cell{i}"));
+                fcx.locals.push((slot, ty, true));
+                // Initial value: the incoming parameter or the type default.
+                let init: Val = if i < mir_fn.param_count {
+                    let arg = function.get_nth_param(i as u32 + implicit).expect("param");
+                    fcx.wrap_basic(arg, ty)
+                } else {
+                    fcx.default_val(ty)
+                };
+                let boxed = match init {
+                    Val::Any(p) => p,
+                    other => fcx.box_value(other),
+                };
+                let newcell =
+                    cx.runtime_fn("vs_cell_new", Some(cx.ptr().into()), &[cx.ptr().into()]);
+                let cell = cx
+                    .builder
+                    .build_call(newcell, &[boxed.into()], "cell")
+                    .expect("call")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("value");
+                cx.builder.build_store(slot, cell).expect("store");
+                continue;
+            }
             let slot = fcx.entry_alloca(cx.basic_ty(ty), &format!("local{i}"));
-            fcx.locals.push((slot, ty));
+            fcx.locals.push((slot, ty, false));
             if i < mir_fn.param_count {
-                let arg_index = i as u32 + u32::from(mir_fn.this_class.is_some());
-                let arg = function.get_nth_param(arg_index).expect("param");
+                let arg = function.get_nth_param(i as u32 + implicit).expect("param");
                 cx.builder.build_store(slot, arg).expect("store");
             } else {
                 // Non-param locals get their type's default (SPECS §3.11)
@@ -281,14 +348,22 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     Ty::Int | Ty::UInt => cx.context.i32_type().const_zero().into(),
                     Ty::Number => cx.context.f64_type().const_float(f64::NAN).into(),
                     Ty::Boolean => cx.context.bool_type().const_zero().into(),
-                    Ty::String | Ty::Object(_) | Ty::Iface(_) | Ty::Array | Ty::Vector(_) => {
-                        cx.ptr().const_null().into()
-                    }
+                    Ty::String
+                    | Ty::Object(_)
+                    | Ty::Iface(_)
+                    | Ty::Array
+                    | Ty::Vector(_)
+                    | Ty::Function => cx.ptr().const_null().into(),
                     Ty::Any => cx.any_ty.const_zero().into(), // tag 0 = undefined
                     Ty::Void => unreachable!(),
                 };
                 cx.builder.build_store(slot, init).expect("store");
             }
+        }
+        // Script prologue: hand the Error descriptors to the runtime so
+        // internal faults throw catchable objects (exc.rs contract).
+        if std::ptr::eq(mir_fn, &program.functions[0]) && program.error_classes.len() == 6 {
+            fcx.emit_error_registration();
         }
         for stmt in &mir_fn.body {
             fcx.stmt(stmt);
@@ -323,7 +398,12 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             Ty::Boolean => b
                 .build_return(Some(&self.cx.context.bool_type().const_zero()))
                 .expect("ret"),
-            Ty::String | Ty::Object(_) | Ty::Iface(_) | Ty::Array | Ty::Vector(_) => b
+            Ty::String
+            | Ty::Object(_)
+            | Ty::Iface(_)
+            | Ty::Array
+            | Ty::Vector(_)
+            | Ty::Function => b
                 .build_return(Some(&self.cx.ptr().const_null()))
                 .expect("ret"),
             Ty::Any => b
@@ -350,7 +430,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
 
     // --- statements --------------------------------------------------------
 
-    fn stmt(&mut self, stmt: &Stmt) {
+    fn stmt(&mut self, stmt: &'a Stmt) {
         if !self.current_block_open() {
             // Unreachable statement after break/continue/return.
             return;
@@ -415,6 +495,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     label: label.clone(),
                     break_bb: end_bb,
                     continue_bb: Some(cond_bb),
+                    exit_depth: self.exit_actions.len(),
                 });
                 self.stmt(body);
                 self.frames.pop();
@@ -434,6 +515,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     label: label.clone(),
                     break_bb: end_bb,
                     continue_bb: Some(cond_bb),
+                    exit_depth: self.exit_actions.len(),
                 });
                 self.stmt(body);
                 self.frames.pop();
@@ -487,6 +569,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     label: label.clone(),
                     break_bb: end_bb,
                     continue_bb: Some(update_bb),
+                    exit_depth: self.exit_actions.len(),
                 });
                 self.stmt(body);
                 self.frames.pop();
@@ -500,6 +583,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             }
             Stmt::Switch { scrutinee, cases } => self.switch(scrutinee, cases),
             Stmt::Break { label } => {
+                let depth = self.frame_exit_depth(label.as_deref(), false);
+                self.run_exit_actions(depth);
                 let target = self.find_frame(label.as_deref(), false);
                 self.cx
                     .builder
@@ -507,6 +592,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .expect("br");
             }
             Stmt::Continue { label } => {
+                let depth = self.frame_exit_depth(label.as_deref(), true);
+                self.run_exit_actions(depth);
                 let target = self.find_frame(label.as_deref(), true);
                 self.cx
                     .builder
@@ -514,9 +601,11 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .expect("br");
             }
             Stmt::Return { value } => {
-                match value {
+                // Compute the value first, then unwind try cleanups.
+                let precomputed = value.as_ref().map(|v| self.expr(v));
+                self.run_exit_actions(0);
+                match precomputed {
                     Some(v) => {
-                        let v = self.expr(v);
                         let basic = self.materialize(v);
                         self.cx.builder.build_return(Some(&basic)).expect("ret");
                     }
@@ -530,8 +619,307 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     }
                 };
             }
+            Stmt::Throw(value) => {
+                let v = self.expr(value);
+                let boxed = match v {
+                    Val::Any(p) => p,
+                    other => self.box_value(other),
+                };
+                let f = self
+                    .cx
+                    .runtime_fn("vs_throw", None, &[self.cx.ptr().into()]);
+                self.cx
+                    .builder
+                    .build_call(f, &[boxed.into()], "")
+                    .expect("call");
+                self.cx.builder.build_unreachable().expect("unreachable");
+                // Dead block for any following emission.
+                let dead = self.new_block("after.throw");
+                self.cx.builder.position_at_end(dead);
+            }
+            Stmt::Try {
+                body,
+                catches,
+                finally,
+            } => self.emit_try(body, catches, finally.as_deref()),
             Stmt::Empty => {}
         }
+    }
+
+    /// `try/catch/finally` on the setjmp scheme (SPECS §7, documented v1
+    /// choice). The buffer lives in this frame; `vs_throw` longjmps back
+    /// here with the boxed exception.
+    fn emit_try(
+        &mut self,
+        body: &'a [Stmt],
+        catches: &'a [mir::Catch],
+        finally: Option<&'a [Stmt]>,
+    ) {
+        let cx = self.cx;
+        // Generous jmp_buf storage (macOS arm64 needs 192 bytes).
+        let buf_ty = cx.context.i8_type().array_type(512);
+        let buf = self.entry_alloca(buf_ty, "jmpbuf");
+        let setjmp = cx.runtime_fn(
+            "_setjmp",
+            Some(cx.context.i32_type().into()),
+            &[cx.ptr().into()],
+        );
+        let call = self
+            .cx
+            .builder
+            .build_call(setjmp, &[buf.into()], "sj")
+            .expect("call");
+        // returns_twice: locals must not be cached across this call.
+        let rt = cx.context.create_enum_attribute(
+            inkwell::attributes::Attribute::get_named_enum_kind_id("returns_twice"),
+            0,
+        );
+        call.add_attribute(inkwell::attributes::AttributeLoc::Function, rt);
+        let r = call
+            .try_as_basic_value()
+            .basic()
+            .expect("value")
+            .into_int_value();
+        let body_bb = self.new_block("try.body");
+        let dispatch_bb = self.new_block("try.dispatch");
+        let end_bb = self.new_block("try.end");
+        let is_zero = self
+            .cx
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                r,
+                cx.context.i32_type().const_zero(),
+                "first",
+            )
+            .expect("cmp");
+        self.cx
+            .builder
+            .build_conditional_branch(is_zero, body_bb, dispatch_bb)
+            .expect("br");
+
+        // Body: handler active; early exits must pop it and run finally.
+        self.cx.builder.position_at_end(body_bb);
+        let push = cx.runtime_fn("vs_push_handler", None, &[cx.ptr().into()]);
+        self.cx
+            .builder
+            .build_call(push, &[buf.into()], "")
+            .expect("call");
+        self.exit_actions.push(ExitAction {
+            pop_handler: true,
+            finally,
+        });
+        for st in body {
+            self.stmt(st);
+        }
+        self.exit_actions.pop();
+        if self.current_block_open() {
+            let pop = cx.runtime_fn("vs_pop_handler", None, &[]);
+            self.cx.builder.build_call(pop, &[], "").expect("call");
+            if let Some(f) = finally {
+                for st in f {
+                    self.stmt(st);
+                }
+            }
+            self.branch_if_open(end_bb);
+        }
+
+        // Dispatch: match catches in order by `is` against the binding type.
+        self.cx.builder.position_at_end(dispatch_bb);
+        let exc = self.entry_alloca(cx.any_ty, "exc");
+        let take = cx.runtime_fn("vs_take_exception", None, &[cx.ptr().into()]);
+        self.cx
+            .builder
+            .build_call(take, &[exc.into()], "")
+            .expect("call");
+        let mut matched_all = false;
+        for c in catches {
+            let (_, binding_ty, _) = self.locals[c.binding.0 as usize];
+            let is_catch_all = matches!(binding_ty, Ty::Any);
+            let body_bb = self.new_block("catch.body");
+            let next_bb = self.new_block("catch.next");
+            if is_catch_all {
+                self.cx
+                    .builder
+                    .build_unconditional_branch(body_bb)
+                    .expect("br");
+                matched_all = true;
+            } else {
+                let cond = self.exc_matches(exc, binding_ty);
+                self.cx
+                    .builder
+                    .build_conditional_branch(cond, body_bb, next_bb)
+                    .expect("br");
+            }
+            self.cx.builder.position_at_end(body_bb);
+            let bound = self.unbox_any_ptr(exc, binding_ty);
+            self.store_local(c.binding, bound);
+            self.exit_actions.push(ExitAction {
+                pop_handler: false,
+                finally,
+            });
+            for st in &c.body {
+                self.stmt(st);
+            }
+            self.exit_actions.pop();
+            if self.current_block_open() {
+                if let Some(f) = finally {
+                    for st in f {
+                        self.stmt(st);
+                    }
+                }
+                self.branch_if_open(end_bb);
+            }
+            self.cx.builder.position_at_end(next_bb);
+            if matched_all {
+                break;
+            }
+        }
+        if !matched_all {
+            // No catch matched: run finally, rethrow.
+            if let Some(f) = finally {
+                for st in f {
+                    self.stmt(st);
+                }
+            }
+            if self.current_block_open() {
+                let rethrow = cx.runtime_fn("vs_throw", None, &[cx.ptr().into()]);
+                self.cx
+                    .builder
+                    .build_call(rethrow, &[exc.into()], "")
+                    .expect("call");
+                self.cx.builder.build_unreachable().expect("unreachable");
+            }
+        } else if self.current_block_open() {
+            // Unreachable trailing next-block after a catch-all.
+            self.cx.builder.build_unreachable().expect("unreachable");
+        }
+        self.cx.builder.position_at_end(end_bb);
+    }
+
+    /// `exc is T` for catch dispatch.
+    fn exc_matches(&mut self, exc: PointerValue<'ctx>, ty: Ty) -> IntValue<'ctx> {
+        let cx = self.cx;
+        let i32t = cx.context.i32_type();
+        let call = match ty {
+            Ty::Object(class) => {
+                let f = cx.runtime_fn(
+                    "vs_any_is_class",
+                    Some(i32t.into()),
+                    &[cx.ptr().into(), cx.ptr().into()],
+                );
+                let rtti = cx.classes[class as usize].rtti;
+                self.cx
+                    .builder
+                    .build_call(f, &[exc.into(), rtti.into()], "m")
+            }
+            Ty::Iface(iface) => {
+                let f = cx.runtime_fn(
+                    "vs_any_is_iface",
+                    Some(i32t.into()),
+                    &[cx.ptr().into(), i32t.into()],
+                );
+                self.cx.builder.build_call(
+                    f,
+                    &[exc.into(), i32t.const_int(u64::from(iface), false).into()],
+                    "m",
+                )
+            }
+            Ty::Array => {
+                let f = cx.runtime_fn("vs_any_is_array", Some(i32t.into()), &[cx.ptr().into()]);
+                self.cx.builder.build_call(f, &[exc.into()], "m")
+            }
+            Ty::Vector(inst) => {
+                let f = cx.runtime_fn(
+                    "vs_any_is_vector",
+                    Some(i32t.into()),
+                    &[cx.ptr().into(), i32t.into()],
+                );
+                self.cx.builder.build_call(
+                    f,
+                    &[exc.into(), i32t.const_int(u64::from(inst), false).into()],
+                    "m",
+                )
+            }
+            other => {
+                let f = cx.runtime_fn(
+                    "vs_any_is",
+                    Some(i32t.into()),
+                    &[cx.ptr().into(), i32t.into()],
+                );
+                let t = i32t.const_int(u64::from(ty_tag(other)), false);
+                self.cx.builder.build_call(f, &[exc.into(), t.into()], "m")
+            }
+        }
+        .expect("call");
+        self.nonzero(
+            call.try_as_basic_value()
+                .basic()
+                .expect("value")
+                .into_int_value(),
+        )
+    }
+
+    /// Registers the prelude Error descriptors with the runtime.
+    fn emit_error_registration(&mut self) {
+        let cx = self.cx;
+        let n = self.program.error_classes.len() as u32;
+        let descs = self.entry_alloca(cx.ptr().array_type(n), "errdescs");
+        let sizes = self.entry_alloca(cx.context.i64_type().array_type(n), "errsizes");
+        for (i, &class) in self.program.error_classes.iter().enumerate() {
+            let art = &cx.classes[class as usize];
+            let (rtti, size) = (art.rtti, art.size);
+            let dslot = unsafe {
+                self.cx.builder.build_in_bounds_gep(
+                    cx.ptr().array_type(n),
+                    descs,
+                    &[
+                        cx.context.i32_type().const_zero(),
+                        cx.context.i32_type().const_int(i as u64, false),
+                    ],
+                    "d",
+                )
+            }
+            .expect("gep");
+            self.cx.builder.build_store(dslot, rtti).expect("store");
+            let sslot = unsafe {
+                self.cx.builder.build_in_bounds_gep(
+                    cx.context.i64_type().array_type(n),
+                    sizes,
+                    &[
+                        cx.context.i32_type().const_zero(),
+                        cx.context.i32_type().const_int(i as u64, false),
+                    ],
+                    "s",
+                )
+            }
+            .expect("gep");
+            self.cx
+                .builder
+                .build_store(sslot, cx.context.i64_type().const_int(size, false))
+                .expect("store");
+        }
+        let f = cx.runtime_fn(
+            "vs_register_errors",
+            None,
+            &[
+                cx.context.i32_type().into(),
+                cx.ptr().into(),
+                cx.ptr().into(),
+            ],
+        );
+        self.cx
+            .builder
+            .build_call(
+                f,
+                &[
+                    cx.context.i32_type().const_int(u64::from(n), false).into(),
+                    descs.into(),
+                    sizes.into(),
+                ],
+                "",
+            )
+            .expect("call");
     }
 
     fn branch_if_open(&self, target: BasicBlock<'ctx>) {
@@ -541,6 +929,69 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 .build_unconditional_branch(target)
                 .expect("br");
         }
+    }
+
+    /// Type default constant (SPECS §3.11) as a value.
+    fn default_val(&mut self, ty: Ty) -> Val<'ctx> {
+        let cx = self.cx;
+        match ty {
+            Ty::Int => Val::Int(cx.context.i32_type().const_zero()),
+            Ty::UInt => Val::UInt(cx.context.i32_type().const_zero()),
+            Ty::Number => Val::Num(cx.context.f64_type().const_float(f64::NAN)),
+            Ty::Boolean => Val::Bool(cx.context.bool_type().const_zero()),
+            Ty::String => Val::Str(cx.ptr().const_null()),
+            Ty::Object(_) | Ty::Iface(_) => Val::Obj(cx.ptr().const_null()),
+            Ty::Array => Val::Arr(cx.ptr().const_null()),
+            Ty::Vector(_) => Val::VecP(cx.ptr().const_null()),
+            Ty::Function => Val::Fun(cx.ptr().const_null()),
+            Ty::Any => {
+                let slot = self.entry_alloca(cx.any_ty, "undef");
+                self.cx
+                    .builder
+                    .build_store(slot, cx.any_ty.const_zero())
+                    .expect("store");
+                Val::Any(slot)
+            }
+            Ty::Void => Val::Void,
+        }
+    }
+
+    /// Runs cleanup obligations above `to_depth` (early exits leaving `try`
+    /// regions): pop live handlers and inline pending `finally` blocks.
+    fn run_exit_actions(&mut self, to_depth: usize) {
+        // Take ownership to avoid double-runs while emitting finallys.
+        let actions: Vec<ExitAction> = self.exit_actions.split_off(to_depth);
+        for action in actions.iter().rev() {
+            if action.pop_handler {
+                let f = self.cx.runtime_fn("vs_pop_handler", None, &[]);
+                self.cx.builder.build_call(f, &[], "").expect("call");
+            }
+            if let Some(finally) = action.finally {
+                for st in finally {
+                    self.stmt(st);
+                }
+            }
+        }
+        // Restore the stack (the emitting scope still owns them).
+        self.exit_actions.extend(actions);
+    }
+
+    /// Exit-action depth of the jump target frame (see `find_frame`).
+    fn frame_exit_depth(&self, label: Option<&str>, for_continue: bool) -> usize {
+        for frame in self.frames.iter().rev() {
+            let label_matches = match label {
+                Some(l) => frame.label.as_deref() == Some(l),
+                None => true,
+            };
+            if !label_matches {
+                continue;
+            }
+            if for_continue && frame.continue_bb.is_none() && label.is_none() {
+                continue;
+            }
+            return frame.exit_depth;
+        }
+        0
     }
 
     fn find_frame(&self, label: Option<&str>, for_continue: bool) -> BasicBlock<'ctx> {
@@ -570,7 +1021,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
     /// `switch` (§12.11 with AS3 strict-equality matching): tests run in
     /// source order (skipping `default`), bodies fall through in source
     /// order including `default`.
-    fn switch(&mut self, scrutinee: &mir::Expr, cases: &[mir::Case]) {
+    fn switch(&mut self, scrutinee: &'a mir::Expr, cases: &'a [mir::Case]) {
         let scrut = self.expr(scrutinee);
         let end_bb = self.new_block("switch.end");
         let body_bbs: Vec<BasicBlock> = (0..cases.len())
@@ -604,6 +1055,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             label: None,
             break_bb: end_bb,
             continue_bb: None,
+            exit_depth: self.exit_actions.len(),
         });
         for (i, case) in cases.iter().enumerate() {
             self.cx.builder.position_at_end(body_bbs[i]);
@@ -950,6 +1402,136 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 self.expr(l);
                 self.expr(r)
             }
+            ExprKind::CaptureGet(i) => {
+                let cell = self.capture_cell(*i);
+                let copy = self.entry_alloca(cx.any_ty, "capval");
+                let v = self
+                    .cx
+                    .builder
+                    .build_load(cx.any_ty, cell, "capload")
+                    .expect("load");
+                self.cx.builder.build_store(copy, v).expect("store");
+                self.unbox_any_ptr(copy, e.ty)
+            }
+            ExprKind::CaptureSet(i, value) => {
+                let v = self.expr(value);
+                let boxed = match v {
+                    Val::Any(p) => p,
+                    other => self.box_value(other),
+                };
+                let cell = self.capture_cell(*i);
+                let loaded = self
+                    .cx
+                    .builder
+                    .build_load(cx.any_ty, boxed, "capset")
+                    .expect("load");
+                self.cx.builder.build_store(cell, loaded).expect("store");
+                v
+            }
+            ExprKind::Closure(fn_id) => {
+                let wrapper = self.wrapper_of(*fn_id);
+                let caps: Vec<mir::CapSrc> =
+                    self.program.functions[fn_id.0 as usize].captures.clone();
+                let n = caps.len() as u32;
+                let arr = self.entry_alloca(cx.ptr().array_type(n.max(1)), "env");
+                for (i, cap) in caps.iter().enumerate() {
+                    let cell = match cap {
+                        mir::CapSrc::ParentLocal(id) => {
+                            let (slot, _, is_cell) = self.locals[id.0 as usize];
+                            debug_assert!(is_cell, "captured local must be cell-backed");
+                            self.cx
+                                .builder
+                                .build_load(cx.ptr(), slot, "cellp")
+                                .expect("load")
+                                .into_pointer_value()
+                        }
+                        mir::CapSrc::ParentCapture(j) => self.capture_cell(*j),
+                    };
+                    let slot = unsafe {
+                        self.cx.builder.build_in_bounds_gep(
+                            cx.ptr().array_type(n.max(1)),
+                            arr,
+                            &[
+                                cx.context.i32_type().const_zero(),
+                                cx.context.i32_type().const_int(i as u64, false),
+                            ],
+                            "envslot",
+                        )
+                    }
+                    .expect("gep");
+                    self.cx.builder.build_store(slot, cell).expect("store");
+                }
+                self.make_closure(wrapper, n, arr, cx.ptr().const_null())
+            }
+            ExprKind::FnValue(fn_id) => {
+                let wrapper = self.wrapper_of(*fn_id);
+                let null = cx.ptr().const_null();
+                self.make_closure(wrapper, 0, null, null)
+            }
+            ExprKind::BuiltinValue(b) => {
+                let wrapper = self.builtin_wrapper(*b);
+                let null = cx.ptr().const_null();
+                self.make_closure(wrapper, 0, null, null)
+            }
+            ExprKind::BoundMethod(recv, class, vslot) => {
+                let obj = self.obj_operand(recv);
+                self.null_check(obj);
+                let wrapper = self.vwrapper_of(*class, *vslot);
+                let null = cx.ptr().const_null();
+                self.make_closure(wrapper, 0, null, obj)
+            }
+            ExprKind::CallFnValue {
+                callee,
+                this_arg,
+                args,
+                is_apply,
+            } => self.call_fn_value(callee, this_arg.as_deref(), args, *is_apply, e.ty),
+            ExprKind::EnumLen(v) => {
+                let p = self.as_any_ptr(v);
+                let f = cx.runtime_fn(
+                    "vs_enum_len",
+                    Some(cx.context.i32_type().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "elen")
+                    .expect("call");
+                Val::Int(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_int_value(),
+                )
+            }
+            ExprKind::EnumKey(v, i) | ExprKind::EnumValue(v, i) => {
+                let is_key = matches!(e.kind, ExprKind::EnumKey(..));
+                let p = self.as_any_ptr(v);
+                let idx = match self.expr(i) {
+                    Val::Int(x) | Val::UInt(x) => x,
+                    _ => unreachable!("enum index"),
+                };
+                let out = self.entry_alloca(cx.any_ty, "enumout");
+                let f = cx.runtime_fn(
+                    if is_key {
+                        "vs_enum_key"
+                    } else {
+                        "vs_enum_value"
+                    },
+                    None,
+                    &[
+                        cx.ptr().into(),
+                        cx.context.i32_type().into(),
+                        cx.ptr().into(),
+                    ],
+                );
+                self.cx
+                    .builder
+                    .build_call(f, &[p.into(), idx.into(), out.into()], "")
+                    .expect("call");
+                Val::Any(out)
+            }
             ExprKind::ArrayLit(elements) => {
                 let staged: Vec<Option<&mir::Expr>> = elements.iter().map(|e| e.as_ref()).collect();
                 let arr_ptr = self.stage_any_array_opt(&staged);
@@ -1092,6 +1674,57 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .expect("call");
                 value
             }
+            ExprKind::CaptureIncDec {
+                slot,
+                is_inc,
+                is_prefix,
+            } => {
+                // Cells store boxed values: unbox → arith → rebox.
+                let cell = self.capture_cell(*slot);
+                let copy = self.entry_alloca(cx.any_ty, "cival");
+                let loaded = self
+                    .cx
+                    .builder
+                    .build_load(cx.any_ty, cell, "ci")
+                    .expect("load");
+                self.cx.builder.build_store(copy, loaded).expect("store");
+                let old = self.unbox_any_ptr(copy, e.ty);
+                let one_new = match old {
+                    Val::Int(i) | Val::UInt(i) => {
+                        let one = cx.context.i32_type().const_int(1, false);
+                        let n = if *is_inc {
+                            self.cx.builder.build_int_add(i, one, "inc")
+                        } else {
+                            self.cx.builder.build_int_sub(i, one, "dec")
+                        }
+                        .expect("arith");
+                        match old {
+                            Val::Int(_) => Val::Int(n),
+                            _ => Val::UInt(n),
+                        }
+                    }
+                    Val::Num(f) => {
+                        let one = cx.context.f64_type().const_float(1.0);
+                        Val::Num(
+                            if *is_inc {
+                                self.cx.builder.build_float_add(f, one, "inc")
+                            } else {
+                                self.cx.builder.build_float_sub(f, one, "dec")
+                            }
+                            .expect("arith"),
+                        )
+                    }
+                    _ => unreachable!("numeric capture inc/dec"),
+                };
+                let boxed = self.box_value(one_new);
+                let v = self
+                    .cx
+                    .builder
+                    .build_load(cx.any_ty, boxed, "nb")
+                    .expect("load");
+                self.cx.builder.build_store(cell, v).expect("store");
+                if *is_prefix { one_new } else { old }
+            }
             ExprKind::StaticIncDec {
                 class,
                 index,
@@ -1231,8 +1864,11 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
     /// interchange freely as pointers (null literals, upcasts).
     fn ref_tolerant_basic(&mut self, v: Val<'ctx>, target: Ty) -> BasicValueEnum<'ctx> {
         match (target, v) {
-            (Ty::Object(_) | Ty::Iface(_) | Ty::Array | Ty::Vector(_), Val::Str(p)) => p.into(),
-            (Ty::String, Val::Obj(p) | Val::Arr(p) | Val::VecP(p)) => p.into(),
+            (
+                Ty::Object(_) | Ty::Iface(_) | Ty::Array | Ty::Vector(_) | Ty::Function,
+                Val::Str(p),
+            ) => p.into(),
+            (Ty::String, Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p)) => p.into(),
             _ => self.materialize(v),
         }
     }
@@ -1464,8 +2100,25 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
     }
 
     fn load_local(&mut self, id: mir::LocalId) -> Val<'ctx> {
-        let (slot, ty) = self.locals[id.0 as usize];
+        let (slot, ty, is_cell) = self.locals[id.0 as usize];
         let cx = self.cx;
+        if is_cell {
+            let cell = self
+                .cx
+                .builder
+                .build_load(cx.ptr(), slot, "cellp")
+                .expect("load")
+                .into_pointer_value();
+            // Copy the boxed value out so later writes don't alias.
+            let copy = self.entry_alloca(cx.any_ty, "cellval");
+            let v = self
+                .cx
+                .builder
+                .build_load(cx.any_ty, cell, "cellload")
+                .expect("load");
+            self.cx.builder.build_store(copy, v).expect("store");
+            return self.unbox_any_ptr(copy, ty);
+        }
         match ty {
             Ty::Any => {
                 // Copy the box so later writes to the local don't alias.
@@ -1490,14 +2143,33 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
     }
 
     fn store_local(&mut self, id: mir::LocalId, v: Val<'ctx>) {
-        let (slot, ty) = self.locals[id.0 as usize];
+        let (slot, ty, is_cell) = self.locals[id.0 as usize];
+        if is_cell {
+            let boxed = match v {
+                Val::Any(p) => p,
+                other => self.box_value(other),
+            };
+            let cell = self
+                .cx
+                .builder
+                .build_load(self.cx.ptr(), slot, "cellp")
+                .expect("load")
+                .into_pointer_value();
+            let value = self
+                .cx
+                .builder
+                .build_load(self.cx.any_ty, boxed, "boxval")
+                .expect("load");
+            self.cx.builder.build_store(cell, value).expect("store");
+            return;
+        }
         // Reference kinds (String/Object/Iface) interchange as pointers
         // (null literals, upcasts share representation).
         if matches!(
             ty,
-            Ty::Object(_) | Ty::Iface(_) | Ty::String | Ty::Array | Ty::Vector(_)
+            Ty::Object(_) | Ty::Iface(_) | Ty::String | Ty::Array | Ty::Vector(_) | Ty::Function
         ) {
-            if let Val::Str(p) | Val::Obj(p) | Val::Arr(p) | Val::VecP(p) = v {
+            if let Val::Str(p) | Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) = v {
                 self.cx.builder.build_store(slot, p).expect("store");
                 return;
             }
@@ -1522,7 +2194,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
         match v {
             Val::Int(v) | Val::UInt(v) | Val::Bool(v) => v.into(),
             Val::Num(v) => v.into(),
-            Val::Str(p) | Val::Obj(p) | Val::Arr(p) | Val::VecP(p) => p.into(),
+            Val::Str(p) | Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) => p.into(),
             Val::Any(p) => self
                 .cx
                 .builder
@@ -1542,6 +2214,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             Ty::Object(_) | Ty::Iface(_) => Val::Obj(v.into_pointer_value()),
             Ty::Array => Val::Arr(v.into_pointer_value()),
             Ty::Vector(_) => Val::VecP(v.into_pointer_value()),
+            Ty::Function => Val::Fun(v.into_pointer_value()),
             Ty::Any => {
                 let slot = self.entry_alloca(self.cx.any_ty, "anyv");
                 self.cx.builder.build_store(slot, v).expect("store");
@@ -1823,6 +2496,22 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 );
                 self.cx.builder.build_call(rf, &[p.into()], "vec2s")
             }
+            Val::Fun(_) => {
+                let lit = self
+                    .cx
+                    .builder
+                    .build_global_string_ptr("function Function() {}", "fnstr")
+                    .expect("global");
+                let len = cx.context.i32_type().const_int(22, false);
+                let rf = cx.runtime_fn(
+                    "vs_string_from_utf8",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.context.i32_type().into()],
+                );
+                self.cx
+                    .builder
+                    .build_call(rf, &[lit.as_pointer_value().into(), len.into()], "f2s")
+            }
             Val::Num(f) => {
                 let rf = cx.runtime_fn(
                     "vs_num_to_string",
@@ -1947,10 +2636,11 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .expect("cast");
                 (t, bits)
             }
-            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) => {
+            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) => {
                 let full_tag = match v {
                     Val::Obj(_) => tag::OBJECT,
                     Val::Arr(_) => tag::ARRAY,
+                    Val::Fun(_) => tag::FUNCTION,
                     _ => tag::VECTOR,
                 };
                 // null pointers box as the null value.
@@ -2019,7 +2709,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     "tob",
                 )
                 .expect("cmp"),
-            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) => self
+            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) => self
                 .cx
                 .builder
                 .build_is_not_null(p, "objtrue")
@@ -3009,6 +3699,24 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                         .into_pointer_value(),
                 )
             }
+            Ty::Function => {
+                let f = cx.runtime_fn(
+                    "vs_any_coerce_function",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "fv")
+                    .expect("call");
+                Val::Fun(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
             Ty::Void => Val::Void,
         }
     }
@@ -3176,6 +3884,43 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .build_call(f, &[p.into(), sep.into()], "j")
                     .expect("call");
                 Val::Str(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            Sort if !args.is_empty() => {
+                let cmp = match self.expr(&args[0]) {
+                    Val::Fun(c) => c,
+                    Val::Any(pp) => {
+                        let f = cx.runtime_fn(
+                            "vs_any_coerce_function",
+                            Some(cx.ptr().into()),
+                            &[cx.ptr().into()],
+                        );
+                        self.cx
+                            .builder
+                            .build_call(f, &[pp.into()], "cmp")
+                            .expect("call")
+                            .try_as_basic_value()
+                            .basic()
+                            .expect("value")
+                            .into_pointer_value()
+                    }
+                    _ => unreachable!("comparator type"),
+                };
+                let f = cx.runtime_fn(
+                    "vs_arr_sort_with",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), cmp.into()], "sw")
+                    .expect("call");
+                Val::Arr(
                     call.try_as_basic_value()
                         .basic()
                         .expect("value")
@@ -3508,6 +4253,495 @@ fn build_class_artifacts<'ctx>(
     arts.into_iter().map(|(a, _)| a).collect()
 }
 
+impl<'a, 'ctx> FnCx<'a, 'ctx> {
+    /// Cell pointer for capture slot `i` of the current function.
+    fn capture_cell(&mut self, i: usize) -> PointerValue<'ctx> {
+        let cx = self.cx;
+        let env = self.env_param.expect("capturing function has env");
+        let slot = unsafe {
+            self.cx.builder.build_in_bounds_gep(
+                cx.ptr(),
+                env,
+                &[cx.context.i32_type().const_int(i as u64, false)],
+                "cap",
+            )
+        }
+        .expect("gep");
+        self.cx
+            .builder
+            .build_load(cx.ptr(), slot, "capcell")
+            .expect("load")
+            .into_pointer_value()
+    }
+
+    fn make_closure(
+        &mut self,
+        wrapper: FunctionValue<'ctx>,
+        envc: u32,
+        env: PointerValue<'ctx>,
+        this: PointerValue<'ctx>,
+    ) -> Val<'ctx> {
+        let cx = self.cx;
+        let f = cx.runtime_fn(
+            "vs_closure_new",
+            Some(cx.ptr().into()),
+            &[
+                cx.ptr().into(),
+                cx.context.i32_type().into(),
+                cx.ptr().into(),
+                cx.ptr().into(),
+            ],
+        );
+        let call = self
+            .cx
+            .builder
+            .build_call(
+                f,
+                &[
+                    wrapper.as_global_value().as_pointer_value().into(),
+                    cx.context
+                        .i32_type()
+                        .const_int(u64::from(envc), false)
+                        .into(),
+                    env.into(),
+                    this.into(),
+                ],
+                "closure",
+            )
+            .expect("call");
+        Val::Fun(
+            call.try_as_basic_value()
+                .basic()
+                .expect("value")
+                .into_pointer_value(),
+        )
+    }
+
+    /// Indirect call of a Function value with the boxed ABI.
+    fn call_fn_value(
+        &mut self,
+        callee: &mir::Expr,
+        this_arg: Option<&mir::Expr>,
+        args: &[mir::Expr],
+        is_apply: bool,
+        result_ty: Ty,
+    ) -> Val<'ctx> {
+        let cx = self.cx;
+        let c = match self.expr(callee) {
+            Val::Fun(c) => c,
+            Val::Any(p) => {
+                let f = cx.runtime_fn(
+                    "vs_any_coerce_function",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                self.cx
+                    .builder
+                    .build_call(f, &[p.into()], "fv")
+                    .expect("call")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("value")
+                    .into_pointer_value()
+            }
+            _ => unreachable!("Function callee"),
+        };
+        // `this` argument: only object-shaped values bind (SPECS §3.7 —
+        // primitives pass null).
+        let this = match this_arg.map(|t| self.expr(t)) {
+            Some(Val::Obj(p)) => p,
+            Some(Val::Any(p)) => {
+                // Extract object payloads; other tags become null.
+                let f = cx.runtime_fn(
+                    "vs_any_as_class",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.ptr().into()],
+                );
+                let object_rtti = cx.classes[0].rtti;
+                self.cx
+                    .builder
+                    .build_call(f, &[p.into(), object_rtti.into()], "thisobj")
+                    .expect("call")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("value")
+                    .into_pointer_value()
+            }
+            _ => cx.ptr().const_null(),
+        };
+        let out = self.entry_alloca(cx.any_ty, "callout");
+        if is_apply {
+            let arr = match args.first().map(|a| self.expr(a)) {
+                Some(Val::Arr(a)) => a,
+                Some(Val::Str(a)) => a, // null literal carrier
+                _ => cx.ptr().const_null(),
+            };
+            let f = cx.runtime_fn(
+                "vs_closure_apply",
+                None,
+                &[
+                    cx.ptr().into(),
+                    cx.ptr().into(),
+                    cx.ptr().into(),
+                    cx.ptr().into(),
+                ],
+            );
+            self.cx
+                .builder
+                .build_call(f, &[c.into(), this.into(), arr.into(), out.into()], "")
+                .expect("call");
+        } else {
+            let staged: Vec<Option<&mir::Expr>> = args.iter().map(Some).collect();
+            let buf = self.stage_any_array_opt(&staged);
+            let f = cx.runtime_fn(
+                "vs_closure_call",
+                None,
+                &[
+                    cx.ptr().into(),
+                    cx.ptr().into(),
+                    cx.context.i32_type().into(),
+                    cx.ptr().into(),
+                    cx.ptr().into(),
+                ],
+            );
+            let n = cx.context.i32_type().const_int(args.len() as u64, false);
+            self.cx
+                .builder
+                .build_call(
+                    f,
+                    &[c.into(), this.into(), n.into(), buf.into(), out.into()],
+                    "",
+                )
+                .expect("call");
+        }
+        self.unbox_any_ptr(out, result_ty)
+    }
+
+    /// Boxed-ABI wrapper for `fn_id` (memoized): unboxes declared params,
+    /// calls the real function, boxes the result.
+    fn wrapper_of(&mut self, fn_id: mir::FnId) -> FunctionValue<'ctx> {
+        if let Some(w) = self.cx.wrappers.borrow().get(&fn_id.0) {
+            return *w;
+        }
+        let w = build_wrapper(self.cx, self.fns, self.program, WrapTarget::Direct(fn_id));
+        self.cx.wrappers.borrow_mut().insert(fn_id.0, w);
+        w
+    }
+
+    /// Virtual-dispatch wrapper for bound methods (memoized per slot).
+    fn vwrapper_of(&mut self, class: u32, vslot: usize) -> FunctionValue<'ctx> {
+        if let Some(w) = self.cx.vwrappers.borrow().get(&(class, vslot)) {
+            return *w;
+        }
+        let w = build_wrapper(
+            self.cx,
+            self.fns,
+            self.program,
+            WrapTarget::Virtual { class, vslot },
+        );
+        self.cx.vwrappers.borrow_mut().insert((class, vslot), w);
+        w
+    }
+
+    fn builtin_wrapper(&mut self, b: mir::Builtin) -> FunctionValue<'ctx> {
+        let key = b as u32;
+        if let Some(w) = self.cx.bwrappers.borrow().get(&key) {
+            return *w;
+        }
+        let w = build_wrapper(self.cx, self.fns, self.program, WrapTarget::Builtin(b));
+        self.cx.bwrappers.borrow_mut().insert(key, w);
+        w
+    }
+}
+
+/// What a boxed-ABI wrapper forwards to.
+enum WrapTarget {
+    Direct(mir::FnId),
+    Virtual { class: u32, vslot: usize },
+    Builtin(mir::Builtin),
+}
+
+/// Synthesizes `fn(env, this, argc, args, out)` forwarding to the target
+/// (closure ABI — see runtime/src/closure.rs).
+fn build_wrapper<'ctx>(
+    cx: &Cx<'ctx>,
+    fns: &[FunctionValue<'ctx>],
+    program: &mir::Program,
+    target: WrapTarget,
+) -> FunctionValue<'ctx> {
+    let saved = cx.builder.get_insert_block();
+    let i32t = cx.context.i32_type();
+    let ptr = cx.ptr();
+    let wrap_ty = cx.context.void_type().fn_type(
+        &[ptr.into(), ptr.into(), i32t.into(), ptr.into(), ptr.into()],
+        false,
+    );
+    let name = match &target {
+        WrapTarget::Direct(f) => format!("vs_wrap{}", f.0),
+        WrapTarget::Virtual { class, vslot } => format!("vs_vwrap{class}_{vslot}"),
+        WrapTarget::Builtin(b) => format!("vs_bwrap{}", *b as u32),
+    };
+    let wrapper = cx.module.add_function(&name, wrap_ty, None);
+    let entry = cx.context.append_basic_block(wrapper, "entry");
+    let body = cx.context.append_basic_block(wrapper, "body");
+    cx.builder.position_at_end(body);
+
+    // A minimal FnCx over the wrapper for the unbox/box helpers. The
+    // referenced mir function is only used for parameter metadata.
+    let meta_fn = match &target {
+        WrapTarget::Direct(f) => &program.functions[f.0 as usize],
+        WrapTarget::Virtual { class, vslot } => {
+            let f = program.classes[*class as usize].vtable[*vslot];
+            &program.functions[f.0 as usize]
+        }
+        WrapTarget::Builtin(_) => &program.functions[0],
+    };
+    let mut fcx = FnCx {
+        cx,
+        fns,
+        program,
+        function: wrapper,
+        mir_fn: meta_fn,
+        locals: Vec::new(),
+        frames: Vec::new(),
+        entry,
+        env_param: None,
+        exit_actions: Vec::new(),
+    };
+    let env = wrapper.get_nth_param(0).unwrap().into_pointer_value();
+    let this = wrapper.get_nth_param(1).unwrap().into_pointer_value();
+    let argc = wrapper.get_nth_param(2).unwrap().into_int_value();
+    let args = wrapper.get_nth_param(3).unwrap().into_pointer_value();
+    let out = wrapper.get_nth_param(4).unwrap().into_pointer_value();
+
+    match target {
+        WrapTarget::Builtin(b) => {
+            // trace forwards boxed args directly; the numeric builtins
+            // unbox one/two fixed params.
+            match b {
+                mir::Builtin::Trace => {
+                    let f = cx.runtime_fn("vs_trace", None, &[i32t.into(), ptr.into()]);
+                    cx.builder
+                        .build_call(f, &[argc.into(), args.into()], "")
+                        .expect("call");
+                    let _ = out;
+                }
+                _ => {
+                    // Unbox arg0 (+ radix for parseInt) and forward.
+                    let a0 = fcx.entry_alloca(cx.any_ty, "a0");
+                    let loaded = cx.builder.build_load(cx.any_ty, args, "l0").expect("load");
+                    cx.builder.build_store(a0, loaded).expect("store");
+                    let result: Val = match b {
+                        mir::Builtin::ParseInt => {
+                            let sv = fcx.unbox_any_ptr(a0, Ty::String);
+                            let Val::Str(sp) = sv else { unreachable!() };
+                            let f = cx.runtime_fn(
+                                "vs_parse_int",
+                                Some(cx.context.f64_type().into()),
+                                &[ptr.into(), i32t.into()],
+                            );
+                            let call = cx
+                                .builder
+                                .build_call(f, &[sp.into(), i32t.const_zero().into()], "pi")
+                                .expect("call");
+                            Val::Num(
+                                call.try_as_basic_value()
+                                    .basic()
+                                    .expect("value")
+                                    .into_float_value(),
+                            )
+                        }
+                        mir::Builtin::ParseFloat => {
+                            let sv = fcx.unbox_any_ptr(a0, Ty::String);
+                            let Val::Str(sp) = sv else { unreachable!() };
+                            let f = cx.runtime_fn(
+                                "vs_parse_float",
+                                Some(cx.context.f64_type().into()),
+                                &[ptr.into()],
+                            );
+                            let call = cx.builder.build_call(f, &[sp.into()], "pf").expect("call");
+                            Val::Num(
+                                call.try_as_basic_value()
+                                    .basic()
+                                    .expect("value")
+                                    .into_float_value(),
+                            )
+                        }
+                        _ => {
+                            // isNaN / isFinite
+                            let n = fcx.any_to_number(a0);
+                            let b_ = &cx.builder;
+                            let flag = match b {
+                                mir::Builtin::IsNaN => b_
+                                    .build_float_compare(FloatPredicate::UNO, n, n, "isnan")
+                                    .expect("cmp"),
+                                _ => {
+                                    let sub = b_.build_float_sub(n, n, "ss").expect("sub");
+                                    b_.build_float_compare(
+                                        FloatPredicate::OEQ,
+                                        sub,
+                                        cx.context.f64_type().const_zero(),
+                                        "fin",
+                                    )
+                                    .expect("cmp")
+                                }
+                            };
+                            Val::Bool(flag)
+                        }
+                    };
+                    let boxed = fcx.box_value(result);
+                    let v = cx
+                        .builder
+                        .build_load(cx.any_ty, boxed, "res")
+                        .expect("load");
+                    cx.builder.build_store(out, v).expect("store");
+                }
+            }
+        }
+        WrapTarget::Direct(fn_id) => {
+            let callee = fns[fn_id.0 as usize];
+            let mf = &program.functions[fn_id.0 as usize];
+            let mut argv: Vec<BasicMetadataValueEnum> = Vec::new();
+            if !mf.captures.is_empty() {
+                argv.push(env.into());
+            }
+            if mf.this_class.is_some() {
+                argv.push(this.into());
+            }
+            for i in 0..mf.param_count {
+                let v = wrapper_param(&mut fcx, argc, args, i, mf.locals[i]);
+                argv.push(fcx.materialize(v).into());
+            }
+            let call = cx.builder.build_call(callee, &argv, "fwd").expect("call");
+            store_wrapper_result(&mut fcx, call, mf.ret, out);
+        }
+        WrapTarget::Virtual { class, vslot } => {
+            let target_fn = program.classes[class as usize].vtable[vslot];
+            let mf = &program.functions[target_fn.0 as usize];
+            // Virtual dispatch on the bound `this`.
+            let desc = cx
+                .builder
+                .build_load(ptr, this, "desc")
+                .expect("load")
+                .into_pointer_value();
+            let rtti_ty = cx.classes[class as usize].rtti_ty;
+            let vt = cx
+                .builder
+                .build_struct_gep(rtti_ty, desc, 8, "vt")
+                .expect("gep");
+            let slot_ptr = unsafe {
+                cx.builder.build_in_bounds_gep(
+                    ptr.array_type(0),
+                    vt,
+                    &[i32t.const_zero(), i32t.const_int(vslot as u64, false)],
+                    "vslot",
+                )
+            }
+            .expect("gep");
+            let fptr = cx
+                .builder
+                .build_load(ptr, slot_ptr, "vfn")
+                .expect("load")
+                .into_pointer_value();
+            let mut param_tys: Vec<BasicMetadataTypeEnum> = vec![ptr.into()];
+            let mut argv: Vec<BasicMetadataValueEnum> = vec![this.into()];
+            for i in 0..mf.param_count {
+                param_tys.push(cx.basic_ty(mf.locals[i]).into());
+                let v = wrapper_param(&mut fcx, argc, args, i, mf.locals[i]);
+                argv.push(fcx.materialize(v).into());
+            }
+            let fn_ty = match mf.ret {
+                Ty::Void => cx.context.void_type().fn_type(&param_tys, false),
+                t => cx.basic_ty(t).fn_type(&param_tys, false),
+            };
+            let call = cx
+                .builder
+                .build_indirect_call(fn_ty, fptr, &argv, "vfwd")
+                .expect("call");
+            store_wrapper_result(&mut fcx, call, mf.ret, out);
+        }
+    }
+    cx.builder.build_return(None).expect("ret");
+    cx.builder.position_at_end(entry);
+    cx.builder.build_unconditional_branch(body).expect("br");
+    if let Some(bb) = saved {
+        cx.builder.position_at_end(bb);
+    }
+    wrapper
+}
+
+/// Wrapper parameter i: unboxed from `args` when provided, else the type
+/// default (defaults-as-expressions are evaluated at typed callsites; the
+/// boxed ABI falls back to type defaults — documented deviation).
+fn wrapper_param<'ctx>(
+    fcx: &mut FnCx<'_, 'ctx>,
+    argc: IntValue<'ctx>,
+    args: PointerValue<'ctx>,
+    i: usize,
+    ty: Ty,
+) -> Val<'ctx> {
+    let cx = fcx.cx;
+    let i32t = cx.context.i32_type();
+    let have = cx
+        .builder
+        .build_int_compare(
+            IntPredicate::UGT,
+            argc,
+            i32t.const_int(i as u64, false),
+            "have",
+        )
+        .expect("cmp");
+    let slot = fcx.entry_alloca(cx.any_ty, "argslot");
+    let then_bb = cx.context.append_basic_block(fcx.function, "arg.have");
+    let else_bb = cx.context.append_basic_block(fcx.function, "arg.dflt");
+    let end_bb = cx.context.append_basic_block(fcx.function, "arg.end");
+    cx.builder
+        .build_conditional_branch(have, then_bb, else_bb)
+        .expect("br");
+    cx.builder.position_at_end(then_bb);
+    let src = unsafe {
+        cx.builder
+            .build_in_bounds_gep(cx.any_ty, args, &[i32t.const_int(i as u64, false)], "argp")
+    }
+    .expect("gep");
+    let v = cx.builder.build_load(cx.any_ty, src, "argv").expect("load");
+    cx.builder.build_store(slot, v).expect("store");
+    cx.builder.build_unconditional_branch(end_bb).expect("br");
+    cx.builder.position_at_end(else_bb);
+    cx.builder
+        .build_store(slot, cx.any_ty.const_zero())
+        .expect("store");
+    cx.builder.build_unconditional_branch(end_bb).expect("br");
+    cx.builder.position_at_end(end_bb);
+    let unboxed = fcx.unbox_any_ptr(slot, ty);
+    // Undefined unboxes: numeric → NaN via ToNumber; acceptable defaults.
+    unboxed
+}
+
+fn store_wrapper_result<'ctx>(
+    fcx: &mut FnCx<'_, 'ctx>,
+    call: inkwell::values::CallSiteValue<'ctx>,
+    ret: Ty,
+    out: PointerValue<'ctx>,
+) {
+    let cx = fcx.cx;
+    let result = match ret {
+        Ty::Void => {
+            cx.builder
+                .build_store(out, cx.any_ty.const_zero())
+                .expect("store");
+            return;
+        }
+        t => fcx.wrap_basic(call.try_as_basic_value().basic().expect("value"), t),
+    };
+    let boxed = fcx.box_value(result);
+    let v = cx
+        .builder
+        .build_load(cx.any_ty, boxed, "resv")
+        .expect("load");
+    cx.builder.build_store(out, v).expect("store");
+}
+
 enum ArgKind {
     Num,
     Str,
@@ -3522,7 +4756,13 @@ fn ty_tag(ty: Ty) -> u32 {
         Ty::String => tag::STRING,
         // Class/interface/sequence targets dispatch through dedicated
         // runtime calls, never through core tags.
-        Ty::Any | Ty::Void | Ty::Object(_) | Ty::Iface(_) | Ty::Array | Ty::Vector(_) => tag::NULL,
+        Ty::Any
+        | Ty::Void
+        | Ty::Object(_)
+        | Ty::Iface(_)
+        | Ty::Array
+        | Ty::Vector(_)
+        | Ty::Function => tag::NULL,
     }
 }
 

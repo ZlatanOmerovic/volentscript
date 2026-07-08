@@ -92,10 +92,10 @@ impl<'a> Checker<'a> {
                 return self.error_expr(span);
             }
         };
-        if method == Sort && !args.is_empty() {
+        if method == Sort && args.len() > 1 {
             self.error(
-                ErrorCode::NOT_IMPLEMENTED,
-                "sort comparators need Function values — Phase 6",
+                ErrorCode::WRONG_ARG_COUNT,
+                "`sort` takes at most one comparator",
                 span,
             );
             return self.error_expr(span);
@@ -108,6 +108,7 @@ impl<'a> Checker<'a> {
                 let checked = self.expr(a);
                 match (method, i) {
                     (Join, 0) => self.coerce(checked, Ty::String, a.span),
+                    (Sort, 0) => self.coerce(checked, Ty::Function, a.span),
                     (Slice | Splice, 0 | 1) | (IndexOf, 1) => {
                         self.coerce(checked, Ty::Number, a.span)
                     }

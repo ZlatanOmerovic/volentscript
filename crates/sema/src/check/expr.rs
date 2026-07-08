@@ -85,8 +85,13 @@ impl Checker<'_> {
             ExprKind::Conditional(c, t, f) => {
                 let c = self.expr(c);
                 let c = self.coerce_condition(c);
+                let (when_true, when_false) = Self::narrowing_of(&c);
+                self.narrowed.push(when_true.into_iter().collect());
                 let t = self.expr(t);
+                self.narrowed.pop();
+                self.narrowed.push(when_false.into_iter().collect());
                 let f = self.expr(f);
+                self.narrowed.pop();
                 // Branch-join typing: verifier frame-merge (common base or *).
                 let ty = merge_types(t.ty, f.ty);
                 let t = self.coerce(t, ty, span);
@@ -133,9 +138,11 @@ impl Checker<'_> {
     fn ident(&mut self, name: &str, span: Span) -> TExpr {
         match self.lookup(name) {
             Some(Symbol::Local { id, fn_depth }) => {
-                self.check_capture(name, fn_depth, span);
                 let (ty, _) = self.local_info(id, fn_depth);
-                mk(ty, span, TExprKind::LocalGet(id))
+                match self.capture_slot(id, fn_depth) {
+                    None => mk(ty, span, TExprKind::LocalGet(id)),
+                    Some(slot) => mk(ty, span, TExprKind::CaptureGet(slot)),
+                }
             }
             Some(Symbol::Fn(id)) => mk(Ty::Function, span, TExprKind::FnRef(id)),
             Some(Symbol::Builtin(b)) => mk(Ty::Function, span, TExprKind::BuiltinRef(b)),
@@ -431,9 +438,8 @@ impl Checker<'_> {
                     );
                     return self.error_expr(span);
                 };
-                let (id, ty) = match sym {
+                let (id, ty, cap_slot) = match sym {
                     Symbol::Local { id, fn_depth } => {
-                        self.check_capture(name, fn_depth, target.span);
                         let (ty, is_const) = self.local_info(id, fn_depth);
                         if is_const {
                             self.error(
@@ -442,7 +448,7 @@ impl Checker<'_> {
                                 span,
                             );
                         }
-                        (id, ty)
+                        (id, ty, self.capture_slot(id, fn_depth))
                     }
                     _ => {
                         self.error(
@@ -454,16 +460,27 @@ impl Checker<'_> {
                         return self.error_expr(span);
                     }
                 };
-                let rhs = self.compound_rhs(op, ty, id, value, span);
+                let rhs = self.compound_rhs_target(op, ty, id, cap_slot, value, span);
                 let rhs = self.coerce(rhs, ty, span);
-                let fn_index = *self.fn_stack.last().expect("fn");
-                let nullable_slot = self.functions[fn_index]
-                    .locals
-                    .get(id.0 as usize)
-                    .is_some_and(|l| l.nullable);
-                self.check_null_flow(&rhs, ty, nullable_slot, "variable", span);
-                self.update_narrow_on_assign(id, self.expr_nullable(&rhs));
-                mk(ty, span, TExprKind::LocalSet(id, Box::new(rhs)))
+                match cap_slot {
+                    None => {
+                        let fn_index = *self.fn_stack.last().expect("fn");
+                        let nullable_slot = self.functions[fn_index]
+                            .locals
+                            .get(id.0 as usize)
+                            .is_some_and(|l| l.nullable);
+                        self.check_null_flow(&rhs, ty, nullable_slot, "variable", span);
+                        self.update_narrow_on_assign(id, self.expr_nullable(&rhs));
+                        mk(ty, span, TExprKind::LocalSet(id, Box::new(rhs)))
+                    }
+                    Some(slot) => {
+                        // Captured variable of an enclosing frame: nullable
+                        // per its declaration (narrowing doesn't cross
+                        // frames).
+                        self.check_null_flow(&rhs, ty, true, "variable", span);
+                        mk(ty, span, TExprKind::CaptureSet(slot, Box::new(rhs)))
+                    }
+                }
             }
             ExprKind::Member(object, name) => {
                 // Static member write.
@@ -551,11 +568,12 @@ impl Checker<'_> {
 
     /// Builds the RHS for `x op= v` as `x op v` (plain `=` passes `v`
     /// through).
-    fn compound_rhs(
+    fn compound_rhs_target(
         &mut self,
         op: AssignOp,
         target_ty: Ty,
         target: LocalId,
+        cap_slot: Option<usize>,
         value: &ast::Expr,
         span: Span,
     ) -> TExpr {
@@ -575,7 +593,10 @@ impl Checker<'_> {
             AssignOp::LogAnd => BinaryOp::LogAnd,
             AssignOp::LogOr => BinaryOp::LogOr,
         };
-        let current = mk(target_ty, span, TExprKind::LocalGet(target));
+        let current = match cap_slot {
+            None => mk(target_ty, span, TExprKind::LocalGet(target)),
+            Some(slot) => mk(target_ty, span, TExprKind::CaptureGet(slot)),
+        };
         let rhs = self.expr(value);
         self.binary_typed(bin_op, current, rhs, span)
     }
@@ -632,6 +653,40 @@ impl Checker<'_> {
         if let ExprKind::Member(object, method) = &callee.kind {
             let object = self.expr(object);
             self.check_null_deref(&object, span);
+            // Function values: `f.call(...)` / `f.apply(...)` (SPECS §6).
+            if object.ty == Ty::Function && (method == "call" || method == "apply") {
+                let is_apply = method == "apply";
+                let mut checked: Vec<TExpr> = Vec::new();
+                let mut this_arg = None;
+                for (i, a) in args.iter().enumerate() {
+                    let c = self.expr(a);
+                    if i == 0 {
+                        this_arg = Some(Box::new(self.coerce_to_any(c)));
+                    } else if is_apply && i == 1 {
+                        let arr = self.coerce(c, Ty::Array, a.span);
+                        checked.push(arr);
+                    } else {
+                        checked.push(self.coerce_to_any(c));
+                    }
+                }
+                if is_apply && checked.len() > 1 {
+                    self.error(
+                        ErrorCode::WRONG_ARG_COUNT,
+                        "`apply` takes (thisArg, argsArray)",
+                        span,
+                    );
+                }
+                return mk(
+                    Ty::Any,
+                    span,
+                    TExprKind::CallFunctionValue {
+                        callee: Box::new(object),
+                        this_arg,
+                        args: checked,
+                        is_apply,
+                    },
+                );
+            }
             // Collections dispatch.
             if object.ty == Ty::Array {
                 return self.array_method_call(object, method, args, span);
@@ -688,6 +743,41 @@ impl Checker<'_> {
                         self.error_expr(span)
                     }
                 };
+            }
+            // Function values: `f.call(thisArg, ...)` / `f.apply(thisArg, a)`
+            // (SPECS §6 Function).
+            if object.ty == Ty::Function && (method == "call" || method == "apply") {
+                let is_apply = method == "apply";
+                let mut checked: Vec<TExpr> = Vec::new();
+                let mut this_arg = None;
+                for (i, a) in args.iter().enumerate() {
+                    let c = self.expr(a);
+                    if i == 0 {
+                        this_arg = Some(Box::new(self.coerce_to_any(c)));
+                    } else if is_apply && i == 1 {
+                        let arr = self.coerce(c, Ty::Array, a.span);
+                        checked.push(arr);
+                    } else {
+                        checked.push(self.coerce_to_any(c));
+                    }
+                }
+                if is_apply && checked.len() > 1 {
+                    self.error(
+                        ErrorCode::WRONG_ARG_COUNT,
+                        "`apply` takes (thisArg, argsArray)",
+                        span,
+                    );
+                }
+                return mk(
+                    Ty::Any,
+                    span,
+                    TExprKind::CallFunctionValue {
+                        callee: Box::new(object),
+                        this_arg,
+                        args: checked,
+                        is_apply,
+                    },
+                );
             }
             // Dynamic receiver: method call through `*`.
             let args = self.args_to_any(args);
@@ -891,9 +981,14 @@ impl Checker<'_> {
             .map(|t| self.resolve_type_allow_void(t))
             .unwrap_or(Ty::Any);
         let id = self.new_function(&name, ret, span);
+        self.set_ret_nullable(id, f.return_type.as_ref().is_some_and(|t| t.nullable));
         self.register_signature(id, &f.params);
         self.enter_function(f, id);
-        mk(Ty::Function, span, TExprKind::FnRef(id))
+        if self.functions[id.0 as usize].captures.is_empty() {
+            mk(Ty::Function, span, TExprKind::FnRef(id))
+        } else {
+            mk(Ty::Function, span, TExprKind::Closure(id))
+        }
     }
 
     pub(crate) fn coerce_to_any(&mut self, e: TExpr) -> TExpr {

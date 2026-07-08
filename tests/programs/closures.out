@@ -1,0 +1,12 @@
+11 12 101 13
+hi zlatan hi zlatan hi zlatan
+1,2,3,4,5
+15 012
+finally 0
+caught-type: custom boom
+finally 1
+caught-error: vector index 5 out of range
+finally 2
+clean
+caught: ArgumentError: from deep
+done

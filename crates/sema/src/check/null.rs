@@ -53,7 +53,12 @@ impl Checker<'_> {
             | TExprKind::Unary(..)
             | TExprKind::Postfix(..)
             | TExprKind::Is(..)
-            | TExprKind::CallBuiltin(..) => false,
+            | TExprKind::CallBuiltin(..)
+            // Function values are freshly constructed, never null.
+            | TExprKind::FnRef(_)
+            | TExprKind::BuiltinRef(_)
+            | TExprKind::Closure(_)
+            | TExprKind::BoundMethod(..) => false,
             TExprKind::LocalGet(id) => {
                 let fn_index = *self.fn_stack.last().expect("fn");
                 let local = &self.functions[fn_index].locals[id.0 as usize];

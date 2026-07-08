@@ -434,6 +434,36 @@ impl Dumper {
                     d.expr(v);
                 });
             }
+            TExprKind::CaptureGet(i) => self.line(format!("{header}CaptureGet ^{i}")),
+            TExprKind::CaptureSet(i, v) => {
+                self.line(format!("{header}CaptureSet ^{i}"));
+                self.indented(|d| d.expr(v));
+            }
+            TExprKind::Closure(f) => self.line(format!("{header}Closure #{}", f.0)),
+            TExprKind::BoundMethod(o, class, vslot) => {
+                self.line(format!("{header}BoundMethod class#{} v{vslot}", class.0));
+                self.indented(|d| d.expr(o));
+            }
+            TExprKind::CallFunctionValue {
+                callee,
+                this_arg,
+                args,
+                is_apply,
+            } => {
+                self.line(format!(
+                    "{header}{}",
+                    if *is_apply { "Apply" } else { "CallValue" }
+                ));
+                self.indented(|d| {
+                    d.expr(callee);
+                    if let Some(t) = this_arg {
+                        d.labeled("this", |d| d.expr(t));
+                    }
+                    for a in args {
+                        d.expr(a);
+                    }
+                });
+            }
             TExprKind::Array(elements) => {
                 self.line(format!("{header}Array"));
                 self.indented(|d| {

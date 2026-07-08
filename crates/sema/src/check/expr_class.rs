@@ -187,15 +187,14 @@ impl Checker<'_> {
                     self.error_expr(span)
                 }
             },
-            Some(ClassMember::Method { .. }) => {
-                // Extracting a method creates a bound method closure
-                // (SPECS §3.7) — that machinery is P6.
-                self.error(
-                    ErrorCode::NOT_IMPLEMENTED,
-                    "method closures (extracting a method as a value) — Phase 6",
+            Some(ClassMember::Method { vslot, .. }) => {
+                // Extracting a method yields a closure permanently bound to
+                // the receiver (SPECS §3.7 — no `this`-loss footgun).
+                TExpr {
+                    ty: Ty::Function,
                     span,
-                );
-                self.error_expr(span)
+                    kind: TExprKind::BoundMethod(Box::new(object), class, vslot),
+                }
             }
             None => {
                 self.error(
@@ -612,13 +611,14 @@ impl Checker<'_> {
                 kind: TExprKind::StaticGet(class, index),
             };
         }
-        if self.registry.find_static_method(class, name).is_some() {
-            self.error(
-                ErrorCode::NOT_IMPLEMENTED,
-                "static methods as values — Phase 6",
+        if let Some(m) = self.registry.find_static_method(class, name) {
+            // Static methods carry no `this`: a plain function value.
+            let fn_id = m.fn_id;
+            return TExpr {
+                ty: Ty::Function,
                 span,
-            );
-            return self.error_expr(span);
+                kind: TExprKind::FnRef(fn_id),
+            };
         }
         self.error(
             ErrorCode::UNKNOWN_PROPERTY,

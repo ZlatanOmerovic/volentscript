@@ -21,6 +21,8 @@ pub enum Tag {
     Array = 8,
     /// Vector.<T>; payload = VsVector pointer.
     Vector = 9,
+    /// Function value; payload = VsClosure pointer.
+    Function = 10,
 }
 
 /// A boxed dynamic value (`*`). 16 bytes, passed/returned by value.
@@ -142,6 +144,23 @@ impl VsAny {
         self.data as usize as *const crate::seq::VsVector
     }
 
+    /// Boxes a Function value (null → `null`).
+    pub fn function(ptr: *const crate::closure::VsClosure) -> VsAny {
+        if ptr.is_null() {
+            VsAny::NULL
+        } else {
+            VsAny {
+                tag: Tag::Function as u32,
+                data: ptr as usize as u64,
+            }
+        }
+    }
+
+    /// Function payload.
+    pub fn as_closure_ptr(&self) -> *const crate::closure::VsClosure {
+        self.data as usize as *const crate::closure::VsClosure
+    }
+
     /// The tag, decoded.
     pub fn tag(&self) -> Tag {
         match self.tag {
@@ -154,6 +173,7 @@ impl VsAny {
             7 => Tag::Object,
             8 => Tag::Array,
             9 => Tag::Vector,
+            10 => Tag::Function,
             _ => Tag::Undefined,
         }
     }

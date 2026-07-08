@@ -62,17 +62,18 @@ and `runtime`.
 
 ## Status
 
-Phases 0–5 done: scaffold + CI (P0); lexer + parser (P1); sema with typed
-AST (P2); native compilation via MIR + LLVM + Rust runtime (P3); classes,
-interfaces, inheritance with vtable/interface dispatch (P4); **full type
-system** (P5) — user-definable reified generics (`class Box.<T>`,
-monomorphized per instantiation: `x is Box.<int>` is a real runtime test),
-null safety per SPECS §4.1 (non-nullable by default, `T?`, flow + deref
-diagnostics with `if (x != null)` narrowing; `*` stays the escape hatch),
-`Array` with the P5 method surface, `Vector.<T>` incl. `new <T>[...]`
-literals, rest parameters binding real Arrays, `String#split`.
+Phases 0–6 done: scaffold + CI (P0); lexer + parser (P1); sema with typed
+AST (P2); native compilation (P3); classes/interfaces/inheritance (P4);
+reified generics + null safety + Array + Vector.<T> (P5); **closures,
+exceptions, remaining control flow** (P6) — closure conversion with heap
+cells and multi-level capture, Function values (function expressions,
+bound method closures per SPECS §3.7, call/apply, sort comparators),
+try/catch/finally on a documented setjmp scheme with typed catch dispatch
+and finally on every exit path, the Error hierarchy as a compiled-in
+prelude (runtime TypeError/RangeError are catchable objects), and
+for..in / for each..in over Arrays and Vectors.
 
-`vigorscript run file.as` compiles and executes native arm64/x86-64
-binaries for polymorphic OOP and generic-collection programs. Remaining
-gates: closures/Function values, exceptions, for..in (P6); dynamic
-property access, stdlib breadth (P7). Phase plan: SPECS §11.
+`vigorscript run file.as` compiles and executes native binaries for
+closure- and exception-heavy programs. Remaining gates: dynamic property
+access and stdlib breadth (P7); generic functions, namespaces, optimizing
+passes (P8). Phase plan: SPECS §11.

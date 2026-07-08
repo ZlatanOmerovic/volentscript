@@ -201,6 +201,7 @@ impl<'a> Checker<'a> {
             return_ty,
             locals: Vec::new(),
             param_count: 0,
+            captures: Vec::new(),
             body: Vec::new(),
             span,
         });
@@ -261,6 +262,7 @@ impl<'a> Checker<'a> {
                 is_const: false,
                 default,
                 is_rest: p.rest,
+                captured: false,
             });
             self.declare(
                 &p.name,
@@ -310,12 +312,53 @@ impl<'a> Checker<'a> {
             }
             nested_ids.push(nested_id);
         }
+        let mut closure_inits: Vec<TStmt> = Vec::new();
         for (f, nested_id) in nested.iter().zip(nested_ids) {
             self.enter_function(f, nested_id);
+            // A nested function that captures variables must be
+            // materialized as a closure value in this frame; rebind its
+            // name so calls and references go through the value
+            // (closure conversion, SPECS §3.7).
+            if !self.functions[nested_id.0 as usize].captures.is_empty() {
+                if let Some(name) = &f.name {
+                    let fn_index = id.0 as usize;
+                    let local =
+                        LocalId(u32::try_from(self.functions[fn_index].locals.len()).unwrap());
+                    self.functions[fn_index].locals.push(Local {
+                        name: format!("<closure:{name}>"),
+                        ty: Ty::Function,
+                        nullable: false,
+                        is_const: true,
+                        default: None,
+                        is_rest: false,
+                        captured: false,
+                    });
+                    // Overwrite the Fn binding (hoisting made it visible).
+                    self.scopes.last_mut().expect("scope").symbols.insert(
+                        name.clone(),
+                        Symbol::Local {
+                            id: local,
+                            fn_depth: self.fn_stack.len() - 1,
+                        },
+                    );
+                    closure_inits.push(TStmt {
+                        span: f.span,
+                        kind: TStmtKind::Assign(
+                            local,
+                            TExpr {
+                                ty: Ty::Function,
+                                span: f.span,
+                                kind: TExprKind::Closure(nested_id),
+                            },
+                        ),
+                    });
+                }
+            }
         }
 
-        // Check the body.
-        let body: Vec<TStmt> = stmts.iter().map(|s| self.stmt(s)).collect();
+        // Check the body (closure materializations run first).
+        let mut body: Vec<TStmt> = closure_inits;
+        body.extend(stmts.iter().map(|s| self.stmt(s)));
 
         // Missing-return analysis (ASC's "function does not return a value"):
         // a non-void, non-`*` return type requires every path to return.
@@ -495,6 +538,7 @@ impl<'a> Checker<'a> {
                 is_const: decl.is_const,
                 default: None,
                 is_rest: false,
+                captured: false,
             });
             self.declare(
                 &b.name,
@@ -974,6 +1018,7 @@ impl<'a> Checker<'a> {
                             is_const: false,
                             default: None,
                             is_rest: false,
+                            captured: false,
                         });
                         self.declare(
                             &c.name,
@@ -1109,7 +1154,13 @@ impl<'a> Checker<'a> {
             ast::ForInTarget::Expr(e) => match &e.kind {
                 ast::ExprKind::Ident(name) => match self.lookup(name) {
                     Some(Symbol::Local { id, fn_depth }) => {
-                        self.check_capture(name, fn_depth, e.span);
+                        if fn_depth != self.fn_stack.len() - 1 {
+                            self.error(
+                                ErrorCode::NOT_IMPLEMENTED,
+                                "captured variables as for..in targets — Phase 7",
+                                e.span,
+                            );
+                        }
                         id
                     }
                     _ => {
@@ -1133,14 +1184,32 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_capture(&mut self, name: &str, fn_depth: usize, span: Span) {
-        if fn_depth != self.fn_stack.len() - 1 {
-            self.error(
-                ErrorCode::NOT_IMPLEMENTED,
-                format!("`{name}` is declared in an enclosing function; closures are not implemented until Phase 6"),
-                span,
-            );
+    /// Closure conversion bookkeeping (SPECS §3.7): referencing a local of
+    /// an enclosing function marks it captured (heap cell) and threads a
+    /// capture slot through every frame between the declaration and the
+    /// use. Returns `None` when the variable belongs to the current frame.
+    pub(crate) fn capture_slot(&mut self, id: LocalId, fn_depth: usize) -> Option<usize> {
+        let current = self.fn_stack.len() - 1;
+        if fn_depth == current {
+            return None;
         }
+        // Mark the declaring local as cell-backed.
+        let owner_fn = self.fn_stack[fn_depth];
+        self.functions[owner_fn].locals[id.0 as usize].captured = true;
+        // Thread through intermediate frames.
+        let mut src = CapSrc::ParentLocal(id);
+        let mut slot = 0usize;
+        for depth in (fn_depth + 1)..=current {
+            let f = self.fn_stack[depth];
+            slot = if let Some(i) = self.functions[f].captures.iter().position(|c| *c == src) {
+                i
+            } else {
+                self.functions[f].captures.push(src);
+                self.functions[f].captures.len() - 1
+            };
+            src = CapSrc::ParentCapture(slot);
+        }
+        Some(slot)
     }
 }
 

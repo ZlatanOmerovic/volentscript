@@ -36,6 +36,9 @@ pub fn lower(program: &sema::TProgram) -> Result<Program, Vec<Diagnostic>> {
         program,
         diagnostics: Vec::new(),
         ctor_fn,
+        current_fn: 0,
+        temp_base: 0,
+        temps: Vec::new(),
     };
     let mut functions: Vec<Function> = program.functions.iter().map(|f| lo.function(f)).collect();
     // Synthesized default constructors land at their reserved indices.
@@ -47,6 +50,8 @@ pub fn lower(program: &sema::TProgram) -> Result<Program, Vec<Diagnostic>> {
                 ret: Ty::Void,
                 locals: Vec::new(),
                 param_count: 0,
+                captured: Vec::new(),
+                captures: Vec::new(),
                 param_defaults: Vec::new(),
                 body: Vec::new(),
                 span: info.span,
@@ -66,11 +71,32 @@ pub fn lower(program: &sema::TProgram) -> Result<Program, Vec<Diagnostic>> {
             functions,
             classes,
             iface_count: u32::try_from(program.registry.ifaces.len()).unwrap_or(0),
+            error_classes: [
+                "Error",
+                "TypeError",
+                "RangeError",
+                "ReferenceError",
+                "ArgumentError",
+                "SyntaxError",
+            ]
+            .iter()
+            .filter_map(|name| {
+                program
+                    .registry
+                    .classes
+                    .iter()
+                    .position(|c| c.name == *name && c.package.is_empty())
+                    .map(|i| i as u32)
+            })
+            .collect(),
             vectors: {
                 let mut lo2 = Lowerer {
                     program,
                     diagnostics: Vec::new(),
                     ctor_fn: Vec::new(),
+                    current_fn: 0,
+                    temp_base: 0,
+                    temps: Vec::new(),
                 };
                 program
                     .vectors
@@ -91,11 +117,18 @@ struct Lowerer<'a> {
     diagnostics: Vec<Diagnostic>,
     /// Effective constructor function per class (user or synthesized).
     ctor_fn: Vec<FnId>,
+    /// Index of the sema function currently being lowered.
+    current_fn: usize,
+    /// Base local count + temps appended by desugarings (for..in).
+    temp_base: usize,
+    temps: Vec<Ty>,
 }
 
 impl Lowerer<'_> {
     fn function(&mut self, f: &sema::TFunction) -> Function {
-        let locals: Vec<Ty> = f.locals.iter().map(|l| self.ty(l.ty, f.span)).collect();
+        let mut locals: Vec<Ty> = f.locals.iter().map(|l| self.ty(l.ty, f.span)).collect();
+        self.temp_base = locals.len();
+        self.temps.clear();
         let param_defaults = f
             .locals
             .iter()
@@ -112,15 +145,32 @@ impl Lowerer<'_> {
             name: f.name.clone(),
             this_class: f.method_of.map(|c| c.0),
             ret: self.ty(f.return_ty, f.span),
-            locals,
             param_count: f.param_count,
+            captured: {
+                let mut c: Vec<bool> = f.locals.iter().map(|l| l.captured).collect();
+                c.resize(c.len() + self.temps.len(), false);
+                c
+            },
+            captures: f
+                .captures
+                .iter()
+                .map(|c| match c {
+                    sema::CapSrc::ParentLocal(id) => CapSrc::ParentLocal(LocalId(id.0)),
+                    sema::CapSrc::ParentCapture(i) => CapSrc::ParentCapture(*i),
+                })
+                .collect(),
             param_defaults,
-            body: f.body.iter().map(|s| self.stmt(s)).collect(),
+            body: {
+                let body = f.body.iter().map(|s| self.stmt(s)).collect();
+                locals.append(&mut self.temps);
+                body
+            },
+            locals,
             span: f.span,
         }
     }
 
-    fn ty(&mut self, ty: sema::Ty, span: Span) -> Ty {
+    fn ty(&mut self, ty: sema::Ty, _span: Span) -> Ty {
         match ty {
             sema::Ty::Int => Ty::Int,
             sema::Ty::UInt => Ty::UInt,
@@ -136,10 +186,7 @@ impl Lowerer<'_> {
             sema::Ty::Iface(id) => Ty::Iface(id.0),
             sema::Ty::Array => Ty::Array,
             sema::Ty::Vector(inst) => Ty::Vector(inst),
-            sema::Ty::Function => {
-                self.gate(span, "Function values need closures — Phase 6");
-                Ty::Any
-            }
+            sema::Ty::Function => Ty::Function,
             sema::Ty::Error => {
                 // Sema fails the build before lowering on real errors.
                 unreachable!("error type survived sema")
@@ -390,10 +437,12 @@ impl Lowerer<'_> {
                 update: update.as_ref().map(|u| self.expr(u)),
                 body: Box::new(self.stmt(body)),
             },
-            S::ForIn { object, .. } => {
-                self.gate(object.span, "`for..in`/`for each..in` iteration — Phase 6");
-                Stmt::Empty
-            }
+            S::ForIn {
+                is_each,
+                target,
+                object,
+                body,
+            } => self.lower_for_in(*is_each, *target, object, body, stmt.span),
             S::Switch { scrutinee, cases } => Stmt::Switch {
                 scrutinee: self.expr(scrutinee),
                 cases: cases
@@ -413,14 +462,24 @@ impl Lowerer<'_> {
             S::Return { value } => Stmt::Return {
                 value: value.as_ref().map(|v| self.expr(v)),
             },
-            S::Throw { value } => {
-                self.gate(value.span, "`throw`/`try` exceptions — Phase 6");
-                Stmt::Empty
-            }
-            S::Try { .. } => {
-                self.gate(stmt.span, "`try`/`catch`/`finally` exceptions — Phase 6");
-                Stmt::Empty
-            }
+            S::Throw { value } => Stmt::Throw(self.expr(value)),
+            S::Try {
+                block,
+                catches,
+                finally,
+            } => Stmt::Try {
+                body: block.iter().map(|s| self.stmt(s)).collect(),
+                catches: catches
+                    .iter()
+                    .map(|c| Catch {
+                        binding: LocalId(c.binding.0),
+                        body: c.body.iter().map(|s| self.stmt(s)).collect(),
+                    })
+                    .collect(),
+                finally: finally
+                    .as_ref()
+                    .map(|f| f.iter().map(|s| self.stmt(s)).collect()),
+            },
             S::Labeled { label, body } => {
                 // Attach the label to the loop it names; labeled non-loops
                 // are a later phase (nothing in the core corpus needs them).
@@ -535,16 +594,32 @@ impl Lowerer<'_> {
                     "object literals need the object model — Phase 4",
                 );
             }
-            E::FnRef(_) | E::BuiltinRef(_) => {
-                return self.gated_expr(span, ty, "functions as values need closures — Phase 6");
+            E::FnRef(id) => {
+                if !self.program.functions[id.0 as usize].captures.is_empty() {
+                    return self.gated_expr(
+                        span,
+                        ty,
+                        "referencing a capturing sibling before its closure exists — restructure (Phase 7)",
+                    );
+                }
+                ExprKind::FnValue(FnId(id.0))
             }
-            E::CallIndirect(..) => {
-                return self.gated_expr(
-                    span,
-                    ty,
-                    "calls through Function/`*` values need closures — Phase 6",
-                );
+            E::BuiltinRef(b) => {
+                let b = match b {
+                    sema::BuiltinFn::Trace => Builtin::Trace,
+                    sema::BuiltinFn::ParseInt => Builtin::ParseInt,
+                    sema::BuiltinFn::ParseFloat => Builtin::ParseFloat,
+                    sema::BuiltinFn::IsNaN => Builtin::IsNaN,
+                    sema::BuiltinFn::IsFinite => Builtin::IsFinite,
+                };
+                ExprKind::BuiltinValue(b)
             }
+            E::CallIndirect(callee, args) => ExprKind::CallFnValue {
+                callee: Box::new(self.expr(callee)),
+                this_arg: None,
+                args: args.iter().map(|a| self.expr(a)).collect(),
+                is_apply: false,
+            },
             E::Unary(op, v) => return self.unary(*op, v, ty, span),
             E::Postfix(op, v) => {
                 return self.inc_dec(matches!(op, ast::PostfixOp::Inc), false, v, ty, span);
@@ -728,9 +803,120 @@ impl Lowerer<'_> {
             E::SeqSetLen(o, v) => {
                 ExprKind::SeqSetLen(Box::new(self.expr(o)), Box::new(self.expr(v)))
             }
+            E::CaptureGet(i) => ExprKind::CaptureGet(*i),
+            E::CaptureSet(i, v) => ExprKind::CaptureSet(*i, Box::new(self.expr(v))),
+            E::Closure(id) => ExprKind::Closure(FnId(id.0)),
+            E::BoundMethod(recv, class, vslot) => {
+                ExprKind::BoundMethod(Box::new(self.expr(recv)), class.0, *vslot)
+            }
+            E::CallFunctionValue {
+                callee,
+                this_arg,
+                args,
+                is_apply,
+            } => ExprKind::CallFnValue {
+                callee: Box::new(self.expr(callee)),
+                this_arg: this_arg.as_ref().map(|t| Box::new(self.expr(t))),
+                args: args.iter().map(|a| self.expr(a)).collect(),
+                is_apply: *is_apply,
+            },
             E::Error => unreachable!("error expr survived sema"),
         };
         Expr { ty, span, kind }
+    }
+
+    /// Desugars `for..in`/`for each..in` into an index loop over the boxed
+    /// receiver: `for (i = 0; i < enumLen(o); i++) target = key/value(o, i)`.
+    fn lower_for_in(
+        &mut self,
+        is_each: bool,
+        target: sema::LocalId,
+        object: &sema::TExpr,
+        body: &sema::TStmt,
+        span: Span,
+    ) -> Stmt {
+        // Temps live in the current function (appended past sema's locals).
+        let obj_t = self.add_temp(Ty::Any);
+        let idx_t = self.add_temp(Ty::Int);
+        let obj = self.expr(object);
+        let boxed = if object.ty == sema::Ty::Any {
+            obj
+        } else {
+            Expr {
+                ty: Ty::Any,
+                span,
+                kind: ExprKind::Conv(Conv::ToAny, Box::new(obj)),
+            }
+        };
+        let target_ty = {
+            let f = &self.program.functions[self.current_fn];
+            let t = f.locals[target.0 as usize].ty;
+            self.ty(t, span)
+        };
+        let fetch = Expr {
+            ty: Ty::Any,
+            span,
+            kind: if is_each {
+                ExprKind::EnumValue(
+                    Box::new(local_get(obj_t, Ty::Any, span)),
+                    Box::new(local_get(idx_t, Ty::Int, span)),
+                )
+            } else {
+                ExprKind::EnumKey(
+                    Box::new(local_get(obj_t, Ty::Any, span)),
+                    Box::new(local_get(idx_t, Ty::Int, span)),
+                )
+            },
+        };
+        // Coerce the fetched Any into the declared target type.
+        let assigned = coerce_any_to(fetch, target_ty, span);
+        Stmt::For {
+            label: None,
+            init: Some(Box::new(Stmt::Block(vec![
+                Stmt::Assign(obj_t, boxed),
+                Stmt::Assign(idx_t, int_lit(0, span)),
+            ]))),
+            cond: Some(Expr {
+                ty: Ty::Boolean,
+                span,
+                kind: ExprKind::Binary(
+                    BinOp::Lt,
+                    Box::new(Expr {
+                        ty: Ty::Number,
+                        span,
+                        kind: ExprKind::Conv(
+                            Conv::ToNumber,
+                            Box::new(local_get(idx_t, Ty::Int, span)),
+                        ),
+                    }),
+                    Box::new(Expr {
+                        ty: Ty::Number,
+                        span,
+                        kind: ExprKind::Conv(
+                            Conv::ToNumber,
+                            Box::new(Expr {
+                                ty: Ty::Int,
+                                span,
+                                kind: ExprKind::EnumLen(Box::new(local_get(obj_t, Ty::Any, span))),
+                            }),
+                        ),
+                    }),
+                ),
+            }),
+            update: Some(Expr {
+                ty: Ty::Int,
+                span,
+                kind: ExprKind::IncDec {
+                    target: idx_t,
+                    is_inc: true,
+                    is_prefix: false,
+                },
+            }),
+            body: Box::new(Stmt::Block(vec![
+                Stmt::Assign(LocalId(target.0), assigned),
+                self.stmt(body),
+            ])),
+        }
     }
 
     /// Bundles trailing arguments into the callee's `...rest` Array
@@ -806,6 +992,17 @@ impl Lowerer<'_> {
                 span,
                 kind: ExprKind::IncDec {
                     target: LocalId(id.0),
+                    is_inc,
+                    is_prefix,
+                },
+            };
+        }
+        if let sema::TExprKind::CaptureGet(slot) = &operand.kind {
+            return Expr {
+                ty,
+                span,
+                kind: ExprKind::CaptureIncDec {
+                    slot: *slot,
                     is_inc,
                     is_prefix,
                 },
@@ -1063,6 +1260,46 @@ impl Lowerer<'_> {
                 "dynamic method calls need the object model — Phase 4",
             ),
         }
+    }
+}
+
+impl Lowerer<'_> {
+    /// Allocates a desugaring temp in the current function.
+    fn add_temp(&mut self, ty: Ty) -> LocalId {
+        let id = LocalId((self.temp_base + self.temps.len()) as u32);
+        self.temps.push(ty);
+        id
+    }
+}
+
+fn local_get(id: LocalId, ty: Ty, span: Span) -> Expr {
+    Expr {
+        ty,
+        span,
+        kind: ExprKind::LocalGet(id),
+    }
+}
+
+/// Unboxes an Any expression into `ty` (ES3 §9 conversions).
+fn coerce_any_to(e: Expr, ty: Ty, span: Span) -> Expr {
+    let _ = span;
+    let conv = match ty {
+        Ty::Any => return e,
+        Ty::Int => Conv::ToInt,
+        Ty::UInt => Conv::ToUInt,
+        Ty::Number => Conv::ToNumber,
+        Ty::Boolean => Conv::ToBoolean,
+        Ty::String => Conv::AnyToString,
+        Ty::Object(c) => Conv::AnyToObject(c),
+        Ty::Iface(i) => Conv::AnyToIface(i),
+        Ty::Array => Conv::AnyToArray,
+        Ty::Vector(i) => Conv::AnyToVector(i),
+        Ty::Function | Ty::Void => return e,
+    };
+    Expr {
+        ty,
+        span,
+        kind: ExprKind::Conv(conv, Box::new(e)),
     }
 }
 

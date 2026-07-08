@@ -1083,8 +1083,11 @@ pub unsafe extern "C" fn vs_vec_get(v: *const VsVector, index: f64, out: *mut Vs
     let v = unsafe { vec_ref(v, "Vector index") };
     let data = v.data.borrow();
     if index < 0.0 || index as usize >= data.len() {
-        eprintln!("RangeError: vector index {index} out of range");
-        std::process::exit(1);
+        drop(data);
+        exc::throw_error(
+            exc::ErrorKind::Range,
+            &format!("vector index {index} out of range"),
+        );
     }
     // SAFETY: caller contract.
     unsafe { *out = data[index as usize] };
@@ -1101,8 +1104,11 @@ pub unsafe extern "C" fn vs_vec_set(v: *const VsVector, index: f64, value: *cons
     let mut data = v.data.borrow_mut();
     let i = index as usize;
     if index < 0.0 || i > data.len() {
-        eprintln!("RangeError: vector index {index} out of range");
-        std::process::exit(1);
+        drop(data);
+        exc::throw_error(
+            exc::ErrorKind::Range,
+            &format!("vector index {index} out of range"),
+        );
     }
     // SAFETY: caller contract.
     let value = unsafe { *value };
@@ -1390,4 +1396,235 @@ pub unsafe extern "C" fn vs_str_split(
             .collect(),
     };
     seq::new_array(parts)
+}
+
+// --- closures, cells, exceptions, enumeration --------------------------------
+
+use crate::closure::{self, VsClosure};
+use crate::exc;
+use crate::object::VsClassDesc as VsClassDescExc;
+
+/// Heap cell for a captured variable (closure conversion, SPECS §3.7).
+///
+/// # Safety
+/// `init` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_cell_new(init: *const VsAny) -> *mut VsAny {
+    // SAFETY: caller contract; leaked (P3+ memory model).
+    Box::leak(Box::new(unsafe { *init }))
+}
+
+/// Builds a Function value.
+///
+/// # Safety
+/// `env..env+envc` live cell pointers; `wrapper` a codegen wrapper.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_closure_new(
+    wrapper: *const u8,
+    envc: u32,
+    env: *const *mut VsAny,
+    this: *const u8,
+) -> *const VsClosure {
+    // SAFETY: caller contract.
+    let env = if envc == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(env, envc as usize) }.to_vec()
+    };
+    closure::new_closure(wrapper, env, this)
+}
+
+/// Invokes a Function value with boxed args.
+///
+/// # Safety
+/// Pointers live; `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_closure_call(
+    c: *const VsClosure,
+    this_arg: *const u8,
+    argc: u32,
+    args: *const VsAny,
+    out: *mut VsAny,
+) {
+    // SAFETY: caller contract.
+    unsafe { closure::invoke(c, this_arg, argc, args, out) }
+}
+
+/// `apply`: spreads an Array argument.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_closure_apply(
+    c: *const VsClosure,
+    this_arg: *const u8,
+    args_array: *const VsArray,
+    out: *mut VsAny,
+) {
+    let items: Vec<VsAny> = if args_array.is_null() {
+        Vec::new()
+    } else {
+        // SAFETY: caller contract.
+        unsafe { &*args_array }.data.borrow().clone()
+    };
+    // SAFETY: caller contract.
+    unsafe { closure::invoke(c, this_arg, items.len() as u32, items.as_ptr(), out) }
+}
+
+/// Handler registration for compiled `try` (buffer from `_setjmp`).
+///
+/// # Safety
+/// `buf` points at a live jmp_buf in the registering frame.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_push_handler(buf: *mut u8) {
+    exc::push_handler(buf);
+}
+
+/// Pops the innermost handler (normal try exit).
+///
+/// # Safety
+/// Balanced with `vs_push_handler`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_pop_handler() {
+    exc::pop_handler();
+}
+
+/// Reads the in-flight exception into `out` (start of catch dispatch).
+///
+/// # Safety
+/// `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_take_exception(out: *mut VsAny) {
+    // SAFETY: caller contract.
+    unsafe { *out = exc::take_current() };
+}
+
+/// `throw` (never returns).
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_throw(v: *const VsAny) -> ! {
+    // SAFETY: caller contract.
+    exc::throw(unsafe { *v })
+}
+
+/// Startup registration of the prelude Error descriptors (order: Error,
+/// TypeError, RangeError, ReferenceError, ArgumentError, SyntaxError).
+///
+/// # Safety
+/// Arrays of `count` static descriptor pointers / sizes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_register_errors(
+    count: u32,
+    descs: *const *const VsClassDescExc,
+    sizes: *const u64,
+) {
+    // SAFETY: caller contract.
+    unsafe {
+        exc::register_errors(
+            std::slice::from_raw_parts(descs, count as usize),
+            std::slice::from_raw_parts(sizes, count as usize),
+        )
+    }
+}
+
+/// Enumeration length for `for..in` over a boxed receiver: Arrays and
+/// Vectors iterate; sealed objects/others yield nothing (SPECS §3.2).
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_enum_len(v: *const VsAny) -> i32 {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    match v.tag() {
+        Tag::Array => unsafe { &*v.as_array_ptr() }.data.borrow().len() as i32,
+        Tag::Vector => unsafe { &*v.as_vector_ptr() }.data.borrow().len() as i32,
+        _ => 0,
+    }
+}
+
+/// `for..in` key at index (Array/Vector indices are int keys).
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_enum_key(_v: *const VsAny, index: i32, out: *mut VsAny) {
+    // SAFETY: caller contract.
+    unsafe { *out = VsAny::int(index) };
+}
+
+/// `for each..in` value at index.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_enum_value(v: *const VsAny, index: i32, out: *mut VsAny) {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    let value = match v.tag() {
+        Tag::Array => unsafe { &*v.as_array_ptr() }
+            .data
+            .borrow()
+            .get(index as usize)
+            .copied()
+            .unwrap_or(VsAny::UNDEFINED),
+        Tag::Vector => unsafe { &*v.as_vector_ptr() }
+            .data
+            .borrow()
+            .get(index as usize)
+            .copied()
+            .unwrap_or(VsAny::UNDEFINED),
+        _ => VsAny::UNDEFINED,
+    };
+    // SAFETY: caller contract.
+    unsafe { *out = value };
+}
+
+/// Array sort with a comparator Function (§15.4.4.11).
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_sort_with(
+    a: *const VsArray,
+    cmp: *const VsClosure,
+) -> *const VsArray {
+    // SAFETY: caller contract.
+    let arr = unsafe { arr(a, "sort") };
+    let mut data = arr.data.borrow_mut();
+    data.sort_by(|x, y| {
+        let args = [*x, *y];
+        let mut out = VsAny::UNDEFINED;
+        // SAFETY: comparator is a live Function value.
+        unsafe { closure::invoke(cmp, std::ptr::null(), 2, args.as_ptr(), &mut out) };
+        let n = conv::any_to_number(out);
+        if n < 0.0 {
+            std::cmp::Ordering::Less
+        } else if n > 0.0 {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+    a
+}
+
+/// AVM2 coerce to Function (checked).
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_coerce_function(v: *const VsAny) -> *const VsClosure {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    match v.tag() {
+        Tag::Null | Tag::Undefined => std::ptr::null(),
+        Tag::Function => v.as_closure_ptr(),
+        _ => conv::type_error(&format!(
+            "cannot convert {} to Function",
+            conv::any_to_display(v)
+        )),
+    }
 }

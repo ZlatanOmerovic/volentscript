@@ -16,8 +16,10 @@
 //! with a message until exceptions land in P6.
 
 mod any;
+mod closure;
 mod conv;
-mod ffi;
+mod exc;
+pub(crate) mod ffi;
 mod object;
 mod seq;
 mod string;

@@ -34,6 +34,8 @@ pub enum Ty {
     Iface(u32),
     /// Array pointer (SPECS §3.10).
     Array,
+    /// Function value: closure pointer (SPECS §3.7).
+    Function,
     /// Vector pointer; payload indexes [`Program::vectors`] (reified
     /// element type, SPECS §4.2/§4.3).
     Vector(u32),
@@ -62,6 +64,11 @@ pub struct Program {
     /// Vector instantiations: index = `Ty::Vector` payload, value =
     /// element type.
     pub vectors: Vec<Ty>,
+    /// Class indices of the prelude Error hierarchy, in runtime
+    /// registration order: Error, TypeError, RangeError, ReferenceError,
+    /// ArgumentError, SyntaxError. Codegen registers their descriptors at
+    /// startup so the runtime can throw catchable errors.
+    pub error_classes: Vec<u32>,
 }
 
 /// One lowered class: everything a backend needs to emit layout, RTTI, and
@@ -90,6 +97,16 @@ pub struct Class {
     pub statics: Vec<Ty>,
 }
 
+/// Where a captured variable lives in the defining frame (closure
+/// conversion).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapSrc {
+    /// Cell of a local in the enclosing frame.
+    ParentLocal(LocalId),
+    /// Capture slot of the enclosing frame.
+    ParentCapture(usize),
+}
+
 /// One lowered function.
 #[derive(Debug)]
 pub struct Function {
@@ -104,6 +121,10 @@ pub struct Function {
     pub locals: Vec<Ty>,
     /// Number of leading locals that are parameters.
     pub param_count: usize,
+    /// Locals captured by nested closures (cell-backed storage).
+    pub captured: Vec<bool>,
+    /// Environment slots this function receives (free variables).
+    pub captures: Vec<CapSrc>,
     /// Callsite-fillable defaults for trailing parameters (index i is the
     /// default for parameter i; `None` = required).
     pub param_defaults: Vec<Option<Expr>>,
@@ -156,7 +177,26 @@ pub enum Stmt {
     Return {
         value: Option<Expr>,
     },
+    /// `throw e` (value boxed).
+    Throw(Expr),
+    /// `try/catch/finally` (SPECS §3.8; setjmp scheme documented in the
+    /// backend).
+    Try {
+        body: Vec<Stmt>,
+        catches: Vec<Catch>,
+        finally: Option<Vec<Stmt>>,
+    },
     Empty,
+}
+
+/// One catch clause: matched by `is` against the binding's type
+/// (untyped = catch-all `*`).
+#[derive(Debug)]
+pub struct Catch {
+    /// Local receiving the exception (its type is the match target).
+    pub binding: LocalId,
+    /// Handler body.
+    pub body: Vec<Stmt>,
 }
 
 /// One `switch` clause (bodies fall through; `break` exits).
@@ -347,6 +387,12 @@ pub enum ExprKind {
         is_inc: bool,
         is_prefix: bool,
     },
+    /// Increment/decrement of a captured variable.
+    CaptureIncDec {
+        slot: usize,
+        is_inc: bool,
+        is_prefix: bool,
+    },
     /// Increment/decrement of an instance field.
     FieldIncDec {
         recv: Box<Expr>,
@@ -418,4 +464,27 @@ pub enum ExprKind {
     SeqGet(Box<Expr>, Box<Expr>),
     /// `seq[i] = v` (value already element-coerced).
     SeqSet(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// Captured-variable access (index into this function's `captures`).
+    CaptureGet(usize),
+    CaptureSet(usize, Box<Expr>),
+    /// Closure over `fn_id`, environment built from the current frame.
+    Closure(FnId),
+    /// Plain function/static/builtin as a Function value (no environment).
+    FnValue(FnId),
+    BuiltinValue(Builtin),
+    /// `obj.method` bound-method closure (SPECS §3.7).
+    BoundMethod(Box<Expr>, u32, usize),
+    /// Indirect call of a Function/`*` value (boxed ABI); `is_apply`
+    /// spreads an Array argument.
+    CallFnValue {
+        callee: Box<Expr>,
+        this_arg: Option<Box<Expr>>,
+        args: Vec<Expr>,
+        is_apply: bool,
+    },
+    /// `for..in`/`for each..in` enumeration helpers over a boxed receiver:
+    /// element count, key at index, value at index.
+    EnumLen(Box<Expr>),
+    EnumKey(Box<Expr>, Box<Expr>),
+    EnumValue(Box<Expr>, Box<Expr>),
 }

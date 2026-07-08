@@ -77,7 +77,7 @@ pub fn any_truthy(v: VsAny) -> bool {
             unsafe { crate::string::deref(v.as_string_ptr()) }.is_some_and(|s| s.len > 0)
         }
         // Every object is truthy (§9.2).
-        Tag::Object | Tag::Array | Tag::Vector => true,
+        Tag::Object | Tag::Array | Tag::Vector | Tag::Function => true,
     }
 }
 
@@ -102,7 +102,7 @@ pub fn any_to_number(v: VsAny) -> f64 {
         }
         // Objects: ToPrimitive would call valueOf; the P4 object model has
         // none, so NaN (documented deviation until valueOf lands).
-        Tag::Object | Tag::Array | Tag::Vector => f64::NAN,
+        Tag::Object | Tag::Array | Tag::Vector | Tag::Function => f64::NAN,
         _ => v.numeric().unwrap_or(f64::NAN),
     }
 }
@@ -135,6 +135,7 @@ pub fn any_to_display(v: VsAny) -> String {
             let vec = unsafe { &*v.as_vector_ptr() };
             crate::seq::join(&vec.data.borrow(), ",")
         }
+        Tag::Function => "function Function() {}".to_string(),
     }
 }
 
@@ -148,6 +149,7 @@ pub fn any_typeof(v: VsAny) -> &'static str {
         Tag::Int | Tag::UInt | Tag::Number => "number",
         Tag::String => "string",
         Tag::Object | Tag::Array | Tag::Vector => "object",
+        Tag::Function => "function",
     }
 }
 
@@ -165,6 +167,7 @@ pub fn any_is(v: VsAny, target: Tag) -> bool {
         Tag::Number => v.numeric().is_some(),
         Tag::Boolean => v.tag() == Tag::Boolean,
         Tag::String => v.tag() == Tag::String,
+        Tag::Function => v.tag() == Tag::Function,
         Tag::Null | Tag::Undefined | Tag::Object | Tag::Array | Tag::Vector => false,
     }
 }
@@ -202,10 +205,10 @@ pub fn any_strict_equals(a: VsAny, b: VsAny) -> bool {
     }
 }
 
-/// Aborts with a TypeError-shaped message (exceptions land in P6).
+/// Throws a catchable TypeError (constructed from the program's Error
+/// descriptors when registered; aborts otherwise).
 pub fn type_error(msg: &str) -> ! {
-    eprintln!("TypeError: {msg}");
-    std::process::exit(1)
+    crate::exc::throw_error(crate::exc::ErrorKind::Type, msg)
 }
 
 /// parseInt (§15.1.2.2).
