@@ -38,8 +38,10 @@ struct ErrorTable {
 }
 
 thread_local! {
-    /// Active setjmp buffers, innermost last.
-    static HANDLERS: RefCell<Vec<*mut u8>> = const { RefCell::new(Vec::new()) };
+    /// Active setjmp buffers, innermost last, each with the GC defer
+    /// depth at registration (longjmp skips DeferGuard drops; the catch
+    /// path restores the depth).
+    static HANDLERS: RefCell<Vec<(*mut u8, u32)>> = const { RefCell::new(Vec::new()) };
     /// The in-flight exception between longjmp and the catch dispatch.
     static CURRENT: RefCell<VsAny> = const { RefCell::new(VsAny::UNDEFINED) };
     static ERRORS: RefCell<ErrorTable> = const {
@@ -68,7 +70,7 @@ pub fn register_errors(descs: &[*const VsClassDesc], sizes: &[u64]) {
 
 /// Pushes an active handler buffer.
 pub fn push_handler(buf: *mut u8) {
-    HANDLERS.with(|h| h.borrow_mut().push(buf));
+    HANDLERS.with(|h| h.borrow_mut().push((buf, crate::gc::defer_depth())));
 }
 
 /// Pops the innermost handler (normal try exit).
@@ -83,13 +85,21 @@ pub fn take_current() -> VsAny {
     CURRENT.with(|c| std::mem::replace(&mut *c.borrow_mut(), VsAny::UNDEFINED))
 }
 
+/// The in-flight exception without consuming it (GC root).
+pub fn current_peek() -> VsAny {
+    CURRENT.with(|c| *c.borrow())
+}
+
 /// Throws a boxed value: unwind to the innermost handler or die with the
 /// value's display (uncaught).
 pub fn throw(value: VsAny) -> ! {
     let handler = HANDLERS.with(|h| h.borrow_mut().pop());
     match handler {
-        Some(buf) => {
+        Some((buf, defer_depth)) => {
             CURRENT.with(|c| *c.borrow_mut() = value);
+            // The longjmp below skips every DeferGuard drop between here
+            // and the handler frame; restore the depth it was pushed with.
+            crate::gc::set_defer_depth(defer_depth);
             // SAFETY: buf was registered by compiled code via _setjmp and
             // its frame is still live (handlers pop on scope exit).
             unsafe { c_longjmp(buf, 1) }

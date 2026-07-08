@@ -209,3 +209,10 @@ fn showcase() {
     assert_eq!(stdout, expected, "showcase stdout mismatch");
     let _ = std::fs::remove_dir_all(&out_dir);
 }
+
+/// The Phase 9 milestone (SPECS §7): the collector keeps a churn-heavy
+/// program's live set bounded and survivors intact.
+#[test]
+fn gc_churn() {
+    run_golden("gcchurn");
+}

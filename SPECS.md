@@ -266,7 +266,12 @@ binary. Responsibilities:
     hand-rolled mark/sweep) behind an allocator interface. Cyclic garbage
     **must** be collected — plain `Rc` alone is not acceptable as the final
     answer.
-  - GC sits behind a `GcAllocator` trait so it can be swapped.
+  - **Implemented (P9):** hand-rolled conservative mark-sweep in
+    `runtime::gc` — safepoint-triggered (function entries + loop headers),
+    stack/register/static-root scanning, kind-tagged blocks with size-class
+    pooling. It is a module boundary rather than a `GcAllocator` trait;
+    swapping collectors means swapping the module (revisit if a second
+    collector lands).
 - **Runtime type support:** `is`, `as`, `instanceof`, `typeof`, class-of.
 - **Coercion helpers:** the numeric/string coercion rules from §3.3.
 - **Builtins:** implementations backing the §6 stdlib, bound to `.as`

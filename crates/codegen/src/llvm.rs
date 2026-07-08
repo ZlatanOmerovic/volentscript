@@ -363,10 +363,17 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             }
         }
         // Script prologue: hand the Error descriptors to the runtime so
-        // internal faults throw catchable objects (exc.rs contract).
-        if std::ptr::eq(mir_fn, &program.functions[0]) && program.error_classes.len() == 6 {
-            fcx.emit_error_registration();
+        // internal faults throw catchable objects (exc.rs contract), and
+        // register ref/any statics as GC roots (gc.rs contract).
+        if std::ptr::eq(mir_fn, &program.functions[0]) {
+            if program.error_classes.len() == 6 {
+                fcx.emit_error_registration();
+            }
+            fcx.emit_gc_root_registration();
         }
+        // GC safepoint at every function entry (loop headers get one too):
+        // collection may only run when no runtime frames are live.
+        fcx.emit_safepoint();
         for stmt in &mir_fn.body {
             fcx.stmt(stmt);
         }
@@ -493,6 +500,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .build_conditional_branch(c, body_bb, end_bb)
                     .expect("br");
                 self.cx.builder.position_at_end(body_bb);
+                self.emit_safepoint();
                 self.frames.push(Frame {
                     label: label.clone(),
                     break_bb: end_bb,
@@ -513,6 +521,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .build_unconditional_branch(body_bb)
                     .expect("br");
                 self.cx.builder.position_at_end(body_bb);
+                self.emit_safepoint();
                 self.frames.push(Frame {
                     label: label.clone(),
                     break_bb: end_bb,
@@ -567,6 +576,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     }
                 }
                 self.cx.builder.position_at_end(body_bb);
+                self.emit_safepoint();
                 self.frames.push(Frame {
                     label: label.clone(),
                     break_bb: end_bb,
@@ -863,6 +873,40 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
     }
 
     /// Registers the prelude Error descriptors with the runtime.
+    /// GC safepoint call (gc.rs: collection happens only here).
+    fn emit_safepoint(&mut self) {
+        let f = self.cx.runtime_fn("vs_gc_safepoint", None, &[]);
+        self.cx.builder.build_call(f, &[], "sp").expect("call");
+    }
+
+    /// Registers every ref- or any-typed static field as a GC root
+    /// (numeric statics can't hold references; skipping them avoids
+    /// f64 bit patterns pinning random blocks).
+    fn emit_gc_root_registration(&mut self) {
+        let cx = self.cx;
+        let i32t = cx.context.i32_type();
+        let f = cx.runtime_fn("vs_gc_add_root", None, &[cx.ptr().into(), i32t.into()]);
+        for (ci, class) in self.program.classes.iter().enumerate() {
+            for (si, &ty) in class.statics.iter().enumerate() {
+                let words: u64 = match ty {
+                    Ty::Any => 2,
+                    Ty::String
+                    | Ty::Object(_)
+                    | Ty::Iface(_)
+                    | Ty::Array
+                    | Ty::Vector(_)
+                    | Ty::Function => 1,
+                    Ty::Int | Ty::UInt | Ty::Number | Ty::Boolean | Ty::Void => continue,
+                };
+                let g = cx.classes[ci].statics[si];
+                self.cx
+                    .builder
+                    .build_call(f, &[g.into(), i32t.const_int(words, false).into()], "")
+                    .expect("call");
+            }
+        }
+    }
+
     fn emit_error_registration(&mut self) {
         let cx = self.cx;
         let n = self.program.error_classes.len() as u32;
@@ -4936,6 +4980,21 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 let dead = self.new_block("after.exit");
                 self.cx.builder.position_at_end(dead);
                 Val::Void
+            }
+            N::SystemGc => {
+                let f = cx.runtime_fn("vs_gc_collect", None, &[]);
+                self.cx.builder.build_call(f, &[], "").expect("call");
+                Val::Void
+            }
+            N::SystemGcLiveBytes => {
+                let f = cx.runtime_fn("vs_gc_live_bytes", Some(cx.context.f64_type().into()), &[]);
+                let call = self.cx.builder.build_call(f, &[], "live").expect("call");
+                Val::Num(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_float_value(),
+                )
             }
             N::SystemGetenv => {
                 let name = self.str_arg(&args[0]);

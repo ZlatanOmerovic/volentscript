@@ -13,11 +13,16 @@ pub struct VsString {
 }
 
 impl VsString {
-    /// Allocates a runtime string from UTF-16 code units.
+    /// Allocates a runtime string from UTF-16 code units (GC block; the
+    /// unit buffer stays on the Rust heap and is freed on sweep).
     pub fn alloc(units: Vec<u16>) -> *const VsString {
         let len = u32::try_from(units.len()).expect("string too large");
         let data = Box::leak(units.into_boxed_slice()).as_ptr();
-        Box::leak(Box::new(VsString { len, data }))
+        let p = crate::gc::alloc(std::mem::size_of::<VsString>(), crate::gc::Kind::String)
+            as *mut VsString;
+        // SAFETY: fresh block of exactly VsString size.
+        unsafe { p.write(VsString { len, data }) };
+        p
     }
 
     /// Allocates from a Rust string.

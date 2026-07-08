@@ -28,19 +28,31 @@ pub struct VsVector {
     pub data: RefCell<Vec<VsAny>>,
 }
 
-/// Leaks a new array (P3+ memory model — GC later).
+/// Allocates a new array (GC block; elements traced precisely).
 pub fn new_array(elements: Vec<VsAny>) -> *const VsArray {
-    Box::leak(Box::new(VsArray {
-        data: RefCell::new(elements),
-    }))
+    let p =
+        crate::gc::alloc(std::mem::size_of::<VsArray>(), crate::gc::Kind::Array) as *mut VsArray;
+    // SAFETY: fresh block of exactly VsArray size.
+    unsafe {
+        p.write(VsArray {
+            data: RefCell::new(elements),
+        })
+    };
+    p
 }
 
-/// Leaks a new vector.
+/// Allocates a new vector (GC block).
 pub fn new_vector(inst: u32, elements: Vec<VsAny>) -> *const VsVector {
-    Box::leak(Box::new(VsVector {
-        inst,
-        data: RefCell::new(elements),
-    }))
+    let p =
+        crate::gc::alloc(std::mem::size_of::<VsVector>(), crate::gc::Kind::Vector) as *mut VsVector;
+    // SAFETY: fresh block of exactly VsVector size.
+    unsafe {
+        p.write(VsVector {
+            inst,
+            data: RefCell::new(elements),
+        })
+    };
+    p
 }
 
 /// ToString for arrays/vectors: elements joined with "," (ES3 §15.4.4.2).

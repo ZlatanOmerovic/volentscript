@@ -55,7 +55,9 @@ unsafe extern "C" {
 /// Called by the C runtime startup exactly once.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
+pub unsafe extern "C" fn main(argc: i32, _argv: *const *const u8) -> i32 {
+    // The deepest stack address the collector must scan to (SPECS §7 GC).
+    crate::gc::record_stack_base(&argc as *const i32 as *const u8);
     // SAFETY: vs_script is emitted by codegen in every linked program.
     unsafe { vs_script() };
     use std::io::Write as _;
@@ -564,11 +566,8 @@ use crate::object::{self, VsClassDesc};
 /// `desc` must be a static class descriptor; `size` its instance size.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_alloc_object(desc: *const VsClassDesc, size: u64) -> *mut u8 {
-    let layout = std::alloc::Layout::from_size_align(size as usize, 8).expect("layout");
-    // SAFETY: layout is non-zero (header word always present); allocation
-    // is intentionally leaked (P3+ memory model, see crate docs).
-    let p = unsafe { std::alloc::alloc_zeroed(layout) };
-    assert!(!p.is_null(), "out of memory");
+    // GC block, conservatively scanned (slots hold refs, numbers, anys).
+    let p = crate::gc::alloc(size as usize, crate::gc::Kind::Raw);
     // SAFETY: word 0 is the header (layout contract).
     unsafe { *(p as *mut *const VsClassDesc) = desc };
     p
@@ -1410,8 +1409,10 @@ use crate::object::VsClassDesc as VsClassDescExc;
 /// `init` live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_cell_new(init: *const VsAny) -> *mut VsAny {
-    // SAFETY: caller contract; leaked (P3+ memory model).
-    Box::leak(Box::new(unsafe { *init }))
+    let p = crate::gc::alloc(std::mem::size_of::<VsAny>(), crate::gc::Kind::Raw) as *mut VsAny;
+    // SAFETY: caller contract; fresh block of exactly VsAny size.
+    unsafe { p.write(*init) };
+    p
 }
 
 /// Builds a Function value.
@@ -1467,6 +1468,8 @@ pub unsafe extern "C" fn vs_closure_apply(
         // SAFETY: caller contract.
         unsafe { &*args_array }.data.borrow().clone()
     };
+    // `items` lives on the Rust heap across the callback: keep GC off.
+    let _gc = crate::gc::defer();
     // SAFETY: caller contract.
     unsafe { closure::invoke(c, this_arg, items.len() as u32, items.as_ptr(), out) }
 }
@@ -1594,6 +1597,8 @@ pub unsafe extern "C" fn vs_arr_sort_with(
     // SAFETY: caller contract.
     let arr = unsafe { arr(a, "sort") };
     let mut data = arr.data.borrow_mut();
+    // sort_by stages elements in scratch buffers the GC can't see: defer.
+    let _gc = crate::gc::defer();
     data.sort_by(|x, y| {
         let args = [*x, *y];
         let mut out = VsAny::UNDEFINED;
@@ -2137,6 +2142,9 @@ pub unsafe extern "C" fn vs_arr_iterate(
     let array = unsafe { arr(a, "iterate") };
     let items = array.data.borrow().clone();
     let self_any = VsAny::array(a);
+    // `items`/`mapped`/`filtered` live on the Rust heap across the
+    // callbacks: keep GC off.
+    let _gc = crate::gc::defer();
     let mut mapped = Vec::new();
     let mut filtered = Vec::new();
     let mut result = VsAny::boolean(mode == 4); // some=false / every=true
@@ -2167,4 +2175,34 @@ pub unsafe extern "C" fn vs_arr_iterate(
     };
     // SAFETY: caller contract.
     unsafe { *out = final_v };
+}
+
+// --- garbage collection (SPECS §7) -------------------------------------------
+
+/// Safepoint: emitted by the backend at function entries and loop headers.
+/// Collects when the allocation debt is due (see the gc module docs).
+#[unsafe(no_mangle)]
+pub extern "C" fn vs_gc_safepoint() {
+    crate::gc::safepoint();
+}
+
+/// Registers a static root range (compiled prologue: ref/any statics).
+///
+/// # Safety
+/// `addr..addr + words*8` must be a live static global.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_gc_add_root(addr: *const u8, words: u32) {
+    crate::gc::add_root(addr, words as usize);
+}
+
+/// System.gc(): forces a full collection.
+#[unsafe(no_mangle)]
+pub extern "C" fn vs_gc_collect() {
+    crate::gc::collect();
+}
+
+/// System.gcLiveBytes(): live GC payload bytes (tests/tuning).
+#[unsafe(no_mangle)]
+pub extern "C" fn vs_gc_live_bytes() -> f64 {
+    crate::gc::live_bytes() as f64
 }

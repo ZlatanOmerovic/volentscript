@@ -6,3 +6,7 @@
 /docs/*
 !/docs/SOURCES.md
 /tests/showcase
+/tests/programs/*
+!/tests/programs/*.as
+!/tests/programs/*.out
+!/tests/programs/*.txt

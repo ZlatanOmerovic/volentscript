@@ -81,6 +81,13 @@ surface in one program, verified against its embedded expected output.
 
 `vigorscript build tool.as` produces a native binary for real CLI tools
 (the P7 milestone golden test is a word-frequency tool with a JSON report).
-Remaining (backlog): GC (currently leak-only — the biggest debt vs SPECS
-§7), RegExp, Date instances, runtime namespaces, optimization passes,
-Linux cross-compile hardening. Phase plan: SPECS §11.
+P9 added the garbage collector (SPECS §7): conservative mark-sweep in
+`runtime::gc`, collecting only at backend-emitted safepoints (function
+entries and loop headers), with conservative stack + register + static
+root scanning, precise tracing of container side-storage, and size-class
+block pooling so heavy churn plateaus (a 1.5 GB-churn stress test holds
+~34 MB peak RSS). `System.gc()` / `System.gcLiveBytes()` are available;
+`VS_GC_LOG=1` prints per-collection stats.
+
+Remaining (backlog): RegExp, Date instances, runtime namespaces,
+optimization passes, Linux cross-compile hardening. Phase plan: SPECS §11.

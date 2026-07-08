@@ -65,7 +65,10 @@ unsafe fn expando<'x>(obj: *const u8) -> Option<&'x mut PropMap> {
         }
         let slot = obj.add(d.expando_off as usize) as *mut *mut PropMap;
         if (*slot).is_null() {
-            *slot = Box::leak(Box::new(PropMap::new()));
+            let p = crate::gc::alloc(std::mem::size_of::<PropMap>(), crate::gc::Kind::PropMap)
+                as *mut PropMap;
+            p.write(PropMap::new());
+            *slot = p;
         }
         Some(&mut **slot)
     }

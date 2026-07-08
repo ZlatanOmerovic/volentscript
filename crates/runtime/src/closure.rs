@@ -22,18 +22,32 @@ pub struct VsClosure {
 pub type Wrapper =
     unsafe extern "C" fn(*const *mut VsAny, *const u8, u32, *const VsAny, *mut VsAny);
 
-/// Leaks a new closure.
+/// Allocates a new closure (GC blocks: the closure and its env array are
+/// plain-word blocks; cells and `this` are kept alive by conservative
+/// scan of those words).
 pub fn new_closure(wrapper: *const u8, env: Vec<*mut VsAny>, this: *const u8) -> *const VsClosure {
     let env_ptr = if env.is_empty() {
         std::ptr::null()
     } else {
-        Box::leak(env.into_boxed_slice()).as_ptr()
+        let block = crate::gc::alloc(
+            env.len() * std::mem::size_of::<*mut VsAny>(),
+            crate::gc::Kind::Raw,
+        ) as *mut *mut VsAny;
+        // SAFETY: block sized for env.len() pointers.
+        unsafe { std::ptr::copy_nonoverlapping(env.as_ptr(), block, env.len()) };
+        block as *const *mut VsAny
     };
-    Box::leak(Box::new(VsClosure {
-        wrapper,
-        env: env_ptr,
-        this,
-    }))
+    let p =
+        crate::gc::alloc(std::mem::size_of::<VsClosure>(), crate::gc::Kind::Raw) as *mut VsClosure;
+    // SAFETY: fresh block of exactly VsClosure size.
+    unsafe {
+        p.write(VsClosure {
+            wrapper,
+            env: env_ptr,
+            this,
+        })
+    };
+    p
 }
 
 /// Invokes a Function value with boxed arguments.

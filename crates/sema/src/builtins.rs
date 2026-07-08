@@ -171,6 +171,8 @@ pub enum NativeFn {
     MathRandom,
     SystemArgs,
     SystemExit,
+    SystemGc,
+    SystemGcLiveBytes,
     SystemGetenv,
     SystemTime,
     FileRead,
@@ -324,6 +326,16 @@ pub fn native_methods(class: &str) -> Option<&'static [NativeMethod]> {
         NativeMethod {
             name: "time",
             func: SystemTime,
+            sig: nsig(&[], 0, false, N),
+        },
+        NativeMethod {
+            name: "gc",
+            func: SystemGc,
+            sig: nsig(&[], 0, false, Ty::Void),
+        },
+        NativeMethod {
+            name: "gcLiveBytes",
+            func: SystemGcLiveBytes,
             sig: nsig(&[], 0, false, N),
         },
     ];

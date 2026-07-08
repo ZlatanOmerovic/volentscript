@@ -1,0 +1,6 @@
+survivors = 10
+first = payload-0-0
+last = payload-180000-360000
+acc = 50000
+bounded = true
+gc ok
