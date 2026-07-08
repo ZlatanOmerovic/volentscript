@@ -111,6 +111,12 @@ scheme needs `returns_twice`, which Cranelift lacks (SPECS §11 DECISION).
 The `Backend` trait boundary is verified mechanically: no frontend crate
 depends on inkwell.
 
+## Install
+
+Grab `volentscript-<version>-macos-arm64.tar.gz` from the GitHub releases
+page (binary + runtime staticlib + examples), or build from source (above).
+CI runs the full test matrix on every push; releases are cut from tags.
+
 ## Usage
 
 ```sh
