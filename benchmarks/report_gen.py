@@ -88,26 +88,29 @@ md.append("""
   (object elements), so P23's unboxing does not apply; the gap is
   per-`Body` field access across pointers plus `Math.sqrt`, neither
   vectorized.
-- **Allocation churn (binarytrees)** — ~8x C, and the JIT runtimes beat
-  everyone (generational collectors love this workload). Our conservative
-  mark-sweep with size-class pooling holds memory flat but pays per-object
-  bookkeeping.
-- **Strings** — ~13x C, down from ~18x after P26 made split/replace/case/join
-  operate on UTF-16 code units directly instead of transcoding to UTF-8 and
-  back (indexOf and `+` were already native). The transcode was only ~a
-  quarter of the cost, though: the benchmark allocates ~12 strings per
-  iteration, so what remains is allocation/GC churn, not encoding — the same
-  gap as binarytrees, addressed by the allocation fast path + generational
-  collection, not more string work.
+- **Allocation churn (binarytrees)** — ~1.8x C, down from ~8x after P27
+  Part A replaced the per-object `BTreeMap` registry with per-size-class
+  bump arenas and 16-byte inline block headers: allocation is now a pointer
+  bump (or a pool pop), and sweep walks arenas cache-linearly instead of
+  iterating and removing a map entry for every live block. Clean A/B on this
+  binary was 3.68x. It is now within 2x of C and the native compilers on a
+  workload that used to be our worst row; the generational JIT collectors
+  still win it outright (a non-moving generational nursery — P27 Part B — is
+  the next lever, deferred pending field data on Part A).
+- **Strings** — ~8.6x C, down from ~13x, and now ahead of Java. Two phases
+  stack: P26 made split/replace/case/join operate on UTF-16 code units
+  directly instead of transcoding to UTF-8 and back, and P27 Part A cut the
+  allocation cost of the ~12 short-lived strings this benchmark builds per
+  iteration. Encoding was only ~a quarter of the original gap — the rest was
+  allocation/GC churn, the same cost P27 attacks in binarytrees.
 
-**Remaining gaps map to planned optimizations, in impact order:** an
-allocation fast path plus generational collection — the dominant cost in
-both binarytrees and strings (which allocates ~12 short-lived strings per
-iteration) — and module-level global storage so mutable top-level `var`s stop
-closure-converting their readers (P25 already did this for `const`s). fib's
-~6x is the call ABI itself and nbody's ~10x is per-field pointer chasing plus
-`Math.sqrt`, neither a collector nor a closure issue. None require language
-changes.
+**Remaining gaps map to planned optimizations, in impact order:** a
+non-moving generational nursery (P27 Part B) for the binarytrees/strings
+allocation churn that the JITs still win, and module-level global storage so
+mutable top-level `var`s stop closure-converting their readers (P25 already
+did this for `const`s). fib's ~6x is the call ABI itself and nbody's ~10x is
+per-field pointer chasing plus `Math.sqrt`, neither a collector nor a closure
+issue. None require language changes.
 
 **Fairness notes:** same algorithm and structure in every language,
 idiomatic-simple, no SIMD/threads/arena tricks anywhere. Java is timed as
@@ -184,10 +187,10 @@ html = f"""<!doctype html>
     <li><b>Tight numeric loops</b> (mandelbrot): within ~2x of C, at JS-JIT level — LLVM -O2 works when code stays in registers.</li>
     <li><b>Call-heavy code</b> (fib): ~6x C — a GC safepoint check per call, plus conservative-GC codegen constraints.</li>
     <li><b>Object float math</b> (nbody): ~10x C — <code>Vector.&lt;T&gt;</code> element reads are runtime calls on boxed storage; safepoints block loop hoisting.</li>
-    <li><b>Allocation churn</b> (binarytrees): ~8x C; generational JIT collectors win this workload outright.</li>
-    <li><b>Strings</b>: ~12x C — every operation transcodes UTF-16 &harr; UTF-8 inside the runtime.</li>
+    <li><b>Allocation churn</b> (binarytrees): ~1.8x C, down from ~8x — P27 bump arenas replaced the per-object registry (3.68x on this binary). Generational JIT collectors still win it outright.</li>
+    <li><b>Strings</b>: ~8.6x C, down from ~13x and now ahead of Java — UTF-16-native ops (P26) plus the P27 allocation fast path; the churn from ~12 short-lived strings per iteration is the remaining gap.</li>
   </ul>
-  <p style="margin-top:10px">Each gap maps to a planned optimization: unboxed numeric Vectors, UTF-16-native string ops, allocation fast path + safepoint hoisting, generational GC. None require language changes. Same idiomatic-simple algorithm in every language; Java timed as a process like everything else (its binarytrees throughput still wins). TypeScript is not a separate row — it erases to the same JS.</p>
+  <p style="margin-top:10px">Remaining gaps map to planned optimizations: a non-moving generational nursery for allocation churn, and module-level global storage so mutable top-level <code>var</code>s stop closure-converting their readers. None require language changes. Same idiomatic-simple algorithm in every language; Java timed as a process like everything else (its binarytrees throughput still wins). TypeScript is not a separate row — it erases to the same JS.</p>
 </div>
 <footer>VolentScript — ActionScript 3, revived. Native, ahead-of-time, and entirely of its own will.</footer>
 </body></html>"""
