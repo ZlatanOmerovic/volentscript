@@ -1,0 +1,278 @@
+Program
+  VarDecl
+    Binding name=counter type=int
+      init:
+        Int 0
+  ConstDecl
+    Binding name=GREETING type=String
+      init:
+        Str "hello,\tworld"
+  VarDecl
+    Binding name=anything type=*
+      init:
+        Null
+  VarDecl
+    Binding name=maybe type=Number
+  Function name=fib returns=int
+    Param n type=int
+    Block
+      If
+        cond:
+          Binary Lt
+            Ident n
+            Int 2
+        then:
+          Return
+            Ident n
+      Return
+        Binary Add
+          Call
+            Ident fib
+            arg:
+              Binary Sub
+                Ident n
+                Int 1
+          Call
+            Ident fib
+            arg:
+              Binary Sub
+                Ident n
+                Int 2
+  Function name=greet returns=void
+    Param name type=String
+      default:
+        Str "world"
+    Param ...rest
+    Block
+      ExprStmt
+        Call
+          Ident trace
+          arg:
+            Binary Add
+              Str "hello "
+              Ident name
+  Function name=classify returns=String
+    Param value type=Number
+    Block
+      VarDecl
+        Binding name=out type=String
+          init:
+            Str ""
+      Switch
+        scrutinee:
+          Binary Rem
+            Ident value
+            Int 3
+        Case
+          test:
+            Int 0
+          ExprStmt
+            Assign Assign
+              Ident out
+              Str "fizz"
+          Break
+        Case
+          test:
+            Int 1
+        Case
+          test:
+            Int 2
+          ExprStmt
+            Assign Assign
+              Ident out
+              Str "other"
+          Break
+        Default
+          ExprStmt
+            Assign Assign
+              Ident out
+              Str "impossible"
+      Return
+        Ident out
+  VarDecl
+    Binding name=totals type=Vector.<Vector.<int>>
+      init:
+        Null
+  VarDecl
+    Binding name=flags type=Boolean
+      init:
+        Binary LogAnd
+          Binary Is
+            Ident counter
+            Ident int
+          Unary Not
+            Binary Eq
+              Binary As
+                Ident GREETING
+                Ident String
+              Null
+  Labeled label=outer
+    For
+      init:
+        VarDecl
+          Binding name=i type=int
+            init:
+              Int 0
+      cond:
+        Binary Lt
+          Ident i
+          Int 10
+      update:
+        Postfix Inc
+          Ident i
+      body:
+        Block
+          ForIn
+            target:
+              VarDecl
+                Binding name=key type=String
+            object:
+              Object
+                prop a:
+                  Int 1
+                prop "b":
+                  Int 2
+                prop 3:
+                  Array
+                    Int 1
+                    Hole
+                    Number 250
+            body:
+              Block
+                If
+                  cond:
+                    Binary Eq
+                      Ident key
+                      Str "a"
+                  then:
+                    Continue label=outer
+                Break label=outer
+  ForEachIn
+    target:
+      VarDecl
+        Binding name=item type=*
+    object:
+      Array
+        Int 16
+        Number 0.5
+        UInt 4294967295
+    body:
+      Block
+        ExprStmt
+          Assign Add
+            Ident counter
+            Ident item
+  DoWhile
+    body:
+      Block
+        ExprStmt
+          Postfix Dec
+            Ident counter
+    cond:
+      Binary LogAnd
+        Binary Gt
+          Ident counter
+          Int 0
+        Binary StrictNe
+          Ident counter
+          Int 1
+  Try
+    Block
+      Throw
+        Str "boom"
+    Catch name=e type=String
+      Block
+        ExprStmt
+          Call
+            Ident trace
+            arg:
+              Ident e
+    Catch name=e
+      Block
+        ExprStmt
+          Call
+            Ident trace
+            arg:
+              Str "other"
+            arg:
+              Ident e
+    Finally
+      Block
+        ExprStmt
+          Assign Assign
+            Ident counter
+            Int 0
+  VarDecl
+    Binding name=adder type=Function
+      init:
+        Function returns=int
+          Param a type=int
+          Param b type=int
+          Block
+            Return
+              Binary Add
+                Ident a
+                Ident b
+  ExprStmt
+    Assign LogAnd
+      Ident counter
+      Call
+        Ident adder
+        arg:
+          Int 1
+        arg:
+          Int 2
+  ExprStmt
+    Assign LogOr
+      Ident counter
+      Call
+        Ident fib
+        arg:
+          Int 5
+  ExprStmt
+    Assign Ushr
+      Ident counter
+      Int 1
+  ExprStmt
+    Assign Assign
+      Ident maybe
+      Conditional
+        Binary Gt
+          Ident counter
+          Int 5
+        Call
+          Ident adder
+          arg:
+            Ident counter
+          arg:
+            Int 1
+        Unary Minus
+          Ident counter
+  VarDecl
+    Binding name=box
+      init:
+        Member .size
+          Index
+            New
+              Ident Widget
+              arg:
+                Ident counter
+            Int 0
+  ExprStmt
+    Unary Delete
+      Member .stale
+        Ident anything
+  ExprStmt
+    Call
+      Ident trace
+      arg:
+        Unary Typeof
+          Ident maybe
+      arg:
+        Call
+          Ident classify
+          arg:
+            Int 7
+      arg:
+        Unary Void
+          Int 0

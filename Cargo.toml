@@ -31,6 +31,7 @@ driver = { path = "crates/driver" }
 # external
 clap = { version = "4", features = ["derive"] }
 inkwell = { version = "0.9", features = ["llvm22-1"] }
+expect-test = "1"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

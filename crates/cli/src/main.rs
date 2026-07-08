@@ -33,6 +33,11 @@ enum Command {
         /// Entry .as source file
         input: PathBuf,
     },
+    /// Parse a .as file and print its AST (compiler development aid)
+    Parse {
+        /// Entry .as source file
+        input: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -40,17 +45,28 @@ fn main() -> ExitCode {
     let (input, output) = match cli.command {
         Command::Build { input, output } => (input, output),
         Command::Run { input } => (input, None),
+        Command::Parse { input } => {
+            return match driver::parse_dump(&input) {
+                Ok(dump) => {
+                    print!("{dump}");
+                    ExitCode::SUCCESS
+                }
+                Err(errors) => report(errors),
+            };
+        }
     };
     match driver::build(&driver::BuildOptions { input, output }) {
         Ok(exe) => {
             println!("built {}", exe.display());
             ExitCode::SUCCESS
         }
-        Err(diags) => {
-            for d in &diags {
-                eprintln!("{}", d.render());
-            }
-            ExitCode::FAILURE
-        }
+        Err(errors) => report(errors),
     }
+}
+
+fn report(errors: driver::Errors) -> ExitCode {
+    for rendered in &errors.rendered {
+        eprintln!("{rendered}");
+    }
+    ExitCode::FAILURE
 }

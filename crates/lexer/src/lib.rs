@@ -1,28 +1,17 @@
 //! Lexer: `&str` → token stream.
 //!
-//! Token inventory and lexing rules follow the ES4 draft; the real lexer
-//! lands in P1. P0 defines the stream shape so downstream signatures are
-//! stable.
+//! Token inventory and lexical rules follow the AS3 reference implementation
+//! (`docs/avmplus/eval/eval-lex.{h,cpp}`, keyword table
+//! `docs/avmplus/eval/generate-keyword-lexer.as`) on the ES3 lexical grammar
+//! baseline (ECMA-262 3rd ed. §7). Deviations are P1 scope cuts, each marked:
+//! no regex literals (P7), no E4X `@`/XML tokens (dropped, SPECS §5), no
+//! octal literals (avmplus gates them behind `compiler->octal_literals`;
+//! we reject like its default mode).
 
 #![forbid(unsafe_code)]
 
-use span::Span;
+mod scan;
+mod token;
 
-/// What kind of token was lexed.
-///
-/// P1 adds the full AS3/ES4 inventory (identifiers, keywords, literals,
-/// punctuation).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenKind {
-    /// End of input. Always the final token of a stream.
-    Eof,
-}
-
-/// One lexed token.
-#[derive(Debug, Clone, Copy)]
-pub struct Token {
-    /// The token's kind.
-    pub kind: TokenKind,
-    /// Where it came from.
-    pub span: Span,
-}
+pub use scan::lex;
+pub use token::{Token, TokenKind};

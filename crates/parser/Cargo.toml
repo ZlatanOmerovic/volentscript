@@ -12,5 +12,8 @@ diagnostics.workspace = true
 lexer.workspace = true
 ast.workspace = true
 
+[dev-dependencies]
+expect-test.workspace = true
+
 [lints]
 workspace = true

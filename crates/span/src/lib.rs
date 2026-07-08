@@ -80,6 +80,34 @@ impl SourceMap {
     pub fn snippet(&self, span: Span) -> &str {
         &self.get(span.source).text[span.start as usize..span.end as usize]
     }
+
+    /// 1-based line and column of a byte offset, plus the full text of that
+    /// line (for caret rendering).
+    pub fn line_col(&self, source: SourceId, offset: u32) -> LineCol<'_> {
+        let text = &self.get(source).text;
+        let offset = (offset as usize).min(text.len());
+        let line_start = text[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let line = text[..line_start].matches('\n').count() + 1;
+        let line_end = text[line_start..]
+            .find('\n')
+            .map_or(text.len(), |i| line_start + i);
+        LineCol {
+            line,
+            col: text[line_start..offset].chars().count() + 1,
+            line_text: text[line_start..line_end].trim_end_matches('\r'),
+        }
+    }
+}
+
+/// A resolved source position (see [`SourceMap::line_col`]).
+#[derive(Debug)]
+pub struct LineCol<'a> {
+    /// 1-based line number.
+    pub line: usize,
+    /// 1-based column (in characters, not bytes).
+    pub col: usize,
+    /// The complete line of source text.
+    pub line_text: &'a str,
 }
 
 #[cfg(test)]
