@@ -40,11 +40,27 @@ jobs:
           MAJOR=$("$LLVM_SYS_221_PREFIX/bin/llvm-config" --version | cut -d. -f1)
           test "$MAJOR" = "22" || { echo "::error::LLVM is $MAJOR, need 22"; exit 1; }
 
-      - name: Rust toolchain
-        run: rustup toolchain install 1.88 --profile minimal && rustup default 1.88
+      - name: Rust toolchain + cross targets
+        run: |
+          rustup toolchain install 1.88 --profile minimal && rustup default 1.88
+          rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-gnu
+
+      - name: mingw (dlltool for the windows-gnu runtime)
+        if: runner.os == 'macOS'
+        run: brew install mingw-w64
+
+      - name: mingw (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y mingw-w64
 
       - name: Build release
         run: cargo build --workspace --release
+
+      - name: Build cross-target runtimes
+        run: |
+          cargo build -p runtime --target x86_64-unknown-linux-gnu --release
+          cargo build -p runtime --target aarch64-unknown-linux-gnu --release
+          cargo build -p runtime --target x86_64-pc-windows-gnu --release
 
       - name: Smoke test the artifact
         run: |
@@ -58,6 +74,12 @@ jobs:
           mkdir -p "dist/$PKG"
           cp target/release/volentscript "dist/$PKG/"
           cp target/release/libruntime.a "dist/$PKG/"
+          # Cross-target runtimes: --target works out of the box with
+          # --runtime-lib runtime/<triple>/libruntime.a
+          for triple in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-gnu; do
+            mkdir -p "dist/$PKG/runtime/$triple"
+            cp "target/$triple/release/libruntime.a" "dist/$PKG/runtime/$triple/"
+          done
           cp README.md LICENSE-MIT LICENSE-APACHE "dist/$PKG/"
           cp -R examples "dist/$PKG/examples"
           tar -czf "dist/$PKG.tar.gz" -C dist "$PKG"

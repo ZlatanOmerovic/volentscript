@@ -78,7 +78,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "ast"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "span",
 ]
@@ -185,7 +185,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "codegen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "diagnostics",
  "inkwell",
@@ -206,7 +206,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "diagnostics"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "span",
 ]
@@ -219,7 +219,7 @@ checksum = "aeda16ab4059c5fd2a83f2b9c9e9c981327b18aa8e3b313f7e6563799d4f093e"
 
 [[package]]
 name = "driver"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ast",
  "codegen",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "e2e"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "driver",
 ]
@@ -367,7 +367,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lexer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "diagnostics",
  "span",
@@ -407,7 +407,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mir"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ast",
  "diagnostics",
@@ -438,7 +438,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "parser"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ast",
  "diagnostics",
@@ -496,7 +496,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "fancy-regex",
@@ -510,7 +510,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "sema"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ast",
  "diagnostics",
@@ -539,7 +539,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "span"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "strsim"
@@ -592,7 +592,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "volentscript"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "diagnostics",
