@@ -125,5 +125,21 @@ LLVM optimizes across it. Functions containing `try` are pinned to
 Recursive int benchmark: ~5x faster than the P12 compiler at -O2.
 `VS_DUMP_IR_OPT=1` dumps the post-pipeline module.
 
-Remaining (backlog): Linux cross-compile hardening, runtime Namespace
-values, sockets. Phase plan: SPECS §11.
+P14 added Linux cross-compilation:
+
+```sh
+rustup target add x86_64-unknown-linux-gnu     # once
+cargo build -p runtime --target x86_64-unknown-linux-gnu --release
+vigorscript build tool.as --target x86_64-unknown-linux-gnu
+```
+
+`--target` supports `x86_64-unknown-linux-gnu` and
+`aarch64-unknown-linux-gnu`; linking goes through `zig cc` (bundled
+linker + glibc sysroots + libunwind for the Rust runtime's unwind refs).
+The entire golden corpus — GC churn, setjmp exceptions, regex, Date,
+the showcase — runs byte-identical on both Linux architectures
+(validated in Debian containers). Opt-in e2e:
+`cargo test -p e2e --test golden cross_linux -- --ignored`.
+
+Remaining (backlog): runtime Namespace values, sockets, Cranelift
+backend. Phase plan: SPECS §11.

@@ -33,6 +33,9 @@ enum Command {
         /// Optimization level (0-3)
         #[arg(short = 'O', long = "opt", default_value = "2")]
         opt: u8,
+        /// Cross-compilation target triple (e.g. x86_64-unknown-linux-gnu)
+        #[arg(long)]
+        target: Option<String>,
     },
     /// Compile and immediately run a .as file
     Run {
@@ -62,18 +65,19 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let (input, output, runtime_lib, opt, and_run) = match cli.command {
+    let (input, output, runtime_lib, opt, target, and_run) = match cli.command {
         Command::Build {
             input,
             output,
             runtime_lib,
             opt,
-        } => (input, output, runtime_lib, opt, false),
+            target,
+        } => (input, output, runtime_lib, opt, target, false),
         Command::Run {
             input,
             runtime_lib,
             opt,
-        } => (input, None, runtime_lib, opt, true),
+        } => (input, None, runtime_lib, opt, None, true),
         Command::Parse { input } => {
             return match driver::parse_dump(&input) {
                 Ok(dump) => {
@@ -104,6 +108,7 @@ fn main() -> ExitCode {
         input,
         output,
         runtime_lib,
+        target,
         opt: match opt {
             0 => driver::OptLevel::O0,
             1 => driver::OptLevel::O1,

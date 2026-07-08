@@ -23,6 +23,9 @@ pub struct BuildOptions {
     pub runtime_lib: Option<PathBuf>,
     /// Optimization level (default O2).
     pub opt: codegen::OptLevel,
+    /// Cross-compilation target triple (e.g. `x86_64-unknown-linux-gnu`);
+    /// `None` = host. Linux targets link with `zig cc` (CLAUDE.md §3).
+    pub target: Option<String>,
 }
 
 /// Compilation failure: diagnostics already rendered against the source map
@@ -171,7 +174,7 @@ pub fn build(opts: &BuildOptions) -> Result<PathBuf, Errors> {
             &program,
             &codegen::CodegenOpts {
                 opt: opts.opt,
-                ..Default::default()
+                target_triple: opts.target.clone(),
             },
         )
         .map_err(|d| Errors::new(d, &sources))?;
@@ -185,20 +188,34 @@ pub fn build(opts: &BuildOptions) -> Result<PathBuf, Errors> {
         .map_err(|e| Errors::message(format!("cannot write `{}`: {e}", obj_path.display())))?;
 
     let runtime_lib = find_runtime_lib(opts)?;
-    let mut link_cmd = Command::new("cc");
+    let mut link_cmd = match zig_target(opts.target.as_deref())? {
+        // Cross link: zig ships linker + libc sysroots for every target
+        // (CLAUDE.md §3 hardening path).
+        Some(zt) => {
+            let mut c = Command::new("zig");
+            // -lunwind: the Rust runtime staticlib carries unwind
+            // references (_Unwind_Resume); zig bundles LLVM libunwind.
+            c.args(["cc", "-target", &zt, "-lunwind"]);
+            c
+        }
+        None => Command::new("cc"),
+    };
     link_cmd
         .arg(&obj_path)
         .arg(&runtime_lib)
         .arg("-o")
         .arg(&output);
     // The runtime's timezone lookup (chrono → iana-time-zone) uses
-    // CoreFoundation on macOS.
-    if cfg!(target_os = "macos") {
+    // CoreFoundation on macOS (host links only).
+    if opts.target.is_none() && cfg!(target_os = "macos") {
         link_cmd.args(["-framework", "CoreFoundation"]);
     }
-    let link = link_cmd
-        .output()
-        .map_err(|e| Errors::message(format!("cannot run linker `cc`: {e}")))?;
+    let link = link_cmd.output().map_err(|e| {
+        Errors::message(format!(
+            "cannot run linker `{}`: {e}",
+            if opts.target.is_some() { "zig" } else { "cc" }
+        ))
+    })?;
     let _ = std::fs::remove_file(&obj_path);
     if !link.status.success() {
         return Err(Errors::message(format!(
@@ -208,7 +225,7 @@ pub fn build(opts: &BuildOptions) -> Result<PathBuf, Errors> {
     }
 
     // Apple Silicon refuses unsigned binaries — ad-hoc sign (CLAUDE.md §3).
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+    if opts.target.is_none() && cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         let sign = Command::new("codesign")
             .args(["-s", "-", "--force"])
             .arg(&output)
@@ -238,6 +255,19 @@ pub fn run(opts: &BuildOptions) -> Result<i32, Errors> {
     Ok(status.code().unwrap_or(1))
 }
 
+/// Maps a Rust-style target triple to zig's spelling; `None` input = host
+/// (no zig). Unknown triples are an error naming the supported set.
+fn zig_target(target: Option<&str>) -> Result<Option<String>, Errors> {
+    let Some(t) = target else { return Ok(None) };
+    match t {
+        "x86_64-unknown-linux-gnu" => Ok(Some("x86_64-linux-gnu".to_string())),
+        "aarch64-unknown-linux-gnu" => Ok(Some("aarch64-linux-gnu".to_string())),
+        other => Err(Errors::message(format!(
+            "unsupported target `{other}` — supported: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu"
+        ))),
+    }
+}
+
 fn find_runtime_lib(opts: &BuildOptions) -> Result<PathBuf, Errors> {
     if let Some(p) = &opts.runtime_lib {
         if p.exists() {
@@ -251,6 +281,22 @@ fn find_runtime_lib(opts: &BuildOptions) -> Result<PathBuf, Errors> {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf));
+    // Cross targets: the workspace puts the target's runtime at
+    // target/<triple>/{release,debug}/libruntime.a (built with
+    // `cargo build -p runtime --target <triple> --release`).
+    if let (Some(t), Some(dir)) = (&opts.target, &exe_dir) {
+        if let Some(target_root) = dir.parent() {
+            for profile in ["release", "debug"] {
+                let candidate = target_root.join(t).join(profile).join("libruntime.a");
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
+            }
+        }
+        return Err(Errors::message(format!(
+            "no runtime for `{t}` — build it with `cargo build -p runtime --target {t} --release` or pass --runtime-lib"
+        )));
+    }
     if let Some(dir) = exe_dir {
         let candidate = dir.join("libruntime.a");
         if candidate.exists() {

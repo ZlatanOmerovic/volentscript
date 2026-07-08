@@ -45,6 +45,7 @@ fn run_golden(name: &str) {
         output: Some(exe.clone()),
         runtime_lib: Some(runtime_lib()),
         opt: driver::OptLevel::default(),
+        target: None,
     })
     .unwrap_or_else(|e| panic!("build failed:\n{}", e.rendered.join("\n")));
 
@@ -127,6 +128,7 @@ fn cli_tool() {
         output: Some(exe.clone()),
         runtime_lib: Some(runtime_lib()),
         opt: driver::OptLevel::default(),
+        target: None,
     })
     .unwrap_or_else(|e| panic!("build failed:\n{}", e.rendered.join("\n")));
     std::fs::write(
@@ -198,6 +200,7 @@ fn showcase() {
         output: Some(exe.clone()),
         runtime_lib: Some(runtime_lib()),
         opt: driver::OptLevel::default(),
+        target: None,
     })
     .unwrap_or_else(|e| panic!("build failed:\n{}", e.rendered.join("\n")));
 
@@ -241,4 +244,49 @@ fn date() {
 #[test]
 fn namespaces() {
     run_golden("namespaces");
+}
+
+/// The Phase 14 milestone (CLAUDE.md §3): cross-compile to Linux and run
+/// the showcase in a container. Needs zig, docker, and the target's
+/// runtime staticlib, so it is ignored by default:
+///   rustup target add aarch64-unknown-linux-gnu
+///   cargo build -p runtime --target aarch64-unknown-linux-gnu --release
+///   cargo test -p e2e --test golden cross_linux -- --ignored
+#[test]
+#[ignore = "needs zig + docker + cross runtime (see doc comment)"]
+fn cross_linux() {
+    let root = workspace_root();
+    let out_dir = std::env::temp_dir().join(format!("vs-cross-{}", std::process::id()));
+    std::fs::create_dir_all(&out_dir).expect("temp dir");
+    let exe = out_dir.join("showcase-linux");
+    driver::build(&driver::BuildOptions {
+        input: root.join("tests/showcase.as"),
+        output: Some(exe.clone()),
+        runtime_lib: Some(root.join("target/aarch64-unknown-linux-gnu/release/libruntime.a")),
+        opt: driver::OptLevel::default(),
+        target: Some("aarch64-unknown-linux-gnu".to_string()),
+    })
+    .unwrap_or_else(|e| panic!("cross build failed:\n{}", e.rendered.join("\n")));
+
+    let output = Command::new("docker")
+        .args(["run", "--rm", "--platform", "linux/arm64", "-v"])
+        .arg(format!("{}:/w", out_dir.display()))
+        .args(["debian:stable-slim", "/w/showcase-linux"])
+        .output()
+        .expect("docker run");
+    assert_eq!(output.status.code(), Some(0));
+
+    let source = std::fs::read_to_string(root.join("tests/showcase.as")).expect("source");
+    let mut lines = source
+        .lines()
+        .skip_while(|l| !l.contains("EXPECTED STDOUT"));
+    lines.next();
+    let expected: String = lines
+        .skip_while(|l| !l.is_empty())
+        .skip(1)
+        .take_while(|l| !l.starts_with("---"))
+        .flat_map(|l| [l, "\n"])
+        .collect();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+    let _ = std::fs::remove_dir_all(&out_dir);
 }
