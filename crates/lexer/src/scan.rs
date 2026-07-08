@@ -625,10 +625,11 @@ impl Scanner<'_> {
                 }
                 Some('\\') => {
                     self.pos += 1;
-                    if let Some(c) = self.peek_char() {
-                        if c != '\n' && c != '\r' {
-                            self.bump(c);
-                        }
+                    if let Some(c) = self.peek_char()
+                        && c != '\n'
+                        && c != '\r'
+                    {
+                        self.bump(c);
                     }
                 }
                 Some('[') => {

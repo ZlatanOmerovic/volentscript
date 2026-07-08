@@ -5,7 +5,7 @@ members = ["crates/*", "tests"]
 # Toolchain pins (see README "Toolchain"):
 #   LLVM major:  22  (brew `llvm`, currently 22.1.6)
 #   inkwell:     0.9.x, feature "llvm22-1" (=> llvm-sys 221)
-#   MSRV:        1.85 (inkwell minimum; edition 2024 floor)
+#   MSRV:        1.88 (inkwell 0.9 uses let-chains; edition 2024 floor)
 # The inkwell feature flag, LLVM_SYS_221_PREFIX, and the brew LLVM major must
 # all agree. Do not let `brew upgrade` drift the LLVM major without updating
 # all three together.
@@ -13,7 +13,7 @@ members = ["crates/*", "tests"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]

@@ -269,20 +269,19 @@ impl Lowerer<'_> {
                 .ctor
                 .map(|f| tast_has_super(&self.program.functions[f.0 as usize].body))
                 .unwrap_or(false);
-            if !explicit_super {
-                if let Some(parent) = info.parent {
-                    if parent.0 != 0 {
-                        prologue.push(Stmt::Expr(Expr {
-                            ty: Ty::Void,
-                            span,
-                            kind: ExprKind::CallDirect {
-                                fn_id: self.ctor_fn[parent.0 as usize],
-                                recv: Box::new(this_expr(parent.0, span)),
-                                args: self.ctor_default_args(parent.0),
-                            },
-                        }));
-                    }
-                }
+            if !explicit_super
+                && let Some(parent) = info.parent
+                && parent.0 != 0
+            {
+                prologue.push(Stmt::Expr(Expr {
+                    ty: Ty::Void,
+                    span,
+                    kind: ExprKind::CallDirect {
+                        fn_id: self.ctor_fn[parent.0 as usize],
+                        recv: Box::new(this_expr(parent.0, span)),
+                        args: self.ctor_default_args(parent.0),
+                    },
+                }));
             }
             for f in &info.fields {
                 let Some(init) = &f.init else { continue };

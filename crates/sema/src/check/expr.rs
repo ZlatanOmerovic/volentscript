@@ -107,14 +107,14 @@ impl<'a> Checker<'a> {
             ExprKind::New(callee, args) => self.new_expr(callee, args, span),
             ExprKind::Member(object, name) => {
                 // Static access: unshadowed class name as receiver.
-                if let ExprKind::Ident(recv) = &object.kind {
-                    if !self.is_shadowed(recv) {
-                        if let Some(class) = self.ident_as_class(recv) {
-                            return self.static_read(class, name, span);
-                        }
-                        if let Some(native) = self.native_static_read(recv, name, span) {
-                            return native;
-                        }
+                if let ExprKind::Ident(recv) = &object.kind
+                    && !self.is_shadowed(recv)
+                {
+                    if let Some(class) = self.ident_as_class(recv) {
+                        return self.static_read(class, name, span);
+                    }
+                    if let Some(native) = self.native_static_read(recv, name, span) {
+                        return native;
                     }
                 }
                 let object = self.expr(object);
@@ -479,12 +479,11 @@ impl<'a> Checker<'a> {
         if let Some(ty) = self.apply_type_to_ty(e) {
             return ty;
         }
-        if let ExprKind::Ident(name) = &e.kind {
-            if !self.is_shadowed(name) {
-                if let Some(ty) = self.ident_as_type(name) {
-                    return ty;
-                }
-            }
+        if let ExprKind::Ident(name) = &e.kind
+            && !self.is_shadowed(name)
+            && let Some(ty) = self.ident_as_type(name)
+        {
+            return ty;
         }
         self.error(
             ErrorCode::NOT_A_TYPE,
@@ -592,13 +591,12 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Member(object, name) => {
                 // Static member write.
-                if let ExprKind::Ident(recv) = &object.kind {
-                    if !self.is_shadowed(recv) {
-                        if let Some(class) = self.ident_as_class(recv) {
-                            let checked = self.expr(value);
-                            return self.static_write(class, name, checked, span);
-                        }
-                    }
+                if let ExprKind::Ident(recv) = &object.kind
+                    && !self.is_shadowed(recv)
+                    && let Some(class) = self.ident_as_class(recv)
+                {
+                    let checked = self.expr(value);
+                    return self.static_write(class, name, checked, span);
                 }
                 let object = self.expr(object);
                 match object.ty {
@@ -722,20 +720,18 @@ impl<'a> Checker<'a> {
             return self.super_call(None, args, span);
         }
         // Generic function call: `firstOf.<int>(v)` (SPECS §4.2).
-        if let ExprKind::ApplyType(base, targs) = &callee.kind {
-            if let ExprKind::Ident(name) = &base.kind {
-                if !self.is_shadowed(name) {
-                    if let Some(tid) = self.fn_template_index(name) {
-                        let targs: Vec<Ty> = targs.iter().map(|t| self.resolve_type(t)).collect();
-                        if let Some(id) = self.instantiate_fn_template(tid, targs, span) {
-                            let checked = self.check_args_fn(id, args, span);
-                            let ret = self.fn_return(id);
-                            return mk(ret, span, TExprKind::CallFn(id, checked));
-                        }
-                        return self.error_expr(span);
-                    }
-                }
+        if let ExprKind::ApplyType(base, targs) = &callee.kind
+            && let ExprKind::Ident(name) = &base.kind
+            && !self.is_shadowed(name)
+            && let Some(tid) = self.fn_template_index(name)
+        {
+            let targs: Vec<Ty> = targs.iter().map(|t| self.resolve_type(t)).collect();
+            if let Some(id) = self.instantiate_fn_template(tid, targs, span) {
+                let checked = self.check_args_fn(id, args, span);
+                let ret = self.fn_return(id);
+                return mk(ret, span, TExprKind::CallFn(id, checked));
             }
+            return self.error_expr(span);
         }
         // Direct references get checked calls; everything else is an
         // indirect `Function`/`*` call (unchecked, returns `*` — AS3's
@@ -771,16 +767,16 @@ impl<'a> Checker<'a> {
                 return self.super_call(Some(method), args, span);
             }
             // Static method call: unshadowed class name receiver.
-            if let ExprKind::Ident(recv) = &object.kind {
-                if !self.is_shadowed(recv) {
-                    if let Some(class) = self.ident_as_class(recv) {
-                        return self.static_call(class, method, args, span);
-                    }
-                    if crate::builtins::is_native_class(recv) {
-                        if let Some(native) = self.native_static_call(recv, method, args, span) {
-                            return native;
-                        }
-                    }
+            if let ExprKind::Ident(recv) = &object.kind
+                && !self.is_shadowed(recv)
+            {
+                if let Some(class) = self.ident_as_class(recv) {
+                    return self.static_call(class, method, args, span);
+                }
+                if crate::builtins::is_native_class(recv)
+                    && let Some(native) = self.native_static_call(recv, method, args, span)
+                {
+                    return native;
                 }
             }
         }

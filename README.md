@@ -26,7 +26,7 @@ no interpreter. Written in Rust; LLVM backend via `inkwell`.
 |---|---|---|
 | LLVM | **major 22** (brew `llvm`, tested 22.1.6) | `.cargo/config.toml`, CI version check |
 | inkwell | **0.9.x**, feature **`llvm22-1`** (`llvm-sys` 221) | root `Cargo.toml` |
-| Rust | edition 2024, **MSRV 1.85** | `rust-version` in root `Cargo.toml` |
+| Rust | edition 2024, **MSRV 1.88** | `rust-version` in root `Cargo.toml` |
 
 These three must move together. Don't let `brew upgrade` drift the LLVM major
 without updating the inkwell feature, the `LLVM_SYS_221_PREFIX` variable name,
@@ -113,9 +113,16 @@ depends on inkwell.
 
 ## Install
 
-Grab `volentscript-<version>-macos-arm64.tar.gz` from the GitHub releases
-page (binary + runtime staticlib + examples), or build from source (above).
-CI runs the full test matrix on every push; releases are cut from tags.
+Grab a release tarball from the GitHub releases page (compiler binary +
+runtime staticlib + examples), or build from source (above). CI runs the
+full test matrix on every push; releases are cut from tags.
+
+| Host platform | Status |
+|---|---|
+| macOS arm64 | supported — CI + release artifact |
+| Linux x86-64 | supported — CI + release artifact |
+| Linux (as a *target*) | `--target x86_64/aarch64-unknown-linux-gnu` from macOS via zig |
+| Windows | not yet — needs a porting phase (setjmp ABI, linker driver) |
 
 ## Usage
 
@@ -130,6 +137,26 @@ volentscript parse tool.vlt                 # AST dump
 
 Debug aids: `VS_DUMP_IR=1` (pre-optimization LLVM module),
 `VS_DUMP_IR_OPT=1` (post-pipeline), `VS_GC_LOG=1` (per-collection stats).
+
+## Examples
+
+Eight ready-to-run projects live in [`examples/`](examples/README.md) —
+from a Game of Life to a static-file web server and a mini SMTP pair,
+every one a compiled native binary:
+
+| | | |
+|---|---|---|
+| [`life`](examples/life/main.vlt) — Conway in the terminal | [`todo`](examples/todo/main.vlt) — JSON task manager | [`vgrep`](examples/vgrep/main.vlt) — grep clone |
+| [`calc`](examples/calc/main.vlt) — REPL with a hand-written parser | [`logstats`](examples/logstats/main.vlt) — log analyzer | [`httpd`](examples/httpd/main.vlt) — web server |
+| [`mail`](examples/mail/smtpd.vlt) — SMTP server + client | [`chat`](examples/chat/server.vlt) — socket chat | |
+
+```sh
+volentscript run examples/httpd/main.vlt 8080 examples/httpd/public
+# serving examples/httpd/public on http://127.0.0.1:8080
+```
+
+All examples are compiled and exercised in CI
+(`cargo test -p e2e --test examples`).
 
 ## Tests
 

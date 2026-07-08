@@ -322,16 +322,16 @@ pub fn decode_uri_component(s: &str) -> String {
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() + 1 {
-            if let Some(h) = bytes
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len() + 1
+            && let Some(h) = bytes
                 .get(i + 1..i + 3)
                 .and_then(|h| std::str::from_utf8(h).ok())
                 .and_then(|h| u8::from_str_radix(h, 16).ok())
-            {
-                out.push(h);
-                i += 3;
-                continue;
-            }
+        {
+            out.push(h);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;

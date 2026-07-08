@@ -372,40 +372,39 @@ impl<'a> Checker<'a> {
             // materialized as a closure value in this frame; rebind its
             // name so calls and references go through the value
             // (closure conversion, SPECS §3.7).
-            if !self.functions[nested_id.0 as usize].captures.is_empty() {
-                if let Some(name) = &f.name {
-                    let fn_index = id.0 as usize;
-                    let local =
-                        LocalId(u32::try_from(self.functions[fn_index].locals.len()).unwrap());
-                    self.functions[fn_index].locals.push(Local {
-                        name: format!("<closure:{name}>"),
-                        ty: Ty::Function,
-                        nullable: false,
-                        is_const: true,
-                        default: None,
-                        is_rest: false,
-                        captured: false,
-                    });
-                    // Overwrite the Fn binding (hoisting made it visible).
-                    self.scopes.last_mut().expect("scope").symbols.insert(
-                        name.clone(),
-                        Symbol::Local {
-                            id: local,
-                            fn_depth: self.fn_stack.len() - 1,
+            if !self.functions[nested_id.0 as usize].captures.is_empty()
+                && let Some(name) = &f.name
+            {
+                let fn_index = id.0 as usize;
+                let local = LocalId(u32::try_from(self.functions[fn_index].locals.len()).unwrap());
+                self.functions[fn_index].locals.push(Local {
+                    name: format!("<closure:{name}>"),
+                    ty: Ty::Function,
+                    nullable: false,
+                    is_const: true,
+                    default: None,
+                    is_rest: false,
+                    captured: false,
+                });
+                // Overwrite the Fn binding (hoisting made it visible).
+                self.scopes.last_mut().expect("scope").symbols.insert(
+                    name.clone(),
+                    Symbol::Local {
+                        id: local,
+                        fn_depth: self.fn_stack.len() - 1,
+                    },
+                );
+                closure_inits.push(TStmt {
+                    span: f.span,
+                    kind: TStmtKind::Assign(
+                        local,
+                        TExpr {
+                            ty: Ty::Function,
+                            span: f.span,
+                            kind: TExprKind::Closure(nested_id),
                         },
-                    );
-                    closure_inits.push(TStmt {
-                        span: f.span,
-                        kind: TStmtKind::Assign(
-                            local,
-                            TExpr {
-                                ty: Ty::Function,
-                                span: f.span,
-                                kind: TExprKind::Closure(nested_id),
-                            },
-                        ),
-                    });
-                }
+                    ),
+                });
             }
         }
 
@@ -530,10 +529,10 @@ impl<'a> Checker<'a> {
                     self.hoist(fn_index, std::slice::from_ref(body), nested);
                 }
                 For { init, body, .. } => {
-                    if let Some(init) = init {
-                        if let ast::ForInit::VarDecl(decl) = init.as_ref() {
-                            self.hoist_var(fn_index, decl);
-                        }
+                    if let Some(init) = init
+                        && let ast::ForInit::VarDecl(decl) = init.as_ref()
+                    {
+                        self.hoist_var(fn_index, decl);
                     }
                     self.hoist(fn_index, std::slice::from_ref(body), nested);
                 }
@@ -685,10 +684,10 @@ impl<'a> Checker<'a> {
                         }
                         return self.vector_of(args[0]);
                     }
-                    if let [single] = path.as_slice() {
-                        if let Some(tid) = self.template_index(single) {
-                            return Ty::Class(self.instantiate_template(tid, args, t.span));
-                        }
+                    if let [single] = path.as_slice()
+                        && let Some(tid) = self.template_index(single)
+                    {
+                        return Ty::Class(self.instantiate_template(tid, args, t.span));
                     }
                     self.error(
                         ErrorCode::UNRESOLVED_NAME,
@@ -938,15 +937,11 @@ impl<'a> Checker<'a> {
                 // non-null afterwards (and symmetrically).
                 let then_exits = !stmt_completes(&then_checked);
                 let else_exits = else_checked.as_ref().is_some_and(|e| !stmt_completes(e));
-                if then_exits {
-                    if let Some(top) = self.narrowed.last_mut() {
-                        top.extend(when_false.iter().copied());
-                    }
+                if then_exits && let Some(top) = self.narrowed.last_mut() {
+                    top.extend(when_false.iter().copied());
                 }
-                if else_exits {
-                    if let Some(top) = self.narrowed.last_mut() {
-                        top.extend(when_true.iter().copied());
-                    }
+                if else_exits && let Some(top) = self.narrowed.last_mut() {
+                    top.extend(when_true.iter().copied());
                 }
                 TStmtKind::If {
                     cond,

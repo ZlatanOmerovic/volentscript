@@ -878,14 +878,14 @@ impl Parser {
     }
 
     fn for_in_tail(&mut self, start: Span, is_each: bool, target: ForInTarget) -> Stmt {
-        if let ForInTarget::VarDecl(decl) = &target {
-            if decl.bindings.len() > 1 {
-                self.error(
-                    ErrorCode::UNEXPECTED_TOKEN,
-                    "`for..in` allows exactly one loop variable",
-                    decl.span,
-                );
-            }
+        if let ForInTarget::VarDecl(decl) = &target
+            && decl.bindings.len() > 1
+        {
+            self.error(
+                ErrorCode::UNEXPECTED_TOKEN,
+                "`for..in` allows exactly one loop variable",
+                decl.span,
+            );
         }
         let object = self.expression();
         self.expect(&TokenKind::RParen);

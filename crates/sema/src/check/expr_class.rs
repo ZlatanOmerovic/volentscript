@@ -650,109 +650,113 @@ impl<'a> Checker<'a> {
         }
         // `new RegExp(pattern, flags)` (§15.10.4; both args Strings, the
         // second optional). Bad patterns throw SyntaxError at runtime.
-        if let ExprKind::Ident(name) = &callee.kind {
-            if name == "RegExp" && !self.is_shadowed(name) {
-                if args.is_empty() || args.len() > 2 {
-                    self.error(
-                        ErrorCode::WRONG_ARG_COUNT,
-                        "RegExp(pattern:String, flags:String = \"\") takes 1-2 arguments",
-                        span,
-                    );
-                    for a in args {
-                        self.expr(a);
-                    }
-                    return self.error_expr(span);
-                }
-                let checked: Vec<TExpr> = args
-                    .iter()
-                    .map(|a| {
-                        let e = self.expr(a);
-                        let sp = e.span;
-                        self.coerce(e, Ty::String, sp)
-                    })
-                    .collect();
-                return TExpr {
-                    ty: Ty::RegExp,
+        if let ExprKind::Ident(name) = &callee.kind
+            && name == "RegExp"
+            && !self.is_shadowed(name)
+        {
+            if args.is_empty() || args.len() > 2 {
+                self.error(
+                    ErrorCode::WRONG_ARG_COUNT,
+                    "RegExp(pattern:String, flags:String = \"\") takes 1-2 arguments",
                     span,
-                    kind: TExprKind::NewRegExp(checked),
-                };
+                );
+                for a in args {
+                    self.expr(a);
+                }
+                return self.error_expr(span);
             }
+            let checked: Vec<TExpr> = args
+                .iter()
+                .map(|a| {
+                    let e = self.expr(a);
+                    let sp = e.span;
+                    self.coerce(e, Ty::String, sp)
+                })
+                .collect();
+            return TExpr {
+                ty: Ty::RegExp,
+                span,
+                kind: TExprKind::NewRegExp(checked),
+            };
         }
         // `new Namespace(uri)` (ES4 first-class namespaces, SPECS §5).
-        if let ExprKind::Ident(name) = &callee.kind {
-            if name == "Namespace" && !self.is_shadowed(name) {
-                if args.len() != 1 {
-                    self.error(
-                        ErrorCode::WRONG_ARG_COUNT,
-                        "Namespace(uri:String) takes exactly 1 argument",
-                        span,
-                    );
-                    for a in args {
-                        self.expr(a);
-                    }
-                    return self.error_expr(span);
-                }
-                let uri = self.expr(&args[0]);
-                let sp = uri.span;
-                let uri = self.coerce(uri, Ty::String, sp);
-                return TExpr {
-                    ty: Ty::Namespace,
+        if let ExprKind::Ident(name) = &callee.kind
+            && name == "Namespace"
+            && !self.is_shadowed(name)
+        {
+            if args.len() != 1 {
+                self.error(
+                    ErrorCode::WRONG_ARG_COUNT,
+                    "Namespace(uri:String) takes exactly 1 argument",
                     span,
-                    kind: TExprKind::NewNamespace(Box::new(uri)),
-                };
+                );
+                for a in args {
+                    self.expr(a);
+                }
+                return self.error_expr(span);
             }
+            let uri = self.expr(&args[0]);
+            let sp = uri.span;
+            let uri = self.coerce(uri, Ty::String, sp);
+            return TExpr {
+                ty: Ty::Namespace,
+                span,
+                kind: TExprKind::NewNamespace(Box::new(uri)),
+            };
         }
         // `new Date(...)` (§15.9.3): 0-7 Number components. String
         // parsing (`new Date("...")`) is backlog.
-        if let ExprKind::Ident(name) = &callee.kind {
-            if name == "Date" && !self.is_shadowed(name) {
-                if args.len() > 7 {
-                    self.error(
+        if let ExprKind::Ident(name) = &callee.kind
+            && name == "Date"
+            && !self.is_shadowed(name)
+        {
+            if args.len() > 7 {
+                self.error(
                         ErrorCode::WRONG_ARG_COUNT,
                         "Date takes at most 7 arguments (year, month, date, hours, minutes, seconds, ms)",
                         span,
                     );
-                }
-                let checked: Vec<TExpr> = args
-                    .iter()
-                    .take(7)
-                    .map(|a| {
-                        let e = self.expr(a);
-                        let sp = e.span;
-                        if e.ty == Ty::String {
-                            self.error(
-                                ErrorCode::NOT_IMPLEMENTED,
-                                "Date string parsing — use new Date(millis) or components (backlog)",
-                                sp,
-                            );
-                            return self.error_expr(sp);
-                        }
-                        self.coerce(e, Ty::Number, sp)
-                    })
-                    .collect();
-                return TExpr {
-                    ty: Ty::Date,
-                    span,
-                    kind: TExprKind::NewDate(checked),
-                };
             }
+            let checked: Vec<TExpr> = args
+                .iter()
+                .take(7)
+                .map(|a| {
+                    let e = self.expr(a);
+                    let sp = e.span;
+                    if e.ty == Ty::String {
+                        self.error(
+                            ErrorCode::NOT_IMPLEMENTED,
+                            "Date string parsing — use new Date(millis) or components (backlog)",
+                            sp,
+                        );
+                        return self.error_expr(sp);
+                    }
+                    self.coerce(e, Ty::Number, sp)
+                })
+                .collect();
+            return TExpr {
+                ty: Ty::Date,
+                span,
+                kind: TExprKind::NewDate(checked),
+            };
         }
         // `new Array(...)` — literal-equivalent.
-        if let ExprKind::Ident(name) = &callee.kind {
-            if name == "Array" && !self.is_shadowed(name) {
-                let elements = args
-                    .iter()
-                    .map(|a| {
-                        let checked = self.expr(a);
-                        Some(self.coerce_to_any(checked))
-                    })
-                    .collect();
-                return TExpr {
-                    ty: Ty::Array,
-                    span,
-                    kind: TExprKind::Array(elements),
-                };
-            }
+        if let ExprKind::Ident(name) = &callee.kind
+            && name == "Array"
+            && !self.is_shadowed(name)
+        {
+            let elements = args
+                .iter()
+                .map(|a| {
+                    let checked = self.expr(a);
+                    Some(self.coerce_to_any(checked))
+                })
+                .collect();
+            return TExpr {
+                ty: Ty::Array,
+                span,
+                kind: TExprKind::Array(elements),
+            };
         }
         let Some(class) = self.type_expr_to_class(callee) else {
             self.error(
@@ -1073,24 +1077,24 @@ impl<'a> Checker<'a> {
         if !crate::builtins::is_native_class(class) {
             return None;
         }
-        if let Some(consts) = crate::builtins::native_consts(class) {
-            if let Some(c) = consts.iter().find(|c| c.name == name) {
-                return Some(TExpr {
-                    ty: Ty::Number,
-                    span,
-                    kind: TExprKind::Number(c.value),
-                });
-            }
+        if let Some(consts) = crate::builtins::native_consts(class)
+            && let Some(c) = consts.iter().find(|c| c.name == name)
+        {
+            return Some(TExpr {
+                ty: Ty::Number,
+                span,
+                kind: TExprKind::Number(c.value),
+            });
         }
-        if let Some(methods) = crate::builtins::native_methods(class) {
-            if methods.iter().any(|m| m.name == name) {
-                self.error(
-                    ErrorCode::NOT_IMPLEMENTED,
-                    "native static methods as values — Phase 8",
-                    span,
-                );
-                return Some(self.error_expr(span));
-            }
+        if let Some(methods) = crate::builtins::native_methods(class)
+            && methods.iter().any(|m| m.name == name)
+        {
+            self.error(
+                ErrorCode::NOT_IMPLEMENTED,
+                "native static methods as values — Phase 8",
+                span,
+            );
+            return Some(self.error_expr(span));
         }
         self.error(
             ErrorCode::UNKNOWN_PROPERTY,

@@ -208,10 +208,10 @@ impl<'a> Checker<'a> {
         if let TExprKind::Coerce(Coercion::ToBoolean, v) = &cond.kind {
             cond = v;
         }
-        if let TExprKind::Is(inner, ty) = &cond.kind {
-            if let Some(id) = local_of(inner) {
-                return vec![(id, *ty)];
-            }
+        if let TExprKind::Is(inner, ty) = &cond.kind
+            && let Some(id) = local_of(inner)
+        {
+            return vec![(id, *ty)];
         }
         Vec::new()
     }

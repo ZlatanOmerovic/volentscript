@@ -2836,20 +2836,18 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 | Ty::Date
                 | Ty::Socket
                 | Ty::Namespace
-        ) {
-            if let Val::Str(p)
-            | Val::Obj(p)
-            | Val::Arr(p)
-            | Val::VecP(p)
-            | Val::Fun(p)
-            | Val::Reg(p)
-            | Val::Dat(p)
-            | Val::Sock(p)
-            | Val::Ns(p) = v
-            {
-                self.cx.builder.build_store(slot, p).expect("store");
-                return;
-            }
+        ) && let Val::Str(p)
+        | Val::Obj(p)
+        | Val::Arr(p)
+        | Val::VecP(p)
+        | Val::Fun(p)
+        | Val::Reg(p)
+        | Val::Dat(p)
+        | Val::Sock(p)
+        | Val::Ns(p) = v
+        {
+            self.cx.builder.build_store(slot, p).expect("store");
+            return;
         }
         match (ty, v) {
             (Ty::Any, Val::Any(p)) => {

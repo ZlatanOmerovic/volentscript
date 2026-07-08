@@ -8,25 +8,40 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: package + publish (macOS arm64)
-    runs-on: macos-15
+  build:
+    name: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            triple: macos-arm64
+          - os: ubuntu-24.04
+            triple: linux-x86_64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LLVM
-        run: brew install llvm
+      - name: Install LLVM 22 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm
+          echo "LLVM_SYS_221_PREFIX=$(brew --prefix llvm)" >> "$GITHUB_ENV"
+
+      - name: Install LLVM 22 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
+          sudo apt-get install -y libpolly-22-dev libzstd-dev zlib1g-dev
+          echo "LLVM_SYS_221_PREFIX=/usr/lib/llvm-22" >> "$GITHUB_ENV"
 
       - name: Pin check — LLVM major must be 22
         run: |
-          MAJOR=$("$(brew --prefix llvm)/bin/llvm-config" --version | cut -d. -f1)
-          test "$MAJOR" = "22" || { echo "::error::brew LLVM is $MAJOR, need 22"; exit 1; }
+          MAJOR=$("$LLVM_SYS_221_PREFIX/bin/llvm-config" --version | cut -d. -f1)
+          test "$MAJOR" = "22" || { echo "::error::LLVM is $MAJOR, need 22"; exit 1; }
 
       - name: Rust toolchain
-        run: rustup toolchain install 1.85 --profile minimal && rustup default 1.85
-
-      - name: Export LLVM prefix
-        run: echo "LLVM_SYS_221_PREFIX=$(brew --prefix llvm)" >> "$GITHUB_ENV"
+        run: rustup toolchain install 1.88 --profile minimal && rustup default 1.88
 
       - name: Build release
         run: cargo build --workspace --release
@@ -39,19 +54,30 @@ jobs:
       - name: Package
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          PKG="volentscript-${VERSION}-macos-arm64"
+          PKG="volentscript-${VERSION}-${{ matrix.triple }}"
           mkdir -p "dist/$PKG"
           cp target/release/volentscript "dist/$PKG/"
           cp target/release/libruntime.a "dist/$PKG/"
           cp README.md LICENSE-MIT LICENSE-APACHE "dist/$PKG/"
           cp -R examples "dist/$PKG/examples"
-          rm -rf "dist/$PKG/examples/httpd/public" && mkdir -p "dist/$PKG/examples/httpd/public"
-          cp examples/httpd/public/index.html "dist/$PKG/examples/httpd/public/"
           tar -czf "dist/$PKG.tar.gz" -C dist "$PKG"
           shasum -a 256 "dist/$PKG.tar.gz" > "dist/$PKG.tar.gz.sha256"
 
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.triple }}
+          path: dist/*.tar.gz*
+
+  publish:
+    name: publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.tar.gz
