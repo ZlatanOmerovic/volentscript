@@ -1,4 +1,4 @@
-//! `vigorscript` — the VigorScript compiler command-line interface.
+//! `volentscript` — the VolentScript compiler command-line interface.
 
 #![forbid(unsafe_code)]
 
@@ -9,9 +9,9 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "vigorscript",
+    name = "volentscript",
     version,
-    about = "VigorScript: ActionScript 3, revived — native AOT compiler"
+    about = "VolentScript: ActionScript 3, revived — native AOT compiler"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -20,9 +20,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Compile a .as file to a native executable
+    /// Compile a .vlt file to a native executable
     Build {
-        /// Entry .as source file
+        /// Entry .vlt source file
         input: PathBuf,
         /// Output executable path
         #[arg(short, long)]
@@ -37,9 +37,9 @@ enum Command {
         #[arg(long)]
         target: Option<String>,
     },
-    /// Compile and immediately run a .as file
+    /// Compile and immediately run a .vlt file
     Run {
-        /// Entry .as source file
+        /// Entry .vlt source file
         input: PathBuf,
         /// Path to libruntime.a (default: next to this executable)
         #[arg(long)]
@@ -48,14 +48,14 @@ enum Command {
         #[arg(short = 'O', long = "opt", default_value = "2")]
         opt: u8,
     },
-    /// Parse a .as file and print its AST (compiler development aid)
+    /// Parse a .vlt file and print its AST (compiler development aid)
     Parse {
-        /// Entry .as source file
+        /// Entry .vlt source file
         input: PathBuf,
     },
-    /// Type-check a .as file without compiling
+    /// Type-check a .vlt file without compiling
     Check {
-        /// Entry .as source file
+        /// Entry .vlt source file
         input: PathBuf,
         /// Also print the typed AST
         #[arg(long)]

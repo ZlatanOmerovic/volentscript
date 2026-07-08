@@ -14,7 +14,7 @@ pub use codegen::OptLevel;
 /// Options for one `build` invocation.
 #[derive(Debug, Default)]
 pub struct BuildOptions {
-    /// The `.as` entry file.
+    /// The `.vlt` entry file.
     pub input: PathBuf,
     /// Output executable path; `None` = input filename without extension.
     pub output: Option<PathBuf>,

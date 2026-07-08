@@ -1,6 +1,6 @@
 # SPECS.md — Language Specification
 
-> **Name:** `VigorScript`. CLI tool: `vigorscript`. Source extension: `.as`.
+> **Name:** `VolentScript`. CLI tool: `volentscript`. Source extension: `.vlt`.
 > The name appears in exactly the places listed in §12. Do not hard-code it
 > anywhere else. (Former working name: `AS3R`/`asr` — renamed 2026-07-08;
 > note `asr` collides with macOS `/usr/bin/asr`, avoid reintroducing it.)
@@ -15,7 +15,7 @@ build it (process, phases, gates). Read both before writing code.
 
 **Is:** a statically-typed, garbage-collected, ahead-of-time-compiled
 programming language that revives the ActionScript 3 / ECMAScript-4 object model
-and type system, decoupled entirely from Flash. You write `.as` source, the
+and type system, decoupled entirely from Flash. You write `.vlt` source, the
 compiler produces a native executable.
 
 **Is not:** a Flash runtime. There is **no** SWF, no ABC bytecode, no AVM2, no
@@ -223,7 +223,7 @@ Not implemented (v1), and not part of the language proper:
 
 Phase tags: **P3** = needed for first runnable binary, **P4** = classes/OOP,
 **P5** = generics/collections, **P7** = stdlib breadth. Implement in the runtime
-(§7) with `.as` declaration stubs (`intrinsic`/`native` bindings).
+(§7) with `.vlt` declaration stubs (`intrinsic`/`native` bindings).
 
 - **Top-level functions:** `trace` (P3), `parseInt`, `parseFloat`, `isNaN`,
   `isFinite` (P3); `encodeURIComponent`, `decodeURIComponent`, `escape`,
@@ -284,7 +284,7 @@ binary. Responsibilities:
     collector lands).
 - **Runtime type support:** `is`, `as`, `instanceof`, `typeof`, class-of.
 - **Coercion helpers:** the numeric/string coercion rules from §3.3.
-- **Builtins:** implementations backing the §6 stdlib, bound to `.as`
+- **Builtins:** implementations backing the §6 stdlib, bound to `.vlt`
   `native`-declared signatures.
 - **Exceptions:** unwinding for `try/catch/finally` and `throw` (use LLVM's
   landing pads / Itanium unwinding, or a simpler setjmp-style scheme in v1 —
@@ -312,7 +312,7 @@ crates/
   runtime/     # the native runtime (§7), built as a static lib
   driver/      # orchestration: parse->check->lower->codegen->link
   cli/         # the `asr` binary (arg parsing, subcommands)
-tests/         # end-to-end .as programs + expected output
+tests/         # end-to-end .vlt programs + expected output
 docs/          # the downloaded reference PDFs/repos (read-only input)
 ```
 
@@ -369,7 +369,7 @@ expr           := assignment ; with full AS3 operator precedence incl. 'is' 'as'
 
 - **Unit tests** per crate (lexer tokens, parser AST snapshots, type-checker
   accept/reject cases).
-- **End-to-end** golden tests in `tests/`: each `.as` file has an expected
+- **End-to-end** golden tests in `tests/`: each `.vlt` file has an expected
   stdout and expected exit code; the harness compiles, links, runs, compares.
 - The **first golden test** (Phase 3 milestone): `trace("hello");` compiles to a
   binary that prints `hello\n` and exits 0.
@@ -390,7 +390,7 @@ FULL SEND.
 - **P0 — Scaffold.** Workspace, crates, CLI skeleton (`asr build/run`), CI,
   clippy, `docs/` wired, this spec committed. Milestone: `asr --version` runs.
 - **P1 — Lex + Parse (core).** Functions, primitives, expressions, statements,
-  `trace`. Milestone: parse a core `.as` file to an AST snapshot.
+  `trace`. Milestone: parse a core `.vlt` file to an AST snapshot.
 - **P2 — Sema (core).** Resolution + type checking + coercions for the core
   subset (no classes yet). Milestone: type errors with spans on a test corpus.
 - **P3 — Codegen (core) → FIRST BINARY.** `mir` + inkwell backend + runtime
@@ -421,9 +421,10 @@ FULL SEND.
 
 ---
 
-## 12. Placeholder-name locations (rename here only)
+## 12. Name (resolved)
 
-When the real name is chosen, change it **only** in: the `cli` crate name and
-its `main`/help strings, the `asr` binary name in `Cargo.toml`, the `.as`
-extension registration (if any), the README, and this header. Nowhere else
-should the language name appear as a literal.
+The language is **VolentScript**, the CLI tool `volentscript`, the source
+extension `.vlt` (renamed from the AS3-era `.as` after v1 completion). The
+name appears as a literal only in the `cli` crate, the README, and this
+header; the runtime ABI keeps its historical `vs_` symbol prefix (which
+still reads as VolentScript).

@@ -37,38 +37,38 @@ fn run(name: &str, text: &str) -> String {
 /// (with inserted coercions) is stable.
 #[test]
 fn typing_snapshot() {
-    let text = include_str!("programs/typing.as");
-    expect_file!["programs/typing.tast"].assert_eq(&run("typing.as", text));
+    let text = include_str!("programs/typing.vlt");
+    expect_file!["programs/typing.tast"].assert_eq(&run("typing.vlt", text));
 }
 
 /// P2 milestone (negative): every semantic error carries the right span and
 /// stable code.
 #[test]
 fn type_errors_snapshot() {
-    let text = include_str!("programs/errors.as");
-    expect_file!["programs/errors.diag"].assert_eq(&run("errors.as", text));
+    let text = include_str!("programs/errors.vlt");
+    expect_file!["programs/errors.diag"].assert_eq(&run("errors.vlt", text));
 }
 
 #[test]
 fn null_into_reference_ok_into_machine_err() {
     // Under SPECS §4.1, null needs a nullable slot (`String?`); machine
     // types can never hold null (avmplus Verifier.cpp:1604).
-    assert!(!run("a.as", "var s:String? = null;").contains("error"));
-    assert!(run("a2.as", "var s:String = null;").contains("E0312"));
-    assert!(run("b.as", "var i:int = null;").contains("E0302"));
+    assert!(!run("a.vlt", "var s:String? = null;").contains("error"));
+    assert!(run("a2.vlt", "var s:String = null;").contains("E0312"));
+    assert!(run("b.vlt", "var i:int = null;").contains("E0302"));
 }
 
 #[test]
 fn as_with_machine_type_yields_any() {
     // `x as int` is statically `*` (Verifier.cpp:1601-1605).
-    let dump = run("c.as", "var x:* = 1; var y:* = x as int;");
+    let dump = run("c.vlt", "var x:* = 1; var y:* = x as int;");
     assert!(dump.contains("[*] As int"), "{dump}");
 }
 
 #[test]
 fn closures_capture_cleanly() {
     let out = run(
-        "d.as",
+        "d.vlt",
         "function outer():Function { var x:int = 1; return function():int { return x; }; }",
     );
     assert!(!out.contains("error"), "{out}");
@@ -79,13 +79,13 @@ fn closures_capture_cleanly() {
 /// hierarchy cycles, access control.
 #[test]
 fn oop_errors_snapshot() {
-    let text = include_str!("programs/oop_errors.as");
-    expect_file!["programs/oop_errors.diag"].assert_eq(&run("oop_errors.as", text));
+    let text = include_str!("programs/oop_errors.vlt");
+    expect_file!["programs/oop_errors.diag"].assert_eq(&run("oop_errors.vlt", text));
 }
 
 /// P5 null safety (SPECS §4.1): flow and deref diagnostics + narrowing.
 #[test]
 fn null_safety_snapshot() {
-    let text = include_str!("programs/nulls.as");
-    expect_file!["programs/nulls.diag"].assert_eq(&run("nulls.as", text));
+    let text = include_str!("programs/nulls.vlt");
+    expect_file!["programs/nulls.diag"].assert_eq(&run("nulls.vlt", text));
 }

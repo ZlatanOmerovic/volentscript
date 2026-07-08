@@ -1,15 +1,15 @@
 # The language name appears as a literal only here (crate/binary name, help
 # strings), in the README, and in the SPECS.md header (SPECS §12).
 [package]
-name = "vigorscript"
+name = "volentscript"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "VigorScript compiler CLI"
+description = "VolentScript compiler CLI"
 
 [[bin]]
-name = "vigorscript"
+name = "volentscript"
 path = "src/main.rs"
 
 [dependencies]

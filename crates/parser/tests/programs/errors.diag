@@ -1,25 +1,25 @@
 error[E0202]: expected `;` or a line break before identifier `trace`
-  --> errors.as:1:15
+  --> errors.vlt:1:15
    |
  1 | var x:int = 5 trace(x);
    |               ^^^^^
 error[E0102]: string literal must not contain a raw line break (use \n or a \ line continuation)
-  --> errors.as:2:16
+  --> errors.vlt:2:16
    |
  2 | var s:String = "unterminated
    |                ^^^^^^^^^^^^^
 error[E0203]: `for each` requires an `in` loop
-  --> errors.as:3:1
+  --> errors.vlt:3:1
    |
  3 | for each (var v:int; v < 3; v++) {}
    | ^^^
 error[E0204]: left side of assignment must be a variable, property, or index
-  --> errors.as:4:1
+  --> errors.vlt:4:1
    |
  4 | 1 + = 2;
    | ^^^^^
 error[E0201]: expected expression, found `=`
-  --> errors.as:4:5
+  --> errors.vlt:4:5
    |
  4 | 1 + = 2;
    |     ^

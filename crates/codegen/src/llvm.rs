@@ -53,7 +53,7 @@ impl Backend for LlvmBackend {
         opts: &CodegenOpts,
     ) -> Result<ObjectFile, Vec<Diagnostic>> {
         let context = Context::create();
-        let module = context.create_module("vigor");
+        let module = context.create_module("volent");
         let machine = target_machine(opts).map_err(|m| {
             vec![Diagnostic::error(
                 ErrorCode::NOT_IMPLEMENTED,

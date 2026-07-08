@@ -1,7 +1,7 @@
-# VigorScript
+# VolentScript
 
 A native, ahead-of-time-compiled revival of ActionScript 3 / ECMAScript 4,
-decoupled from Flash. You write `.as` source; the `vigorscript` compiler
+decoupled from Flash. You write `.vlt` source; the `volentscript` compiler
 produces a native executable. Written in Rust; LLVM backend via `inkwell`.
 
 - **`SPECS.md`** — the language definition (what to build).
@@ -9,9 +9,6 @@ produces a native executable. Written in Rust; LLVM backend via `inkwell`.
 - **`docs/`** — reference material (ES4 draft, AVM2 overview, avmplus source,
   ECMA-262 3rd ed., AS3 guides). Git-ignored; `docs/SOURCES.md` records the
   set and `links.md` the origins.
-
-> The name **VigorScript** appears only in the `cli` crate, this README, and
-> the SPECS header (SPECS §12).
 
 ## Toolchain (pinned)
 
@@ -31,7 +28,7 @@ and the CI check in the same change.
 brew install llvm        # keg-only; major must be 22
 cargo build --workspace
 cargo test --workspace
-cargo run -p vigorscript -- --version
+cargo run -p volentscript -- --version
 ```
 
 `.cargo/config.toml` sets `LLVM_SYS_221_PREFIX=/opt/homebrew/opt/llvm`
@@ -52,8 +49,8 @@ crates/
   codegen/      Backend trait + LLVM (inkwell) impl — only crate touching inkwell
   runtime/      native runtime static lib (GC, dispatch, builtins, entry shim)
   driver/       parse -> check -> lower -> codegen -> link orchestration
-  cli/          the `vigorscript` binary
-tests/          end-to-end golden tests (.as program + expected stdout/exit)
+  cli/          the `volentscript` binary
+tests/          end-to-end golden tests (.vlt program + expected stdout/exit)
 ```
 
 Layering: frontend crates never depend on `codegen`; `inkwell` types never
@@ -107,12 +104,12 @@ depends on inkwell.
 ## Usage
 
 ```sh
-vigorscript build tool.as                 # native executable ./tool
-vigorscript build tool.as -O 3 -o fast    # optimization level
-vigorscript build tool.as --target x86_64-unknown-linux-gnu
-vigorscript run tool.as                   # compile + execute
-vigorscript check tool.as                 # type-check only
-vigorscript parse tool.as                 # AST dump
+volentscript build tool.vlt                 # native executable ./tool
+volentscript build tool.vlt -O 3 -o fast    # optimization level
+volentscript build tool.vlt --target x86_64-unknown-linux-gnu
+volentscript run tool.vlt                   # compile + execute
+volentscript check tool.vlt                 # type-check only
+volentscript parse tool.vlt                 # AST dump
 ```
 
 Debug aids: `VS_DUMP_IR=1` (pre-optimization LLVM module),
@@ -121,9 +118,8 @@ Debug aids: `VS_DUMP_IR=1` (pre-optimization LLVM module),
 ## Tests
 
 `cargo test --workspace` — unit suites per crate plus the e2e golden
-corpus in `tests/` (each `.as` program with expected stdout + exit 0),
-capped by `tests/showcase.as`, the whole-language golden test. Opt-in
+corpus in `tests/` (each `.vlt` program with expected stdout + exit 0),
+capped by `tests/showcase.vlt`, the whole-language golden test. Opt-in
 extras: `cross_linux` (needs zig + docker). Known deviations from AS3/ES4
 are documented per phase in the git history and SPECS.
 
-Next: project-wide rebrand (name + extension), tracked separately.

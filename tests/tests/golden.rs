@@ -1,4 +1,4 @@
-//! Golden tests: compile each `programs/*.as` to a native executable, run
+//! Golden tests: compile each `programs/*.vlt` to a native executable, run
 //! it, compare stdout against `programs/*.out` (exit code must be 0).
 
 use std::path::{Path, PathBuf};
@@ -31,7 +31,7 @@ fn runtime_lib() -> PathBuf {
 
 fn run_golden(name: &str) {
     let root = workspace_root();
-    let program = root.join("tests/programs").join(format!("{name}.as"));
+    let program = root.join("tests/programs").join(format!("{name}.vlt"));
     let expected_path = root.join("tests/programs").join(format!("{name}.out"));
     let expected = std::fs::read_to_string(&expected_path)
         .unwrap_or_else(|e| panic!("missing {}: {e}", expected_path.display()));
@@ -119,7 +119,7 @@ fn closures_and_exceptions() {
 #[test]
 fn cli_tool() {
     let root = workspace_root();
-    let program = root.join("tests/programs/wordfreq.as");
+    let program = root.join("tests/programs/wordfreq.vlt");
     let out_dir = std::env::temp_dir().join(format!("vs-cli-{}", std::process::id()));
     std::fs::create_dir_all(&out_dir).expect("temp dir");
     let exe = out_dir.join("wordfreq");
@@ -169,13 +169,13 @@ fn cli_tool() {
     let _ = std::fs::remove_dir_all(&out_dir);
 }
 
-/// The final golden test (SPECS §10): `tests/showcase.as` exercises the
+/// The final golden test (SPECS §10): `tests/showcase.vlt` exercises the
 /// whole language surface; its expected stdout lives in the comment block
 /// at the bottom of the source file itself.
 #[test]
 fn showcase() {
     let root = workspace_root();
-    let program = root.join("tests/showcase.as");
+    let program = root.join("tests/showcase.vlt");
     let source = std::fs::read_to_string(&program).expect("showcase source");
 
     // Extract the expected block: after the "EXPECTED STDOUT" banner line
@@ -260,7 +260,7 @@ fn cross_linux() {
     std::fs::create_dir_all(&out_dir).expect("temp dir");
     let exe = out_dir.join("showcase-linux");
     driver::build(&driver::BuildOptions {
-        input: root.join("tests/showcase.as"),
+        input: root.join("tests/showcase.vlt"),
         output: Some(exe.clone()),
         runtime_lib: Some(root.join("target/aarch64-unknown-linux-gnu/release/libruntime.a")),
         opt: driver::OptLevel::default(),
@@ -276,7 +276,7 @@ fn cross_linux() {
         .expect("docker run");
     assert_eq!(output.status.code(), Some(0));
 
-    let source = std::fs::read_to_string(root.join("tests/showcase.as")).expect("source");
+    let source = std::fs::read_to_string(root.join("tests/showcase.vlt")).expect("source");
     let mut lines = source
         .lines()
         .skip_while(|l| !l.contains("EXPECTED STDOUT"));
@@ -303,7 +303,7 @@ fn sockets_echo() {
     for name in ["echo_server", "echo_client"] {
         let exe = out_dir.join(name);
         driver::build(&driver::BuildOptions {
-            input: root.join(format!("tests/programs/{name}.as")),
+            input: root.join(format!("tests/programs/{name}.vlt")),
             output: Some(exe.clone()),
             runtime_lib: Some(runtime_lib()),
             opt: driver::OptLevel::default(),
@@ -364,7 +364,7 @@ fn stdin_lines() {
     std::fs::create_dir_all(&out_dir).expect("temp dir");
     let exe = out_dir.join("stdin_upper");
     driver::build(&driver::BuildOptions {
-        input: root.join("tests/programs/stdin_upper.as"),
+        input: root.join("tests/programs/stdin_upper.vlt"),
         output: Some(exe.clone()),
         runtime_lib: Some(runtime_lib()),
         opt: driver::OptLevel::default(),
