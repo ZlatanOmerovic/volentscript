@@ -114,5 +114,16 @@ diagnostics. Everything resolves at compile time by folding the
 namespace into the member's internal name — zero runtime cost.
 Namespace-as-runtime-value (the `Namespace` class) stays backlog.
 
-Remaining (backlog): optimization passes, Linux cross-compile hardening,
-runtime Namespace values, sockets. Phase plan: SPECS §11.
+P13 turned on the optimizer: the LLVM new-pass-manager pipeline
+(`default<O2>` by default, `-O 0..3` on build/run), target data layout
+wired to the machine (required — layout-less pipelines miscompile),
+inline ToInt32/ToUint32 fast paths (§9.5/§9.6 — in-range doubles truncate
+in one instruction instead of a runtime call), a one-flag GC safepoint
+fast path, and `memory(inaccessiblemem: readwrite)` on the safepoint so
+LLVM optimizes across it. Functions containing `try` are pinned to
+`optnone` (longjmp rolls registers back; locals must stay in memory).
+Recursive int benchmark: ~5x faster than the P12 compiler at -O2.
+`VS_DUMP_IR_OPT=1` dumps the post-pipeline module.
+
+Remaining (backlog): Linux cross-compile hardening, runtime Namespace
+values, sockets. Phase plan: SPECS §11.

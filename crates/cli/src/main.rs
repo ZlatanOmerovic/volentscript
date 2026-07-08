@@ -30,6 +30,9 @@ enum Command {
         /// Path to libruntime.a (default: next to this executable)
         #[arg(long)]
         runtime_lib: Option<PathBuf>,
+        /// Optimization level (0-3)
+        #[arg(short = 'O', long = "opt", default_value = "2")]
+        opt: u8,
     },
     /// Compile and immediately run a .as file
     Run {
@@ -38,6 +41,9 @@ enum Command {
         /// Path to libruntime.a (default: next to this executable)
         #[arg(long)]
         runtime_lib: Option<PathBuf>,
+        /// Optimization level (0-3)
+        #[arg(short = 'O', long = "opt", default_value = "2")]
+        opt: u8,
     },
     /// Parse a .as file and print its AST (compiler development aid)
     Parse {
@@ -56,13 +62,18 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let (input, output, runtime_lib, and_run) = match cli.command {
+    let (input, output, runtime_lib, opt, and_run) = match cli.command {
         Command::Build {
             input,
             output,
             runtime_lib,
-        } => (input, output, runtime_lib, false),
-        Command::Run { input, runtime_lib } => (input, None, runtime_lib, true),
+            opt,
+        } => (input, output, runtime_lib, opt, false),
+        Command::Run {
+            input,
+            runtime_lib,
+            opt,
+        } => (input, None, runtime_lib, opt, true),
         Command::Parse { input } => {
             return match driver::parse_dump(&input) {
                 Ok(dump) => {
@@ -93,6 +104,12 @@ fn main() -> ExitCode {
         input,
         output,
         runtime_lib,
+        opt: match opt {
+            0 => driver::OptLevel::O0,
+            1 => driver::OptLevel::O1,
+            3 => driver::OptLevel::O3,
+            _ => driver::OptLevel::O2,
+        },
     };
     if and_run {
         match driver::run(&opts) {

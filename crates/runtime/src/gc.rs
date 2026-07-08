@@ -98,6 +98,10 @@ struct Heap {
 const INITIAL_THRESHOLD: usize = 4 << 20;
 
 thread_local! {
+    /// Fast-path flag for [`safepoint`]: set by [`alloc`] when the debt
+    /// crosses the threshold, so the per-loop/per-call safepoint is one
+    /// thread-local load instead of a RefCell borrow.
+    static PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static HEAP: RefCell<Heap> = const {
         RefCell::new(Heap {
             blocks: BTreeMap::new(),
@@ -151,6 +155,9 @@ pub fn alloc(size: usize, kind: Kind) -> *mut u8 {
         h.hi = h.hi.max(addr + size);
         h.live += size;
         h.since += size;
+        if h.since > h.threshold && h.stack_base != 0 {
+            PENDING.with(|p| p.set(true));
+        }
         h.blocks.insert(
             addr,
             Block {
@@ -207,15 +214,19 @@ pub fn live_bytes() -> usize {
 }
 
 /// Backend-emitted safepoint: collect if the allocation debt is due and
-/// no runtime frames are live.
+/// no runtime frames are live. The hot path is a single thread-local
+/// flag read (set by [`alloc`] on threshold crossing).
 pub fn safepoint() {
-    let due = HEAP.with(|h| {
-        let h = h.borrow();
-        h.defer == 0 && h.since > h.threshold && h.stack_base != 0
-    });
-    if due {
-        collect();
+    if !PENDING.with(std::cell::Cell::get) {
+        return;
     }
+    let deferred = HEAP.with(|h| h.borrow().defer != 0);
+    if deferred {
+        // Keep the flag: the next safepoint after the guard drops collects.
+        return;
+    }
+    PENDING.with(|p| p.set(false));
+    collect();
 }
 
 /// Forces a collection (System.gc()). Safe to call from a native only
@@ -327,6 +338,7 @@ pub fn collect() {
         h.since = 0;
         h.threshold = INITIAL_THRESHOLD.max(h.live * 2);
         h.collections += 1;
+        PENDING.with(|p| p.set(false));
         if std::env::var_os("VS_GC_LOG").is_some() {
             let pooled: usize = h.free_lists.iter().map(Vec::len).sum();
             eprintln!(

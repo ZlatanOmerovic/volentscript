@@ -59,6 +59,10 @@ impl Backend for LlvmBackend {
             )]
         })?;
         module.set_triple(&machine.get_triple());
+        // The optimization pipeline is layout-sensitive; without the
+        // target's data layout the passes assume a default that mismatches
+        // the emitted object (miscompiles at O1+).
+        module.set_data_layout(&machine.get_target_data().get_data_layout());
 
         let mut cx = Cx {
             context: &context,
@@ -97,6 +101,25 @@ impl Backend for LlvmBackend {
                 format!("internal codegen error (LLVM verifier): {}", e.to_string()),
             )]);
         }
+        // Optimization pipeline (new pass manager, SPECS §8 P13). Sound
+        // with the conservative GC: vs_gc_safepoint is an opaque external
+        // call, so LLVM keeps live GC pointers in callee-saved registers
+        // or stack slots across it — both scanned at collection — and the
+        // collector already pins blocks through interior pointers, which
+        // covers GEP-derived addresses that outlive their base.
+        if let Err(e) = cx.module.run_passes(
+            opts.opt.pipeline(),
+            &machine,
+            inkwell::passes::PassBuilderOptions::create(),
+        ) {
+            return Err(vec![Diagnostic::error(
+                ErrorCode::NOT_IMPLEMENTED,
+                format!("internal codegen error (pass pipeline): {}", e.to_string()),
+            )]);
+        }
+        if std::env::var_os("VS_DUMP_IR_OPT").is_some() {
+            eprintln!("{}", cx.module.print_to_string().to_string());
+        }
         let buffer = machine
             .write_to_memory_buffer(&cx.module, FileType::Object)
             .map_err(|e| {
@@ -123,7 +146,12 @@ fn target_machine(opts: &CodegenOpts) -> Result<TargetMachine, String> {
             &triple,
             "generic",
             "",
-            OptimizationLevel::Default,
+            match opts.opt {
+                crate::OptLevel::O0 => OptimizationLevel::None,
+                crate::OptLevel::O1 => OptimizationLevel::Less,
+                crate::OptLevel::O2 => OptimizationLevel::Default,
+                crate::OptLevel::O3 => OptimizationLevel::Aggressive,
+            },
             RelocMode::PIC,
             CodeModel::Default,
         )
@@ -303,6 +331,24 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
         mir_fn: &'a mir::Function,
         function: FunctionValue<'ctx>,
     ) {
+        // A function containing `try` calls _setjmp: after a longjmp,
+        // registers roll back to their setjmp-time values, so locals
+        // promoted out of allocas would silently lose writes (the C
+        // "non-volatile locals are indeterminate" rule). Pin such
+        // functions to optnone (+ the required noinline) — their locals
+        // stay in memory, which the unwind scheme relies on. Everything
+        // else gets the full pipeline.
+        if contains_try(&mir_fn.body) {
+            for name in ["optnone", "noinline"] {
+                function.add_attribute(
+                    inkwell::attributes::AttributeLoc::Function,
+                    cx.context.create_enum_attribute(
+                        inkwell::attributes::Attribute::get_named_enum_kind_id(name),
+                        0,
+                    ),
+                );
+            }
+        }
         let entry = cx.context.append_basic_block(function, "entry");
         let body_bb = cx.context.append_basic_block(function, "body");
         cx.builder.position_at_end(body_bb);
@@ -890,9 +936,29 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
     }
 
     /// Registers the prelude Error descriptors with the runtime.
-    /// GC safepoint call (gc.rs: collection happens only here).
+    /// GC safepoint call (gc.rs: collection happens only here). The
+    /// declaration carries `memory(inaccessiblemem: readwrite)` +
+    /// `nounwind`: the collector only frees memory the program can no
+    /// longer reach and mutates only its own bookkeeping, so from the
+    /// optimizer's model the call touches no program-visible state — LLVM
+    /// may keep values in registers across it (the conservative scan sees
+    /// registers and stack either way).
     fn emit_safepoint(&mut self) {
-        let f = self.cx.runtime_fn("vs_gc_safepoint", None, &[]);
+        let cx = self.cx;
+        let f = cx.runtime_fn("vs_gc_safepoint", None, &[]);
+        // MemoryEffects encoding (LLVM): 2 bits per location, locations
+        // argmem=0 / inaccessiblemem=1 / other=2; ModRef=3.
+        // inaccessiblemem: readwrite, everything else: none -> 3 << 2.
+        let memory_kind = inkwell::attributes::Attribute::get_named_enum_kind_id("memory");
+        let nounwind_kind = inkwell::attributes::Attribute::get_named_enum_kind_id("nounwind");
+        f.add_attribute(
+            inkwell::attributes::AttributeLoc::Function,
+            cx.context.create_enum_attribute(memory_kind, 3 << 2),
+        );
+        f.add_attribute(
+            inkwell::attributes::AttributeLoc::Function,
+            cx.context.create_enum_attribute(nounwind_kind, 0),
+        );
         self.cx.builder.build_call(f, &[], "sp").expect("call");
     }
 
@@ -2650,27 +2716,11 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     // int↔uint reinterpret the same 32 bits (§9.5/§9.6).
                     Val::Int(i) | Val::UInt(i) => wrap(i),
                     Val::Num(f) => {
-                        let name = if conv == Conv::ToInt {
-                            "vs_f64_to_int32"
-                        } else {
-                            "vs_f64_to_uint32"
+                        let v = self.convert_num_to_int(f, conv);
+                        let (Val::Int(iv) | Val::UInt(iv)) = v else {
+                            unreachable!("num-to-int shape")
                         };
-                        let rf = cx.runtime_fn(
-                            name,
-                            Some(cx.context.i32_type().into()),
-                            &[cx.context.f64_type().into()],
-                        );
-                        let call = self
-                            .cx
-                            .builder
-                            .build_call(rf, &[f.into()], "toi")
-                            .expect("call");
-                        wrap(
-                            call.try_as_basic_value()
-                                .basic()
-                                .expect("value")
-                                .into_int_value(),
-                        )
+                        wrap(iv)
                     }
                     Val::Any(p) => {
                         let n = self.any_to_number(p);
@@ -2866,28 +2916,56 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
         }
     }
 
+    /// ToInt32/ToUint32 (§9.5/§9.6) with an inline fast path: a double
+    /// already inside the target range truncates with one instruction;
+    /// NaN/±Inf/out-of-range take the runtime's modular slow path. The
+    /// bounds are exclusive-of-boundary so every value that branches to
+    /// `fptosi`/`fptoui` truncates in range (no poison).
     fn convert_num_to_int(&mut self, f: FloatValue<'ctx>, conv: Conv) -> Val<'ctx> {
         let cx = self.cx;
-        let name = if conv == Conv::ToInt {
-            "vs_f64_to_int32"
+        let f64t = cx.context.f64_type();
+        let i32t = cx.context.i32_type();
+        let b = &cx.builder;
+        let (name, lo, hi) = if conv == Conv::ToInt {
+            ("vs_f64_to_int32", -2147483649.0, 2147483648.0)
         } else {
-            "vs_f64_to_uint32"
+            ("vs_f64_to_uint32", -1.0, 4294967296.0)
         };
-        let rf = cx.runtime_fn(
-            name,
-            Some(cx.context.i32_type().into()),
-            &[cx.context.f64_type().into()],
-        );
-        let call = self
-            .cx
-            .builder
-            .build_call(rf, &[f.into()], "toi")
-            .expect("call");
-        let iv = call
+        // in-range = f > lo && f < hi (ordered compares: NaN fails both).
+        let gt = b
+            .build_float_compare(FloatPredicate::OGT, f, f64t.const_float(lo), "toi.gt")
+            .expect("cmp");
+        let lt = b
+            .build_float_compare(FloatPredicate::OLT, f, f64t.const_float(hi), "toi.lt")
+            .expect("cmp");
+        let in_range = b.build_and(gt, lt, "toi.in").expect("and");
+        let fast_bb = self.new_block("toi.fast");
+        let slow_bb = self.new_block("toi.slow");
+        let end_bb = self.new_block("toi.end");
+        b.build_conditional_branch(in_range, fast_bb, slow_bb)
+            .expect("br");
+        b.position_at_end(fast_bb);
+        let fast = if conv == Conv::ToInt {
+            b.build_float_to_signed_int(f, i32t, "toi.trunc")
+                .expect("fptosi")
+        } else {
+            b.build_float_to_unsigned_int(f, i32t, "toi.trunc")
+                .expect("fptoui")
+        };
+        b.build_unconditional_branch(end_bb).expect("br");
+        b.position_at_end(slow_bb);
+        let rf = cx.runtime_fn(name, Some(i32t.into()), &[f64t.into()]);
+        let call = b.build_call(rf, &[f.into()], "toi.call").expect("call");
+        let slow = call
             .try_as_basic_value()
             .basic()
             .expect("value")
             .into_int_value();
+        b.build_unconditional_branch(end_bb).expect("br");
+        b.position_at_end(end_bb);
+        let phi = b.build_phi(i32t, "toi").expect("phi");
+        phi.add_incoming(&[(&fast, fast_bb), (&slow, slow_bb)]);
+        let iv = phi.as_basic_value().into_int_value();
         if conv == Conv::ToInt {
             Val::Int(iv)
         } else {
@@ -6009,6 +6087,34 @@ fn store_wrapper_result<'ctx>(
 enum ArgKind {
     Num,
     Str,
+}
+
+/// Whether a statement tree contains a `try` (drives the optnone pin —
+/// see FnCx::emit).
+fn contains_try(stmts: &[mir::Stmt]) -> bool {
+    use mir::Stmt as S;
+    stmts.iter().any(|s| match s {
+        S::Try { .. } => true,
+        S::Block(b) => contains_try(b),
+        S::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            contains_try(std::slice::from_ref(then_branch))
+                || else_branch
+                    .as_deref()
+                    .is_some_and(|e| contains_try(std::slice::from_ref(e)))
+        }
+        S::While { body, .. } | S::DoWhile { body, .. } => contains_try(std::slice::from_ref(body)),
+        S::For { init, body: b, .. } => {
+            init.as_deref()
+                .is_some_and(|i| contains_try(std::slice::from_ref(i)))
+                || contains_try(std::slice::from_ref(b))
+        }
+        S::Switch { cases, .. } => cases.iter().any(|c| contains_try(&c.body)),
+        _ => false,
+    })
 }
 
 fn ty_tag(ty: Ty) -> u32 {

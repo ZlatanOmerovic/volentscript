@@ -15,6 +15,32 @@ pub mod llvm;
 pub struct CodegenOpts {
     /// LLVM-style target triple; `None` = host.
     pub target_triple: Option<String>,
+    /// Optimization level (SPECS §8 P13); default O2.
+    pub opt: OptLevel,
+}
+
+/// Optimization level, mirroring `-O0..-O3`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(missing_docs)] // variants are self-describing
+pub enum OptLevel {
+    O0,
+    O1,
+    #[default]
+    O2,
+    O3,
+}
+
+impl OptLevel {
+    /// The new-pass-manager pipeline string for [`inkwell`'s]
+    /// `Module::run_passes` (same grammar as `opt -passes=`).
+    pub fn pipeline(self) -> &'static str {
+        match self {
+            OptLevel::O0 => "default<O0>",
+            OptLevel::O1 => "default<O1>",
+            OptLevel::O2 => "default<O2>",
+            OptLevel::O3 => "default<O3>",
+        }
+    }
 }
 
 /// A produced relocatable object, ready for linking.

@@ -44,6 +44,7 @@ fn run_golden(name: &str) {
         input: program,
         output: Some(exe.clone()),
         runtime_lib: Some(runtime_lib()),
+        opt: driver::OptLevel::default(),
     })
     .unwrap_or_else(|e| panic!("build failed:\n{}", e.rendered.join("\n")));
 
@@ -125,6 +126,7 @@ fn cli_tool() {
         input: program,
         output: Some(exe.clone()),
         runtime_lib: Some(runtime_lib()),
+        opt: driver::OptLevel::default(),
     })
     .unwrap_or_else(|e| panic!("build failed:\n{}", e.rendered.join("\n")));
     std::fs::write(
@@ -195,6 +197,7 @@ fn showcase() {
         input: program,
         output: Some(exe.clone()),
         runtime_lib: Some(runtime_lib()),
+        opt: driver::OptLevel::default(),
     })
     .unwrap_or_else(|e| panic!("build failed:\n{}", e.rendered.join("\n")));
 

@@ -9,6 +9,8 @@ use codegen::Backend as _;
 use diagnostics::Diagnostic;
 use span::{SourceId, SourceMap};
 
+pub use codegen::OptLevel;
+
 /// Options for one `build` invocation.
 #[derive(Debug, Default)]
 pub struct BuildOptions {
@@ -19,6 +21,8 @@ pub struct BuildOptions {
     /// Path to the runtime static library; `None` = `libruntime.a` next to
     /// the compiler executable (where a workspace build puts it).
     pub runtime_lib: Option<PathBuf>,
+    /// Optimization level (default O2).
+    pub opt: codegen::OptLevel,
 }
 
 /// Compilation failure: diagnostics already rendered against the source map
@@ -163,7 +167,13 @@ pub fn build(opts: &BuildOptions) -> Result<PathBuf, Errors> {
 
     let backend = codegen::llvm::LlvmBackend::default();
     let object = backend
-        .compile(&program, &codegen::CodegenOpts::default())
+        .compile(
+            &program,
+            &codegen::CodegenOpts {
+                opt: opts.opt,
+                ..Default::default()
+            },
+        )
         .map_err(|d| Errors::new(d, &sources))?;
 
     let output = opts.output.clone().unwrap_or_else(|| {
