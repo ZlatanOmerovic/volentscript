@@ -96,6 +96,9 @@ struct ParamSig {
 #[derive(Debug, Default)]
 struct Scope {
     symbols: HashMap<String, Symbol>,
+    /// Namespaces opened by `use namespace` in this scope (SPECS §5:
+    /// static namespaces; ids index the checker's namespace table).
+    open_ns: Vec<u32>,
 }
 
 /// Loop/switch nesting entry for break/continue validation.
@@ -139,6 +142,13 @@ pub(crate) struct Checker<'a> {
     pub(crate) is_narrowed: Vec<Vec<(LocalId, Ty)>>,
     /// `T?` return flags parallel to `functions`.
     pub(crate) fn_ret_nullable_flags: Vec<bool>,
+    /// Custom namespaces: source name → id (ES4 draft; static-only,
+    /// SPECS §5). Same-URI declarations share an id.
+    pub(crate) namespaces: HashMap<String, u32>,
+    /// URI → id (namespace identity is the URI when one is given).
+    pub(crate) ns_uris: HashMap<String, u32>,
+    /// Next namespace id.
+    pub(crate) ns_count: u32,
     /// Generic function templates (SPECS §4.2): name → declaration.
     pub(crate) fn_templates: Vec<(String, &'a ast::FunctionDecl)>,
     /// Memoized generic-function instantiations.
@@ -490,6 +500,8 @@ impl<'a> Checker<'a> {
             match &stmt.kind {
                 VarDecl(decl) => self.hoist_var(fn_index, decl),
                 Function(f) => nested.push(f),
+                // Registered in collect_types / handled at execution.
+                NamespaceDecl { .. } | UseNamespace(_) => {}
                 Block(b) => self.hoist(fn_index, &b.stmts, nested),
                 If {
                     then_branch,
@@ -863,6 +875,25 @@ impl<'a> Checker<'a> {
             // Types were processed in passes A–C; imports resolve within
             // the single compilation unit already.
             S::Class(_) | S::Interface(_) | S::Import { .. } => TStmtKind::Empty,
+            // Registered during hoisting; nothing runs (static-only).
+            S::NamespaceDecl { .. } => TStmtKind::Empty,
+            S::UseNamespace(name) => {
+                match self.namespaces.get(name).copied() {
+                    Some(id) => {
+                        if let Some(scope) = self.scopes.last_mut() {
+                            scope.open_ns.push(id);
+                        }
+                    }
+                    None => {
+                        self.error(
+                            ErrorCode::UNRESOLVED_NAME,
+                            format!("unknown namespace `{name}`"),
+                            stmt.span,
+                        );
+                    }
+                }
+                TStmtKind::Empty
+            }
             // Package bodies execute like top-level code (declarations were
             // collected in pass A).
             S::Package { body, .. } => {

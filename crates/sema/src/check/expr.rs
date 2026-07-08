@@ -120,6 +120,15 @@ impl<'a> Checker<'a> {
                 let object = self.expr(object);
                 self.member_read(object, name, span)
             }
+            // `e.ns::name` — statically qualified member (SPECS §5).
+            ExprKind::NsMember(object, ns, name) => {
+                let Some(mangled) = self.qualify(ns, name, span) else {
+                    self.expr(object);
+                    return self.error_expr(span);
+                };
+                let object = self.expr(object);
+                self.member_read(object, &mangled, span)
+            }
             ExprKind::Index(object, index) => {
                 let object = self.expr(object);
                 let index = self.expr(index);
@@ -522,6 +531,26 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // `e.ns::name = v` — qualified field write (SPECS §5).
+            ExprKind::NsMember(object, ns, name) => {
+                let Some(mangled) = self.qualify(ns, name, span) else {
+                    self.expr(object);
+                    self.expr(value);
+                    return self.error_expr(span);
+                };
+                let object = self.expr(object);
+                if let Ty::Class(class) = object.ty {
+                    let checked = self.expr(value);
+                    return self.class_member_write(object, class, &mangled, checked, span);
+                }
+                self.expr(value);
+                self.error(
+                    ErrorCode::UNKNOWN_PROPERTY,
+                    format!("`{ns}::{name}` needs a class-typed receiver"),
+                    span,
+                );
+                self.error_expr(span)
+            }
             ExprKind::Member(object, name) => {
                 // Static member write.
                 if let ExprKind::Ident(recv) = &object.kind {
@@ -710,6 +739,33 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+        // `e.ns::m(...)` — qualified method call (SPECS §5).
+        if let ExprKind::NsMember(object, ns, method) = &callee.kind {
+            let Some(mangled) = self.qualify(ns, method, span) else {
+                self.expr(object);
+                for a in args {
+                    self.expr(a);
+                }
+                return self.error_expr(span);
+            };
+            let object = self.expr(object);
+            self.check_null_deref(&object, span);
+            return match object.ty {
+                Ty::Class(class) => self.class_method_call(object, class, &mangled, args, span),
+                Ty::Error => self.error_expr(span),
+                _ => {
+                    for a in args {
+                        self.expr(a);
+                    }
+                    self.error(
+                        ErrorCode::UNKNOWN_PROPERTY,
+                        format!("`{ns}::{method}()` needs a class-typed receiver"),
+                        span,
+                    );
+                    self.error_expr(span)
+                }
+            };
         }
         if let ExprKind::Member(object, method) = &callee.kind {
             let object = self.expr(object);

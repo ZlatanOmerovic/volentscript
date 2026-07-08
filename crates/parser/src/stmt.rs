@@ -41,6 +41,8 @@ impl Parser {
             Try => self.try_statement(),
             Package => self.package_decl(),
             Import => self.import_decl(),
+            Namespace => self.namespace_decl(),
+            Use => self.use_namespace(),
             // Declarations, possibly preceded by modifiers.
             Class | Interface | Public | Private | Protected | Internal | Final | Dynamic
             | Native | Override | Static => self.attributed_declaration(),
@@ -328,6 +330,56 @@ impl Parser {
         }
     }
 
+    /// `namespace n;` / `namespace n = "uri";` (avmplus
+    /// eval-parse.cpp:788: the initializer must be a string literal or
+    /// another namespace identifier; only strings are supported in v1).
+    fn namespace_decl(&mut self) -> Stmt {
+        let start = self.advance().span; // `namespace`
+        let (name, _) = self.expect_ident();
+        let mut uri = None;
+        if self.eat(&TokenKind::Assign) {
+            match self.current().kind.clone() {
+                TokenKind::Str(v) => {
+                    self.advance();
+                    uri = Some(v);
+                }
+                _ => {
+                    let span = self.current().span;
+                    self.error(
+                        ErrorCode::UNEXPECTED_TOKEN,
+                        "a namespace initializer must be a string literal",
+                        span,
+                    );
+                    self.recover_to_statement_boundary();
+                }
+            }
+        }
+        self.semicolon();
+        Stmt {
+            kind: StmtKind::NamespaceDecl { name, uri },
+            span: start,
+        }
+    }
+
+    /// `use namespace n;` (avmplus eval-parse-stmt.cpp:252).
+    fn use_namespace(&mut self) -> Stmt {
+        let start = self.advance().span; // `use`
+        if !self.eat(&TokenKind::Namespace) {
+            let span = self.current().span;
+            self.error(
+                ErrorCode::UNEXPECTED_TOKEN,
+                "`use` must be followed by `namespace` (SYNTAXERR_ILLEGAL_USE)",
+                span,
+            );
+        }
+        let (name, _) = self.expect_ident();
+        self.semicolon();
+        Stmt {
+            kind: StmtKind::UseNamespace(name),
+            span: start,
+        }
+    }
+
     /// Collects modifier keywords (avmplus dispatches these the same way,
     /// eval-parse.cpp:205), then parses the declaration they precede.
     fn attributed_declaration(&mut self) -> Stmt {
@@ -477,6 +529,27 @@ impl Parser {
                 Final => attrs.is_final = true,
                 Override => attrs.is_override = true,
                 Native => attrs.is_native = true,
+                // A bare identifier before a member declaration is a
+                // custom namespace qualifier (avmplus eval-parse.cpp:216
+                // configname_or_namespacename; QUAL_name). Mutually
+                // exclusive with an access modifier.
+                Ident(_)
+                    if matches!(
+                        self.peek_kind(1),
+                        Var | Const | Function | Static | Final | Override | Native
+                    ) =>
+                {
+                    let (name, span) = self.expect_ident();
+                    if attrs.visibility.is_some() {
+                        self.error(
+                            ErrorCode::UNEXPECTED_TOKEN,
+                            "a namespace qualifier cannot be combined with an access modifier",
+                            span,
+                        );
+                    }
+                    attrs.namespace_ = Some(name);
+                    continue;
+                }
                 _ => break,
             }
             self.advance();

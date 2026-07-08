@@ -59,6 +59,13 @@ impl Dumper {
                 path.join("."),
                 if *wildcard { ".*" } else { "" }
             )),
+            StmtKind::NamespaceDecl { name, uri } => self.line(format!(
+                "NamespaceDecl {name}{}",
+                uri.as_ref()
+                    .map(|u| format!(" = {u:?}"))
+                    .unwrap_or_default()
+            )),
+            StmtKind::UseNamespace(name) => self.line(format!("UseNamespace {name}")),
             StmtKind::Class(c) => self.class(c),
             StmtKind::Interface(i) => self.interface(i),
             StmtKind::Block(b) => self.block(b),
@@ -380,6 +387,10 @@ impl Dumper {
             ExprKind::Number(v) => self.line(format!("Number {v}")),
             ExprKind::Str(v) => self.line(format!("Str {v:?}")),
             ExprKind::RegExp(pat, flags) => self.line(format!("RegExp /{pat}/{flags}")),
+            ExprKind::NsMember(e, ns, name) => {
+                self.line(format!("NsMember {ns}::{name}"));
+                self.indented(|d| d.expr(e));
+            }
             ExprKind::Bool(v) => self.line(format!("Bool {v}")),
             ExprKind::Null => self.line("Null"),
             ExprKind::This => self.line("This"),

@@ -105,5 +105,14 @@ P11 added Date instances (ES3 §15.9): `new Date()` / `(millis)` /
 chrono/the platform tz database (macOS links CoreFoundation). Backlog:
 `Date.parse`/string constructor, component setters, locale forms.
 
-Remaining (backlog): runtime namespaces, optimization passes, Linux
-cross-compile hardening. Phase plan: SPECS §11.
+P12 added static custom namespaces (ES4 draft, SPECS §5 scope):
+`namespace n;` / `namespace n = "uri";` (same URI = same namespace),
+namespaced class members (`red function f()`), qualified access
+`obj.ns::name` for reads/writes/calls with virtual dispatch, and
+`use namespace n` with lexically-scoped open sets and ambiguity
+diagnostics. Everything resolves at compile time by folding the
+namespace into the member's internal name — zero runtime cost.
+Namespace-as-runtime-value (the `Namespace` class) stays backlog.
+
+Remaining (backlog): optimization passes, Linux cross-compile hardening,
+runtime Namespace values, sockets. Phase plan: SPECS §11.

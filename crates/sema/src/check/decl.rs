@@ -41,6 +41,30 @@ impl<'a> Checker<'a> {
                     }
                     self.collect_types(body, path, classes, ifaces);
                 }
+                // Namespaces register before member building so class
+                // members can be qualified by them (ES4 draft; identity
+                // is the URI when one is given, else the declaration).
+                ast::StmtKind::NamespaceDecl { name, uri } => {
+                    let id = match uri {
+                        Some(u) => *self.ns_uris.entry(u.clone()).or_insert_with(|| {
+                            let id = self.ns_count;
+                            self.ns_count += 1;
+                            id
+                        }),
+                        None => {
+                            let id = self.ns_count;
+                            self.ns_count += 1;
+                            id
+                        }
+                    };
+                    if self.namespaces.insert(name.clone(), id).is_some() {
+                        self.error(
+                            ErrorCode::CONFLICTING_DECL,
+                            format!("namespace `{name}` is already declared"),
+                            stmt.span,
+                        );
+                    }
+                }
                 ast::StmtKind::Class(decl) if !decl.type_params.is_empty() => {
                     // Generic template (SPECS §4.2): instantiated on use.
                     if self.template_index(&decl.name).is_some()
@@ -285,6 +309,26 @@ impl<'a> Checker<'a> {
 
     /// Builds a checked signature from parameter syntax (types only; bodies
     /// are handled when the method is checked).
+    /// The stored member name: raw, or `#ns{id}::raw` under a custom
+    /// namespace qualifier — namespace identity folds into the name so
+    /// every downstream lookup/override/vtable path works unchanged.
+    fn member_name(&mut self, raw: &str, attrs: &ast::Attributes, span: Span) -> String {
+        match &attrs.namespace_ {
+            None => raw.to_string(),
+            Some(ns) => match self.namespaces.get(ns).copied() {
+                Some(id) => format!("#ns{id}::{raw}"),
+                None => {
+                    self.error(
+                        ErrorCode::UNRESOLVED_NAME,
+                        format!("unknown namespace `{ns}`"),
+                        span,
+                    );
+                    raw.to_string()
+                }
+            },
+        }
+    }
+
     fn build_sig(
         &mut self,
         params: &'a [ast::Param],
@@ -361,17 +405,25 @@ impl<'a> Checker<'a> {
         let mut ctor_sig = Sig::default();
 
         for member in &decl.members {
-            let visibility = member.attrs.visibility.unwrap_or(Visibility::Internal);
+            // A namespace qualifier acts like `public` within its
+            // namespace (ES4 draft); access control comes from having
+            // the qualifier, not from a visibility keyword.
+            let visibility = if member.attrs.namespace_.is_some() {
+                Visibility::Public
+            } else {
+                member.attrs.visibility.unwrap_or(Visibility::Internal)
+            };
             match &member.kind {
                 MemberKind::Field(var) => {
                     for b in &var.bindings {
+                        let stored = self.member_name(&b.name, &member.attrs, b.span);
                         let ty =
                             b.ty.as_ref()
                                 .map(|t| self.resolve_type(t))
                                 .unwrap_or(Ty::Any);
-                        let duplicate = fields.iter().any(|f: &FieldInfo| f.name == b.name)
-                            || static_fields.iter().any(|f: &StaticField| f.name == b.name)
-                            || self.registry.find_field(parent, &b.name).is_some();
+                        let duplicate = fields.iter().any(|f: &FieldInfo| f.name == stored)
+                            || static_fields.iter().any(|f: &StaticField| f.name == stored)
+                            || self.registry.find_field(parent, &stored).is_some();
                         if duplicate {
                             self.error(
                                 ErrorCode::CONFLICTING_DECL,
@@ -383,7 +435,7 @@ impl<'a> Checker<'a> {
                         let nullable = b.ty.as_ref().is_some_and(|t| t.nullable);
                         if member.attrs.is_static {
                             static_fields.push(StaticField {
-                                name: b.name.clone(),
+                                name: stored.clone(),
                                 ty,
                                 nullable,
                                 is_const: var.is_const,
@@ -393,7 +445,7 @@ impl<'a> Checker<'a> {
                             });
                         } else {
                             fields.push(FieldInfo {
-                                name: b.name.clone(),
+                                name: stored.clone(),
                                 ty,
                                 nullable,
                                 is_const: var.is_const,
@@ -412,7 +464,11 @@ impl<'a> Checker<'a> {
                         MemberKind::Getter(_) => VKind::Getter,
                         _ => VKind::Setter,
                     };
-                    let name = f.name.clone().unwrap_or_default();
+                    let name = self.member_name(
+                        &f.name.clone().unwrap_or_default(),
+                        &member.attrs,
+                        f.span,
+                    );
                     let sig = self.build_sig(&f.params, f.return_type.as_ref(), kind);
                     // Constructor: method named like the class (SPECS §3.4).
                     if kind == VKind::Method && name == decl.name && !member.attrs.is_static {
@@ -562,6 +618,7 @@ impl<'a> Checker<'a> {
             match &member.kind {
                 MemberKind::Field(var) => {
                     for b in &var.bindings {
+                        let stored = self.member_name(&b.name, &member.attrs, b.span);
                         let Some(init) = &b.init else {
                             if var.is_const && !member.attrs.is_static {
                                 // const instance fields may instead be
@@ -581,11 +638,11 @@ impl<'a> Checker<'a> {
                         // hoisted registry entry knows the declared type).
                         let target = if member.attrs.is_static {
                             self.registry
-                                .find_static_field(id, &b.name)
+                                .find_static_field(id, &stored)
                                 .map(|f| (f.ty, f.nullable))
                         } else {
                             self.registry
-                                .find_field(id, &b.name)
+                                .find_field(id, &stored)
                                 .map(|f| (f.ty, f.nullable))
                         };
                         if let Some((fty, fnullable)) = target {
@@ -596,7 +653,7 @@ impl<'a> Checker<'a> {
                             if let Some(f) = self.registry.classes[id.0 as usize]
                                 .static_fields
                                 .iter()
-                                .position(|f| f.name == b.name)
+                                .position(|f| f.name == stored)
                             {
                                 self.registry.classes[id.0 as usize].static_fields[f].init =
                                     Some(checked);
@@ -604,7 +661,7 @@ impl<'a> Checker<'a> {
                         } else if let Some(f) = self.registry.classes[id.0 as usize]
                             .fields
                             .iter()
-                            .position(|f| f.name == b.name)
+                            .position(|f| f.name == stored)
                         {
                             self.registry.classes[id.0 as usize].fields[f].init = Some(checked);
                         }
@@ -616,7 +673,11 @@ impl<'a> Checker<'a> {
                         MemberKind::Getter(_) => VKind::Getter,
                         _ => VKind::Setter,
                     };
-                    let name = f.name.clone().unwrap_or_default();
+                    let name = self.member_name(
+                        &f.name.clone().unwrap_or_default(),
+                        &member.attrs,
+                        f.span,
+                    );
                     let is_ctor =
                         kind == VKind::Method && name == class_name && !member.attrs.is_static;
                     let fn_id = if is_ctor {

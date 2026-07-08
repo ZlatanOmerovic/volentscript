@@ -52,7 +52,10 @@ impl Parser {
     pub(crate) fn check_assign_target(&mut self, target: &Expr) {
         if !matches!(
             target.kind,
-            ExprKind::Ident(_) | ExprKind::Member(..) | ExprKind::Index(..)
+            ExprKind::Ident(_)
+                | ExprKind::Member(..)
+                | ExprKind::NsMember(..)
+                | ExprKind::Index(..)
         ) {
             self.error(
                 ErrorCode::INVALID_ASSIGN_TARGET,
@@ -166,10 +169,22 @@ impl Parser {
                 TokenKind::Dot => {
                     self.advance();
                     let (name, name_span) = self.expect_ident();
-                    let span = expr.span.to(name_span);
-                    Expr {
-                        kind: ExprKind::Member(Box::new(expr), name),
-                        span,
+                    // `e.ns::name` — a qualified member (ES4 draft
+                    // qualified names; static namespaces, SPECS §5).
+                    if self.current().kind == TokenKind::ColonColon {
+                        self.advance();
+                        let (member, member_span) = self.expect_ident();
+                        let span = expr.span.to(member_span);
+                        Expr {
+                            kind: ExprKind::NsMember(Box::new(expr), name, member),
+                            span,
+                        }
+                    } else {
+                        let span = expr.span.to(name_span);
+                        Expr {
+                            kind: ExprKind::Member(Box::new(expr), name),
+                            span,
+                        }
                     }
                 }
                 TokenKind::LBracket => {
@@ -269,10 +284,20 @@ impl Parser {
                 TokenKind::Dot => {
                     self.advance();
                     let (name, name_span) = self.expect_ident();
-                    let span = callee.span.to(name_span);
-                    Expr {
-                        kind: ExprKind::Member(Box::new(callee), name),
-                        span,
+                    if self.current().kind == TokenKind::ColonColon {
+                        self.advance();
+                        let (member, member_span) = self.expect_ident();
+                        let span = callee.span.to(member_span);
+                        Expr {
+                            kind: ExprKind::NsMember(Box::new(callee), name, member),
+                            span,
+                        }
+                    } else {
+                        let span = callee.span.to(name_span);
+                        Expr {
+                            kind: ExprKind::Member(Box::new(callee), name),
+                            span,
+                        }
                     }
                 }
                 TokenKind::LBracket => {

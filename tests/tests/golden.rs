@@ -231,3 +231,11 @@ fn regex() {
 fn date() {
     run_golden("date");
 }
+
+/// The Phase 12 milestone (SPECS §5): static custom namespaces —
+/// declarations (URI identity), namespaced members, qualified access,
+/// virtual dispatch through namespaced overrides, `use namespace`.
+#[test]
+fn namespaces() {
+    run_golden("namespaces");
+}

@@ -50,6 +50,15 @@ pub enum StmtKind {
         path: Vec<String>,
         wildcard: bool,
     },
+    /// `namespace n;` / `namespace n = "uri";` (avmplus
+    /// eval-parse.cpp:788 namespaceDefinition; static-only in v1).
+    NamespaceDecl {
+        name: String,
+        uri: Option<String>,
+    },
+    /// `use namespace n;` — opens `n` for unqualified member lookup in
+    /// the enclosing scope (eval-parse-stmt.cpp:252 useStatement).
+    UseNamespace(String),
     Class(Box<ClassDecl>),
     Interface(Box<InterfaceDecl>),
     Block(Block),
@@ -232,7 +241,7 @@ pub enum Visibility {
 }
 
 /// Modifiers collected before a declaration or member.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Attributes {
     /// Access control; `None` = unspecified (internal by default).
     pub visibility: Option<Visibility>,
@@ -246,6 +255,9 @@ pub struct Attributes {
     pub is_dynamic: bool,
     /// `native` declaration (runtime-provided body).
     pub is_native: bool,
+    /// Custom namespace qualifier on a class member (`red function f()`);
+    /// mutually exclusive with `visibility`.
+    pub namespace_: Option<String>,
 }
 
 /// `class C extends B implements I, J { ... }` (SPECS §3.4).
@@ -403,6 +415,9 @@ pub enum ExprKind {
     New(Box<Expr>, Vec<Expr>),
     /// `a.b`.
     Member(Box<Expr>, String),
+    /// `e.ns::name` — namespace-qualified member (ES4 draft qualified
+    /// names; resolved statically in v1).
+    NsMember(Box<Expr>, String, String),
     /// `a[b]`.
     Index(Box<Expr>, Box<Expr>),
     /// `a, b`.

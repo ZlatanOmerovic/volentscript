@@ -208,9 +208,11 @@ Not implemented (v1), and not part of the language proper:
   `XML`/`XMLList` as *classes* may come back as a library, but XML-as-syntax is
   not a v1 goal.
 - Runtime namespaces as first-class *values* (custom `namespace` objects,
-  `ns::name` runtime qualification) — **deferred to Phase 8**. v1 uses
-  namespaces only for the fixed access-control set (`public`/`private`/etc.) and
-  package qualification.
+  runtime-computed qualification, the `Namespace` class) — **deferred**.
+  P12 implements the *static* subset: `namespace` declarations (URI
+  identity), namespaced class members, compile-time `ns::name`
+  qualification, and `use namespace` — resolved entirely at compile time
+  with no runtime representation.
 - `Proxy`, `flash.utils.*`, AMF, `ByteArray`-as-Flash-API (a plain byte buffer
   type may exist in the runtime, but not the Flash `ByteArray` surface).
 

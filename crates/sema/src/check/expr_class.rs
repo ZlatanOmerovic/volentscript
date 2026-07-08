@@ -77,6 +77,70 @@ impl<'a> Checker<'a> {
     }
 
     /// Finds an instance member (field / paired accessors / method).
+    /// Resolves a raw member name against `use namespace` state: an
+    /// exact (or already-qualified) match wins; otherwise the open
+    /// namespaces are searched, and multiple candidates are an ambiguity
+    /// error (ES4 draft multiname lookup, statically resolved).
+    pub(crate) fn effective_member_name(
+        &mut self,
+        class: ClassId,
+        raw: &str,
+        span: Span,
+    ) -> String {
+        if raw.starts_with("#ns") || self.member_exists(class, raw) {
+            return raw.to_string();
+        }
+        let open: Vec<u32> = self
+            .scopes
+            .iter()
+            .flat_map(|s| s.open_ns.iter().copied())
+            .collect();
+        let mut hits: Vec<String> = Vec::new();
+        for id in open {
+            let mangled = format!("#ns{id}::{raw}");
+            if self.member_exists(class, &mangled) && !hits.contains(&mangled) {
+                hits.push(mangled);
+            }
+        }
+        match hits.len() {
+            0 => raw.to_string(),
+            1 => hits.pop().expect("hit"),
+            _ => {
+                self.error(
+                    ErrorCode::UNRESOLVED_NAME,
+                    format!(
+                        "`{raw}` is ambiguous: it exists in {} open namespaces — qualify it (`ns::{raw}`)",
+                        hits.len()
+                    ),
+                    span,
+                );
+                raw.to_string()
+            }
+        }
+    }
+
+    fn member_exists(&self, class: ClassId, name: &str) -> bool {
+        self.registry.find_field(class, name).is_some()
+            || [VKind::Getter, VKind::Setter, VKind::Method]
+                .iter()
+                .any(|&k| self.registry.find_vmethod(class, name, k).is_some())
+    }
+
+    /// Mangles `ns::name` at a use site (None + error if `ns` unknown).
+    pub(crate) fn qualify(&mut self, ns: &str, name: &str, span: Span) -> Option<String> {
+        match self.namespaces.get(ns).copied() {
+            Some(id) => Some(format!("#ns{id}::{name}")),
+            None => {
+                self.error(
+                    ErrorCode::UNRESOLVED_NAME,
+                    format!("unknown namespace `{ns}`"),
+                    span,
+                );
+                None
+            }
+        }
+    }
+
     pub(crate) fn resolve_member(&self, class: ClassId, name: &str) -> Option<ClassMember> {
         if let Some(f) = self.registry.find_field(class, name) {
             return Some(ClassMember::Field {
@@ -152,6 +216,7 @@ impl<'a> Checker<'a> {
         name: &str,
         span: Span,
     ) -> TExpr {
+        let name = &self.effective_member_name(class, name, span);
         if let Some((vis, def)) = self.member_visibility(class, name) {
             self.check_visible(name, vis, def, span);
         }
@@ -229,6 +294,7 @@ impl<'a> Checker<'a> {
         value: TExpr,
         span: Span,
     ) -> TExpr {
+        let name = &self.effective_member_name(class, name, span);
         if let Some((vis, def)) = self.member_visibility(class, name) {
             self.check_visible(name, vis, def, span);
         }
@@ -426,6 +492,7 @@ impl<'a> Checker<'a> {
         args: &'a [ast::Expr],
         span: Span,
     ) -> TExpr {
+        let name = &self.effective_member_name(class, name, span);
         if let Some((vis, def)) = self.member_visibility(class, name) {
             self.check_visible(name, vis, def, span);
         }
