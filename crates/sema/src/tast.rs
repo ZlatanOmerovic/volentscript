@@ -202,6 +202,11 @@ pub enum ArrMethod {
     Join,
     Reverse,
     Sort,
+    ForEach,
+    Map,
+    Filter,
+    Some,
+    Every,
 }
 
 /// Vector instance methods (same surface where meaningful, SPECS §6).
@@ -314,6 +319,11 @@ pub enum TExprKind {
     /// `obj.method` extraction — permanently bound method closure
     /// (SPECS §3.7).
     BoundMethod(Box<TExpr>, ClassId, usize),
+    /// Native static call (Math/System/File/JSON/Date surfaces).
+    CallNative(crate::builtins::NativeFn, Vec<TExpr>),
+    /// Dynamic property ops on `*`/dynamic objects (SPECS §3.2).
+    HasProp(Box<TExpr>, Box<TExpr>),
+    DeleteProp(Box<TExpr>, Box<TExpr>),
     /// `f.call(thisArg, ...)` / `f.apply(thisArg, argsArray)`.
     CallFunctionValue {
         callee: Box<TExpr>,

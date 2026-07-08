@@ -20,6 +20,7 @@ mod closure;
 mod conv;
 mod exc;
 pub(crate) mod ffi;
+mod natives;
 mod object;
 mod seq;
 mod string;

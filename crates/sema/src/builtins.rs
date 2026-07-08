@@ -26,6 +26,14 @@ pub enum BuiltinFn {
     IsNaN,
     /// `isFinite(n:Number):Boolean` — actionscript.lang.as:45.
     IsFinite,
+    /// `encodeURIComponent(uri:String):String` — actionscript.lang.as:37.
+    EncodeUriComponent,
+    /// `decodeURIComponent(uri:String):String`.
+    DecodeUriComponent,
+    /// `escape(s:String):String` — actionscript.lang.as:63.
+    Escape,
+    /// `unescape(s:String):String` — actionscript.lang.as:67.
+    Unescape,
 }
 
 /// A builtin function signature: parameter types, minimum required argument
@@ -70,6 +78,15 @@ impl BuiltinFn {
                 variadic: false,
                 ret: Ty::Boolean,
             },
+            BuiltinFn::EncodeUriComponent
+            | BuiltinFn::DecodeUriComponent
+            | BuiltinFn::Escape
+            | BuiltinFn::Unescape => Signature {
+                params: &[Ty::String],
+                required: 1,
+                variadic: false,
+                ret: Ty::String,
+            },
         }
     }
 
@@ -81,6 +98,10 @@ impl BuiltinFn {
             BuiltinFn::ParseFloat => "parseFloat",
             BuiltinFn::IsNaN => "isNaN",
             BuiltinFn::IsFinite => "isFinite",
+            BuiltinFn::EncodeUriComponent => "encodeURIComponent",
+            BuiltinFn::DecodeUriComponent => "decodeURIComponent",
+            BuiltinFn::Escape => "escape",
+            BuiltinFn::Unescape => "unescape",
         }
     }
 
@@ -92,6 +113,10 @@ impl BuiltinFn {
             "parseFloat" => BuiltinFn::ParseFloat,
             "isNaN" => BuiltinFn::IsNaN,
             "isFinite" => BuiltinFn::IsFinite,
+            "encodeURIComponent" => BuiltinFn::EncodeUriComponent,
+            "decodeURIComponent" => BuiltinFn::DecodeUriComponent,
+            "escape" => BuiltinFn::Escape,
+            "unescape" => BuiltinFn::Unescape,
             _ => return None,
         })
     }
@@ -117,6 +142,280 @@ pub fn type_name(name: &str) -> Option<Ty> {
         "Function" => Ty::Function,
         _ => return None,
     })
+}
+
+/// Native static functions backing the P7 stdlib classes (Math, System,
+/// File, JSON, Date.now). Emission strategy lives in codegen; signatures
+/// here. Math per ECMA-262 3rd ed. §15.8; System/File are the
+/// Redtamarin-shaped CLI surface SPECS §6 calls for (not `flash.*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum NativeFn {
+    MathAbs,
+    MathCeil,
+    MathFloor,
+    MathRound,
+    MathSqrt,
+    MathPow,
+    MathExp,
+    MathLog,
+    MathSin,
+    MathCos,
+    MathTan,
+    MathAsin,
+    MathAcos,
+    MathAtan,
+    MathAtan2,
+    MathMin,
+    MathMax,
+    MathRandom,
+    SystemArgs,
+    SystemExit,
+    SystemGetenv,
+    SystemTime,
+    FileRead,
+    FileWrite,
+    FileExists,
+    JsonStringify,
+    JsonParse,
+    DateNow,
+}
+
+/// One native static method.
+pub struct NativeMethod {
+    /// Source-level name.
+    pub name: &'static str,
+    /// Which native.
+    pub func: NativeFn,
+    /// Signature.
+    pub sig: Signature,
+}
+
+/// A native static constant.
+pub struct NativeConst {
+    /// Source-level name.
+    pub name: &'static str,
+    /// Value (all are Numbers).
+    pub value: f64,
+}
+
+const fn nsig(params: &'static [Ty], required: usize, variadic: bool, ret: Ty) -> Signature {
+    Signature {
+        params,
+        required,
+        variadic,
+        ret,
+    }
+}
+
+/// Methods of a native static class, by class name.
+pub fn native_methods(class: &str) -> Option<&'static [NativeMethod]> {
+    use NativeFn::*;
+    const N: Ty = Ty::Number;
+    static MATH: &[NativeMethod] = &[
+        NativeMethod {
+            name: "abs",
+            func: MathAbs,
+            sig: nsig(&[N], 1, false, N),
+        },
+        NativeMethod {
+            name: "ceil",
+            func: MathCeil,
+            sig: nsig(&[N], 1, false, N),
+        },
+        NativeMethod {
+            name: "floor",
+            func: MathFloor,
+            sig: nsig(&[N], 1, false, N),
+        },
+        NativeMethod {
+            name: "round",
+            func: MathRound,
+            sig: nsig(&[N], 1, false, N),
+        },
+        NativeMethod {
+            name: "sqrt",
+            func: MathSqrt,
+            sig: nsig(&[N], 1, false, N),
+        },
+        NativeMethod {
+            name: "pow",
+            func: MathPow,
+            sig: nsig(&[N, N], 2, false, N),
+        },
+        NativeMethod {
+            name: "exp",
+            func: MathExp,
+            sig: nsig(&[N], 1, false, N),
+        },
+        NativeMethod {
+            name: "log",
+            func: MathLog,
+            sig: nsig(&[N], 1, false, N),
+        },
+        NativeMethod {
+            name: "sin",
+            func: MathSin,
+            sig: nsig(&[N], 1, false, N),
+        },
+        NativeMethod {
+            name: "cos",
+            func: MathCos,
+            sig: nsig(&[N], 1, false, N),
+        },
+        NativeMethod {
+            name: "tan",
+            func: MathTan,
+            sig: nsig(&[N], 1, false, N),
+        },
+        NativeMethod {
+            name: "asin",
+            func: MathAsin,
+            sig: nsig(&[N], 1, false, N),
+        },
+        NativeMethod {
+            name: "acos",
+            func: MathAcos,
+            sig: nsig(&[N], 1, false, N),
+        },
+        NativeMethod {
+            name: "atan",
+            func: MathAtan,
+            sig: nsig(&[N], 1, false, N),
+        },
+        NativeMethod {
+            name: "atan2",
+            func: MathAtan2,
+            sig: nsig(&[N, N], 2, false, N),
+        },
+        // min/max: 2+ args, folded pairwise in codegen (§15.8.2.11/12).
+        NativeMethod {
+            name: "min",
+            func: MathMin,
+            sig: nsig(&[N, N], 2, true, N),
+        },
+        NativeMethod {
+            name: "max",
+            func: MathMax,
+            sig: nsig(&[N, N], 2, true, N),
+        },
+        NativeMethod {
+            name: "random",
+            func: MathRandom,
+            sig: nsig(&[], 0, false, N),
+        },
+    ];
+    static SYSTEM: &[NativeMethod] = &[
+        NativeMethod {
+            name: "args",
+            func: SystemArgs,
+            sig: nsig(&[], 0, false, Ty::Array),
+        },
+        NativeMethod {
+            name: "exit",
+            func: SystemExit,
+            sig: nsig(&[Ty::Int], 1, false, Ty::Void),
+        },
+        NativeMethod {
+            name: "getenv",
+            func: SystemGetenv,
+            sig: nsig(&[Ty::String], 1, false, Ty::String),
+        },
+        NativeMethod {
+            name: "time",
+            func: SystemTime,
+            sig: nsig(&[], 0, false, N),
+        },
+    ];
+    static FILE: &[NativeMethod] = &[
+        NativeMethod {
+            name: "read",
+            func: FileRead,
+            sig: nsig(&[Ty::String], 1, false, Ty::String),
+        },
+        NativeMethod {
+            name: "write",
+            func: FileWrite,
+            sig: nsig(&[Ty::String, Ty::String], 2, false, Ty::Boolean),
+        },
+        NativeMethod {
+            name: "exists",
+            func: FileExists,
+            sig: nsig(&[Ty::String], 1, false, Ty::Boolean),
+        },
+    ];
+    static JSON_M: &[NativeMethod] = &[
+        NativeMethod {
+            name: "stringify",
+            func: JsonStringify,
+            sig: nsig(&[Ty::Any], 1, false, Ty::String),
+        },
+        NativeMethod {
+            name: "parse",
+            func: JsonParse,
+            sig: nsig(&[Ty::String], 1, false, Ty::Any),
+        },
+    ];
+    static DATE: &[NativeMethod] = &[NativeMethod {
+        name: "now",
+        func: DateNow,
+        sig: nsig(&[], 0, false, N),
+    }];
+    Some(match class {
+        "Math" => MATH,
+        "System" => SYSTEM,
+        "File" => FILE,
+        "JSON" => JSON_M,
+        "Date" => DATE,
+        _ => return None,
+    })
+}
+
+/// Constants of a native static class (§15.8.1).
+pub fn native_consts(class: &str) -> Option<&'static [NativeConst]> {
+    static MATH_C: &[NativeConst] = &[
+        NativeConst {
+            name: "PI",
+            value: std::f64::consts::PI,
+        },
+        NativeConst {
+            name: "E",
+            value: std::f64::consts::E,
+        },
+        NativeConst {
+            name: "LN10",
+            value: std::f64::consts::LN_10,
+        },
+        NativeConst {
+            name: "LN2",
+            value: std::f64::consts::LN_2,
+        },
+        NativeConst {
+            name: "LOG10E",
+            value: std::f64::consts::LOG10_E,
+        },
+        NativeConst {
+            name: "LOG2E",
+            value: std::f64::consts::LOG2_E,
+        },
+        NativeConst {
+            name: "SQRT1_2",
+            value: std::f64::consts::FRAC_1_SQRT_2,
+        },
+        NativeConst {
+            name: "SQRT2",
+            value: std::f64::consts::SQRT_2,
+        },
+    ];
+    match class {
+        "Math" => Some(MATH_C),
+        _ => None,
+    }
+}
+
+/// Whether a name is a native static class (unshadowed).
+pub fn is_native_class(name: &str) -> bool {
+    matches!(name, "Math" | "System" | "File" | "JSON" | "Date")
 }
 
 /// A member (property or method) of a builtin type.
@@ -162,6 +461,8 @@ pub fn member(receiver: Ty, name: &str) -> Option<Member> {
         (Ty::String, "substr") => Method(sig(&[Ty::Number, Ty::Number], 0, Ty::String)),
         // String.as:151
         (Ty::String, "split") => Method(sig(&[Ty::Any, Ty::Any], 0, Ty::Array)),
+        // §15.5.4.11 with a string pattern (regex patterns are P8).
+        (Ty::String, "replace") => Method(sig(&[Ty::String, Ty::String], 2, Ty::String)),
         // String.as:182,194
         (Ty::String, "toLowerCase") => Method(sig(&[], 0, Ty::String)),
         (Ty::String, "toUpperCase") => Method(sig(&[], 0, Ty::String)),

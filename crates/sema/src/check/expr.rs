@@ -111,6 +111,9 @@ impl Checker<'_> {
                         if let Some(class) = self.ident_as_class(recv) {
                             return self.static_read(class, name, span);
                         }
+                        if let Some(native) = self.native_static_read(recv, name, span) {
+                            return native;
+                        }
                     }
                 }
                 let object = self.expr(object);
@@ -218,16 +221,28 @@ impl Checker<'_> {
                 mk(Ty::Any, span, TExprKind::Unary(op, Box::new(operand)))
             }
             // OP_deleteproperty → BOOLEAN_TYPE (Verifier.cpp:1579).
-            UnaryOp::Delete => {
-                if !matches!(checked.kind, TExprKind::Member(..) | TExprKind::Index(..)) {
+            UnaryOp::Delete => match checked.kind {
+                TExprKind::Member(recv, name) => {
+                    let key = TExpr {
+                        ty: Ty::String,
+                        span,
+                        kind: TExprKind::Str(name),
+                    };
+                    mk(
+                        Ty::Boolean,
+                        span,
+                        TExprKind::DeleteProp(recv, Box::new(key)),
+                    )
+                }
+                _ => {
                     self.error(
                         ErrorCode::UNSUPPORTED_SYNTAX,
-                        "`delete` operates on a property (`obj.name` or `obj[key]`)",
+                        "`delete` operates on a dynamic property (`obj.name`)",
                         span,
                     );
+                    self.error_expr(span)
                 }
-                mk(Ty::Boolean, span, TExprKind::Unary(op, Box::new(checked)))
-            }
+            },
             // OP_increment → NUMBER; OP_increment_i keeps int locals int
             // (Verifier.cpp:2417-2446).
             UnaryOp::PreInc | UnaryOp::PreDec => {
@@ -368,9 +383,19 @@ impl Checker<'_> {
                     TExprKind::Binary(op, Box::new(lhs), Box::new(rhs)),
                 )
             }
-            // OP_equals/strictequals/instanceof/in → BOOLEAN
+            // `key in obj` (§11.8.7): dynamic property test.
+            In => {
+                let key = self.coerce_to_any(lhs);
+                let obj = self.coerce_to_any(rhs);
+                mk(
+                    Ty::Boolean,
+                    span,
+                    TExprKind::HasProp(Box::new(key), Box::new(obj)),
+                )
+            }
+            // OP_equals/strictequals/instanceof → BOOLEAN
             // (Verifier.cpp:2296-2309).
-            Eq | Ne | StrictEq | StrictNe | Instanceof | In => mk(
+            Eq | Ne | StrictEq | StrictNe | Instanceof => mk(
                 Ty::Boolean,
                 span,
                 TExprKind::Binary(op, Box::new(lhs), Box::new(rhs)),
@@ -646,6 +671,11 @@ impl Checker<'_> {
                 if !self.is_shadowed(recv) {
                     if let Some(class) = self.ident_as_class(recv) {
                         return self.static_call(class, method, args, span);
+                    }
+                    if crate::builtins::is_native_class(recv) {
+                        if let Some(native) = self.native_static_call(recv, method, args, span) {
+                            return native;
+                        }
                     }
                 }
             }

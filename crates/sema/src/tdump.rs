@@ -434,6 +434,28 @@ impl Dumper {
                     d.expr(v);
                 });
             }
+            TExprKind::CallNative(f, args) => {
+                self.line(format!("{header}CallNative {f:?}"));
+                self.indented(|d| {
+                    for a in args {
+                        d.expr(a);
+                    }
+                });
+            }
+            TExprKind::HasProp(k, o) => {
+                self.line(format!("{header}HasProp"));
+                self.indented(|d| {
+                    d.expr(k);
+                    d.expr(o);
+                });
+            }
+            TExprKind::DeleteProp(o, k) => {
+                self.line(format!("{header}DeleteProp"));
+                self.indented(|d| {
+                    d.expr(o);
+                    d.expr(k);
+                });
+            }
             TExprKind::CaptureGet(i) => self.line(format!("{header}CaptureGet ^{i}")),
             TExprKind::CaptureSet(i, v) => {
                 self.line(format!("{header}CaptureSet ^{i}"));

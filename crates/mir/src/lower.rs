@@ -369,6 +369,7 @@ impl Lowerer<'_> {
                 ctor: self.ctor_fn[index],
                 ifaces,
                 to_string,
+                is_dynamic: info.is_dynamic,
                 statics,
             });
         }
@@ -555,13 +556,15 @@ impl Lowerer<'_> {
                 if receiver.ty == sema::Ty::String && name == "length" {
                     ExprKind::StrLen(Box::new(self.expr(receiver)))
                 } else {
-                    return self.gated_expr(
-                        span,
-                        ty,
-                        "dynamic property access needs the object model — Phase 4",
-                    );
+                    // Boxed receiver: runtime property lookup (SPECS §3.2).
+                    ExprKind::PropGet(Box::new(self.expr(receiver)), name.clone())
                 }
             }
+            E::MemberSet(receiver, name, value) => ExprKind::PropSet(
+                Box::new(self.expr(receiver)),
+                name.clone(),
+                Box::new(self.expr(value)),
+            ),
             E::Index(recv, idx) if matches!(recv.ty, sema::Ty::Array | sema::Ty::Vector(_)) => {
                 ExprKind::SeqGet(Box::new(self.expr(recv)), Box::new(self.expr(idx)))
             }
@@ -574,26 +577,26 @@ impl Lowerer<'_> {
                     Box::new(self.expr(v)),
                 )
             }
-            E::MemberSet(..) | E::IndexSet(..) | E::Index(..) => {
-                return self.gated_expr(
-                    span,
-                    ty,
-                    "dynamic property access needs the object model — Phase 7",
-                );
+            E::Index(recv, idx) => {
+                ExprKind::AnyIndexGet(Box::new(self.expr(recv)), Box::new(self.expr(idx)))
             }
+            E::IndexSet(recv, idx, value) => ExprKind::AnyIndexSet(
+                Box::new(self.expr(recv)),
+                Box::new(self.expr(idx)),
+                Box::new(self.expr(value)),
+            ),
             E::Array(elements) => ExprKind::ArrayLit(
                 elements
                     .iter()
                     .map(|el| el.as_ref().map(|e| self.expr(e)))
                     .collect(),
             ),
-            E::Object(_) => {
-                return self.gated_expr(
-                    span,
-                    ty,
-                    "object literals need the object model — Phase 4",
-                );
-            }
+            E::Object(props) => ExprKind::ObjectLit(
+                props
+                    .iter()
+                    .map(|(k, v)| (k.clone(), self.expr(v)))
+                    .collect(),
+            ),
             E::FnRef(id) => {
                 if !self.program.functions[id.0 as usize].captures.is_empty() {
                     return self.gated_expr(
@@ -606,6 +609,10 @@ impl Lowerer<'_> {
             }
             E::BuiltinRef(b) => {
                 let b = match b {
+                    sema::BuiltinFn::EncodeUriComponent => Builtin::EncodeUriComponent,
+                    sema::BuiltinFn::DecodeUriComponent => Builtin::DecodeUriComponent,
+                    sema::BuiltinFn::Escape => Builtin::Escape,
+                    sema::BuiltinFn::Unescape => Builtin::Unescape,
                     sema::BuiltinFn::Trace => Builtin::Trace,
                     sema::BuiltinFn::ParseInt => Builtin::ParseInt,
                     sema::BuiltinFn::ParseFloat => Builtin::ParseFloat,
@@ -774,6 +781,11 @@ impl Lowerer<'_> {
                     A::Join => ArrMethod::Join,
                     A::Reverse => ArrMethod::Reverse,
                     A::Sort => ArrMethod::Sort,
+                    A::ForEach => ArrMethod::ForEach,
+                    A::Map => ArrMethod::Map,
+                    A::Filter => ArrMethod::Filter,
+                    A::Some => ArrMethod::SomeM,
+                    A::Every => ArrMethod::Every,
                 };
                 ExprKind::CallArr(
                     m,
@@ -820,6 +832,20 @@ impl Lowerer<'_> {
                 args: args.iter().map(|a| self.expr(a)).collect(),
                 is_apply: *is_apply,
             },
+            E::CallNative(f, args) => {
+                ExprKind::CallNative(*f, args.iter().map(|a| self.expr(a)).collect())
+            }
+            E::HasProp(key, obj) => {
+                ExprKind::HasProp(Box::new(self.expr(key)), Box::new(self.expr(obj)))
+            }
+            E::DeleteProp(obj, key) => {
+                // Sema guarantees a string-literal key here.
+                let name = match &key.kind {
+                    sema::TExprKind::Str(s) => s.clone(),
+                    _ => String::new(),
+                };
+                ExprKind::DeleteProp(Box::new(self.expr(obj)), name)
+            }
             E::Error => unreachable!("error expr survived sema"),
         };
         Expr { ty, span, kind }
@@ -1087,6 +1113,10 @@ impl Lowerer<'_> {
     fn builtin_call(&mut self, b: sema::BuiltinFn, args: &[sema::TExpr], span: Span) -> ExprKind {
         let mut lowered: Vec<Expr> = args.iter().map(|a| self.expr(a)).collect();
         let builtin = match b {
+            sema::BuiltinFn::EncodeUriComponent => Builtin::EncodeUriComponent,
+            sema::BuiltinFn::DecodeUriComponent => Builtin::DecodeUriComponent,
+            sema::BuiltinFn::Escape => Builtin::Escape,
+            sema::BuiltinFn::Unescape => Builtin::Unescape,
             sema::BuiltinFn::Trace => Builtin::Trace,
             // Defaults per avmplus actionscript.lang.as:41-53.
             sema::BuiltinFn::ParseInt => {
@@ -1175,6 +1205,7 @@ impl Lowerer<'_> {
                         fill_num(&mut lowered, 1, 0x7FFFFFFF as f64);
                         StrMethod::Substr
                     }
+                    "replace" => StrMethod::Replace,
                     "toLowerCase" => StrMethod::ToLowerCase,
                     "toUpperCase" => StrMethod::ToUpperCase,
                     "toString" => StrMethod::ToString,
@@ -1254,11 +1285,12 @@ impl Lowerer<'_> {
                     kind: ExprKind::CallNumMethod(method, Box::new(receiver), lowered),
                 }
             }
-            _ => self.gated_expr(
-                span,
+            // Boxed receiver: property lookup + bound call.
+            _ => Expr {
                 ty,
-                "dynamic method calls need the object model — Phase 4",
-            ),
+                span,
+                kind: ExprKind::PropCall(Box::new(self.expr(receiver)), name.to_string(), lowered),
+            },
         }
     }
 }

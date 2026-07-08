@@ -70,7 +70,7 @@ impl<'a> Checker<'a> {
         args: &[ast::Expr],
         span: Span,
     ) -> TExpr {
-        use ArrMethod::*;
+        use ArrMethod::{Some as Some_, *};
         let (method, ret): (ArrMethod, Ty) = match name {
             "push" => (Push, Ty::UInt),
             "pop" => (Pop, Ty::Any),
@@ -83,6 +83,11 @@ impl<'a> Checker<'a> {
             "join" => (Join, Ty::String),
             "reverse" => (Reverse, Ty::Array),
             "sort" => (Sort, Ty::Array),
+            "forEach" => (ForEach, Ty::Void),
+            "map" => (Map, Ty::Array),
+            "filter" => (Filter, Ty::Array),
+            "some" => (Some_, Ty::Boolean),
+            "every" => (Every, Ty::Boolean),
             _ => {
                 self.error(
                     ErrorCode::UNKNOWN_PROPERTY,
@@ -108,7 +113,9 @@ impl<'a> Checker<'a> {
                 let checked = self.expr(a);
                 match (method, i) {
                     (Join, 0) => self.coerce(checked, Ty::String, a.span),
-                    (Sort, 0) => self.coerce(checked, Ty::Function, a.span),
+                    (Sort | ForEach | Map | Filter | Some_ | Every, 0) => {
+                        self.coerce(checked, Ty::Function, a.span)
+                    }
                     (Slice | Splice, 0 | 1) | (IndexOf, 1) => {
                         self.coerce(checked, Ty::Number, a.span)
                     }

@@ -41,6 +41,112 @@ pub struct VsClassDesc {
     /// `toString():String` implementation (C ABI: fn(this) -> VsString*);
     /// null = default "[object Name]".
     pub to_string: *const u8,
+    /// Byte offset of the expando-map slot for `dynamic` classes
+    /// (SPECS §3.2); `u32::MAX` = sealed.
+    pub expando_off: u32,
+    /// Padding.
+    pub _pad3: u32,
+}
+
+/// Expando storage: association list preserving insertion order (AS3-ish
+/// enumeration order; small objects dominate).
+pub type PropMap = Vec<(Vec<u16>, VsAny)>;
+
+/// The expando map of a dynamic instance, if the slot was initialized.
+///
+/// # Safety
+/// `obj` live.
+unsafe fn expando<'x>(obj: *const u8) -> Option<&'x mut PropMap> {
+    // SAFETY: caller contract; desc chain static.
+    unsafe {
+        let d = desc_of(obj);
+        if d.expando_off == u32::MAX {
+            return None;
+        }
+        let slot = obj.add(d.expando_off as usize) as *mut *mut PropMap;
+        if (*slot).is_null() {
+            *slot = Box::leak(Box::new(PropMap::new()));
+        }
+        Some(&mut **slot)
+    }
+}
+
+/// Whether the object's class is dynamic.
+pub fn is_dynamic(obj: *const u8) -> bool {
+    if obj.is_null() {
+        return false;
+    }
+    // SAFETY: live object.
+    unsafe { desc_of(obj).expando_off != u32::MAX }
+}
+
+/// Dynamic property read (undefined when absent — §8.6.2.1 on expandos).
+pub fn get_prop(obj: *const u8, name: &[u16]) -> VsAny {
+    // SAFETY: object model contract.
+    match unsafe { expando(obj) } {
+        Some(map) => map
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| *v)
+            .unwrap_or(VsAny::UNDEFINED),
+        None => VsAny::UNDEFINED,
+    }
+}
+
+/// Dynamic property write. Returns false on sealed receivers (caller
+/// raises the ReferenceError).
+pub fn set_prop(obj: *const u8, name: &[u16], value: VsAny) -> bool {
+    // SAFETY: object model contract.
+    match unsafe { expando(obj) } {
+        Some(map) => {
+            if let Some(entry) = map.iter_mut().find(|(k, _)| k == name) {
+                entry.1 = value;
+            } else {
+                map.push((name.to_vec(), value));
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// `name in obj` over expandos.
+pub fn has_prop(obj: *const u8, name: &[u16]) -> bool {
+    // SAFETY: object model contract.
+    unsafe { expando(obj) }.is_some_and(|m| m.iter().any(|(k, _)| k == name))
+}
+
+/// `delete obj.name` (§11.4.1 over expandos).
+pub fn delete_prop(obj: *const u8, name: &[u16]) -> bool {
+    // SAFETY: object model contract.
+    match unsafe { expando(obj) } {
+        Some(map) => {
+            let before = map.len();
+            map.retain(|(k, _)| k != name);
+            map.len() != before
+        }
+        None => false,
+    }
+}
+
+/// Enumeration over expandos: count / key / value at index.
+pub fn prop_count(obj: *const u8) -> usize {
+    // SAFETY: object model contract.
+    unsafe { expando(obj) }.map_or(0, |m| m.len())
+}
+
+/// Key at enumeration index.
+pub fn prop_key_at(obj: *const u8, i: usize) -> Option<Vec<u16>> {
+    // SAFETY: object model contract.
+    unsafe { expando(obj) }.and_then(|m| m.get(i).map(|(k, _)| k.clone()))
+}
+
+/// Value at enumeration index.
+pub fn prop_value_at(obj: *const u8, i: usize) -> VsAny {
+    // SAFETY: object model contract.
+    unsafe { expando(obj) }
+        .and_then(|m| m.get(i).map(|(_, v)| *v))
+        .unwrap_or(VsAny::UNDEFINED)
 }
 
 /// Reads the descriptor of a live object.

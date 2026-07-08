@@ -111,3 +111,56 @@ fn generic_collections() {
 fn closures_and_exceptions() {
     run_golden("closures");
 }
+
+/// The Phase 7 milestone (SPECS §11): a real CLI tool — args, File I/O,
+/// dynamic objects, JSON round trip, Math, callbacks, exit codes.
+#[test]
+fn cli_tool() {
+    let root = workspace_root();
+    let program = root.join("tests/programs/wordfreq.as");
+    let out_dir = std::env::temp_dir().join(format!("vs-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&out_dir).expect("temp dir");
+    let exe = out_dir.join("wordfreq");
+    driver::build(&driver::BuildOptions {
+        input: program,
+        output: Some(exe.clone()),
+        runtime_lib: Some(runtime_lib()),
+    })
+    .unwrap_or_else(|e| panic!("build failed:\n{}", e.rendered.join("\n")));
+    std::fs::write(
+        out_dir.join("input.txt"),
+        "the quick brown fox jumps over the lazy dog, the fox laughs\n",
+    )
+    .expect("fixture");
+
+    // Usage path: exit 2.
+    let usage = Command::new(&exe)
+        .current_dir(&out_dir)
+        .output()
+        .expect("run");
+    assert_eq!(usage.status.code(), Some(2));
+
+    // Real run: relative paths keep the output stable.
+    let output = Command::new(&exe)
+        .current_dir(&out_dir)
+        .args(["input.txt", "report.json"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        stdout,
+        "wrote report.json\ntotal: 12 unique: 9\nthe = 3\nfox = 2\nquick = 1\nsqrt(unique) ~ 3\n"
+    );
+    let json = std::fs::read_to_string(out_dir.join("report.json")).expect("report");
+    assert_eq!(
+        json,
+        "{\"file\":\"input.txt\",\"total\":12,\"unique\":9,\"top\":[{\"word\":\"the\",\"count\":3},{\"word\":\"fox\",\"count\":2},{\"word\":\"quick\",\"count\":1}]}"
+    );
+    let _ = std::fs::remove_dir_all(&out_dir);
+}

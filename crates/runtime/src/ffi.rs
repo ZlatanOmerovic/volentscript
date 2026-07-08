@@ -1628,3 +1628,543 @@ pub unsafe extern "C" fn vs_any_coerce_function(v: *const VsAny) -> *const VsClo
         )),
     }
 }
+
+// --- P7 natives: props, JSON, System, File, misc -------------------------------
+
+use crate::natives;
+
+fn str_arg16(s: *const VsString) -> Vec<u16> {
+    // SAFETY: strings live or null.
+    unsafe { string::deref(s) }
+        .map(|s| s.units().to_vec())
+        .unwrap_or_default()
+}
+
+/// Dynamic property read on a boxed receiver: expandos on dynamic
+/// objects; Array/Vector `length`; sealed objects → ReferenceError.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_get_prop(v: *const VsAny, name: *const VsString, out: *mut VsAny) {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    let name16 = str_arg16(name);
+    let result = match v.tag() {
+        Tag::Object if object::is_dynamic(v.as_object_ptr()) => {
+            object::get_prop(v.as_object_ptr(), &name16)
+        }
+        Tag::Array if name16 == "length".encode_utf16().collect::<Vec<u16>>() => {
+            // SAFETY: array live.
+            VsAny::uint(unsafe { &*v.as_array_ptr() }.data.borrow().len() as u32)
+        }
+        Tag::Vector if name16 == "length".encode_utf16().collect::<Vec<u16>>() => {
+            // SAFETY: vector live.
+            VsAny::uint(unsafe { &*v.as_vector_ptr() }.data.borrow().len() as u32)
+        }
+        Tag::Null | Tag::Undefined => {
+            conv::type_error("property access on null");
+        }
+        _ => exc::throw_error(
+            exc::ErrorKind::Reference,
+            &format!(
+                "property `{}` not found on sealed value (reflective access is Phase 8)",
+                String::from_utf16_lossy(&name16)
+            ),
+        ),
+    };
+    // SAFETY: caller contract.
+    unsafe { *out = result };
+}
+
+/// Dynamic property write.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_set_prop(
+    v: *const VsAny,
+    name: *const VsString,
+    value: *const VsAny,
+) {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    let value = unsafe { *value };
+    let name16 = str_arg16(name);
+    match v.tag() {
+        Tag::Object if object::set_prop(v.as_object_ptr(), &name16, value) => {}
+        Tag::Null | Tag::Undefined => conv::type_error("property write on null"),
+        _ => exc::throw_error(
+            exc::ErrorKind::Reference,
+            &format!(
+                "cannot create property `{}` on a sealed value (SPECS §3.2)",
+                String::from_utf16_lossy(&name16)
+            ),
+        ),
+    }
+}
+
+/// `key in obj` (§11.8.7 over the dynamic universe).
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_has_prop(key: *const VsAny, obj: *const VsAny) -> u32 {
+    // SAFETY: caller contract.
+    let (key, obj) = unsafe { (*key, *obj) };
+    let name: Vec<u16> = conv::any_to_display(key).encode_utf16().collect();
+    let result = match obj.tag() {
+        Tag::Object => object::has_prop(obj.as_object_ptr(), &name),
+        Tag::Array => {
+            let n = conv::any_to_number(key);
+            // SAFETY: array live.
+            n >= 0.0 && (n as usize) < unsafe { &*obj.as_array_ptr() }.data.borrow().len()
+        }
+        Tag::Vector => {
+            let n = conv::any_to_number(key);
+            // SAFETY: vector live.
+            n >= 0.0 && (n as usize) < unsafe { &*obj.as_vector_ptr() }.data.borrow().len()
+        }
+        _ => false,
+    };
+    u32::from(result)
+}
+
+/// `delete obj.key` (§11.4.1).
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_delete_prop(obj: *const VsAny, name: *const VsString) -> u32 {
+    // SAFETY: caller contract.
+    let obj = unsafe { *obj };
+    let name16 = str_arg16(name);
+    u32::from(match obj.tag() {
+        Tag::Object => object::delete_prop(obj.as_object_ptr(), &name16),
+        _ => false,
+    })
+}
+
+/// Index read on a boxed receiver (`o[k]`): Arrays/Vectors by number,
+/// dynamic objects by ToString(key).
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_index_get(v: *const VsAny, key: *const VsAny, out: *mut VsAny) {
+    // SAFETY: caller contract.
+    let (v, key) = unsafe { (*v, *key) };
+    let result = match v.tag() {
+        Tag::Array => {
+            let i = conv::any_to_number(key);
+            // SAFETY: array live.
+            let data = unsafe { &*v.as_array_ptr() }.data.borrow();
+            if i >= 0.0 && (i as usize) < data.len() {
+                data[i as usize]
+            } else {
+                VsAny::UNDEFINED
+            }
+        }
+        Tag::Vector => {
+            let i = conv::any_to_number(key);
+            // SAFETY: vector live.
+            let data = unsafe { &*v.as_vector_ptr() }.data.borrow();
+            if i >= 0.0 && (i as usize) < data.len() {
+                data[i as usize]
+            } else {
+                drop(data);
+                exc::throw_error(exc::ErrorKind::Range, "vector index out of range");
+            }
+        }
+        Tag::Object if object::is_dynamic(v.as_object_ptr()) => {
+            let name: Vec<u16> = conv::any_to_display(key).encode_utf16().collect();
+            object::get_prop(v.as_object_ptr(), &name)
+        }
+        Tag::Null | Tag::Undefined => conv::type_error("index access on null"),
+        _ => VsAny::UNDEFINED,
+    };
+    // SAFETY: caller contract.
+    unsafe { *out = result };
+}
+
+/// Index write on a boxed receiver.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_index_set(v: *const VsAny, key: *const VsAny, value: *const VsAny) {
+    // SAFETY: caller contract.
+    let (v, key, value) = unsafe { (*v, *key, *value) };
+    match v.tag() {
+        Tag::Array => {
+            let arr = v.as_array_ptr();
+            // SAFETY: array live.
+            unsafe { vs_arr_set(arr, conv::any_to_number(key), &value) };
+        }
+        Tag::Vector => {
+            let vec = v.as_vector_ptr();
+            // SAFETY: vector live.
+            unsafe { vs_vec_set(vec, conv::any_to_number(key), &value) };
+        }
+        Tag::Object => {
+            let name: Vec<u16> = conv::any_to_display(key).encode_utf16().collect();
+            if !object::set_prop(v.as_object_ptr(), &name, value) {
+                exc::throw_error(
+                    exc::ErrorKind::Reference,
+                    "cannot create property on a sealed value (SPECS §3.2)",
+                );
+            }
+        }
+        _ => conv::type_error("index write on this value"),
+    }
+}
+
+/// Method call on a boxed receiver: reads the property, invokes it as a
+/// Function bound to the receiver.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_call_prop(
+    v: *const VsAny,
+    name: *const VsString,
+    argc: u32,
+    args: *const VsAny,
+    out: *mut VsAny,
+) {
+    let mut f = VsAny::UNDEFINED;
+    // SAFETY: caller contract.
+    unsafe { vs_any_get_prop(v, name, &mut f) };
+    if f.tag() != Tag::Function {
+        conv::type_error(&format!(
+            "value of property `{}` is not a function",
+            // SAFETY: strings live or null.
+            unsafe { string::deref(name) }
+                .map(|s| s.to_rust())
+                .unwrap_or_default()
+        ));
+    }
+    // SAFETY: caller contract; receiver object passed as `this` when it is
+    // an object.
+    let recv = unsafe { *v };
+    let this = if recv.tag() == Tag::Object {
+        recv.as_object_ptr()
+    } else {
+        std::ptr::null()
+    };
+    // SAFETY: function payload live.
+    unsafe { closure::invoke(f.as_closure_ptr(), this, argc, args, out) };
+}
+
+/// Enumeration over dynamic objects joins the Array/Vector cases.
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_enum_len2(v: *const VsAny) -> i32 {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    match v.tag() {
+        Tag::Object => object::prop_count(v.as_object_ptr()) as i32,
+        // SAFETY: payloads live.
+        _ => unsafe { vs_enum_len(&v) },
+    }
+}
+
+/// Key at index (objects → property name string).
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_enum_key2(v: *const VsAny, index: i32, out: *mut VsAny) {
+    // SAFETY: caller contract.
+    let val = unsafe { *v };
+    let result = match val.tag() {
+        Tag::Object => match object::prop_key_at(val.as_object_ptr(), index as usize) {
+            Some(k) => VsAny::string(VsString::alloc(k)),
+            None => VsAny::UNDEFINED,
+        },
+        _ => VsAny::int(index),
+    };
+    // SAFETY: caller contract.
+    unsafe { *out = result };
+}
+
+/// Value at index.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_enum_value2(v: *const VsAny, index: i32, out: *mut VsAny) {
+    // SAFETY: caller contract.
+    let val = unsafe { *v };
+    match val.tag() {
+        Tag::Object => {
+            let r = object::prop_value_at(val.as_object_ptr(), index as usize);
+            // SAFETY: caller contract.
+            unsafe { *out = r };
+        }
+        // SAFETY: caller contract.
+        _ => unsafe { vs_enum_value(v, index, out) },
+    }
+}
+
+/// Math.min/max pair steps (§15.8.2.11/12: NaN propagates).
+#[unsafe(no_mangle)]
+pub extern "C" fn vs_math_min2(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.min(b)
+    }
+}
+
+/// Pairwise max.
+#[unsafe(no_mangle)]
+pub extern "C" fn vs_math_max2(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.max(b)
+    }
+}
+
+/// Math.random (§15.8.2.14).
+#[unsafe(no_mangle)]
+pub extern "C" fn vs_math_random() -> f64 {
+    natives::random()
+}
+
+/// System.args(): program arguments (excluding the binary name).
+#[unsafe(no_mangle)]
+pub extern "C" fn vs_system_args() -> *const VsArray {
+    let items: Vec<VsAny> = std::env::args()
+        .skip(1)
+        .map(|a| VsAny::string(VsString::from_rust(&a)))
+        .collect();
+    seq::new_array(items)
+}
+
+/// System.exit(code).
+#[unsafe(no_mangle)]
+pub extern "C" fn vs_system_exit(code: i32) -> ! {
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    std::process::exit(code)
+}
+
+/// System.getenv(name) → value or null.
+///
+/// # Safety
+/// Pointer live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_system_getenv(name: *const VsString) -> *const VsString {
+    // SAFETY: caller contract.
+    let name = unsafe { require(name, "getenv") }.to_rust();
+    match std::env::var(&name) {
+        Ok(v) => VsString::from_rust(&v),
+        Err(_) => std::ptr::null(),
+    }
+}
+
+/// System.time() / Date.now(): milliseconds since the epoch.
+#[unsafe(no_mangle)]
+pub extern "C" fn vs_system_time() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(f64::NAN)
+}
+
+/// File.read(path) → contents or null on any error.
+///
+/// # Safety
+/// Pointer live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_file_read(path: *const VsString) -> *const VsString {
+    // SAFETY: caller contract.
+    let path = unsafe { require(path, "File.read") }.to_rust();
+    match std::fs::read_to_string(&path) {
+        Ok(text) => VsString::from_rust(&text),
+        Err(_) => std::ptr::null(),
+    }
+}
+
+/// File.write(path, text) → success.
+///
+/// # Safety
+/// Pointers live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_file_write(path: *const VsString, text: *const VsString) -> u32 {
+    // SAFETY: caller contract.
+    let path = unsafe { require(path, "File.write") }.to_rust();
+    let text = unsafe { string::deref(text) }
+        .map(|s| s.to_rust())
+        .unwrap_or_default();
+    u32::from(std::fs::write(&path, text).is_ok())
+}
+
+/// File.exists(path).
+///
+/// # Safety
+/// Pointer live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_file_exists(path: *const VsString) -> u32 {
+    // SAFETY: caller contract.
+    let path = unsafe { require(path, "File.exists") }.to_rust();
+    u32::from(std::path::Path::new(&path).exists())
+}
+
+/// JSON.stringify.
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_json_stringify(v: *const VsAny) -> *const VsString {
+    // SAFETY: caller contract.
+    // Top-level undefined/Function stringifies to "null" (deviation from
+    // ES5's undefined result — keeps the return type non-nullable).
+    match natives::stringify(unsafe { *v }, 0) {
+        Some(s) => VsString::from_rust(&s),
+        None => VsString::from_rust("null"),
+    }
+}
+
+/// JSON.parse; `object_desc`/`object_size` describe the plain Object
+/// class so parsed objects are real dynamic instances.
+///
+/// # Safety
+/// Pointers live; descriptor static.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_json_parse(
+    text: *const VsString,
+    object_desc: *const VsClassDesc,
+    object_size: u64,
+    out: *mut VsAny,
+) {
+    // SAFETY: caller contract.
+    let text = unsafe { require(text, "JSON.parse") }.to_rust();
+    let make = || {
+        // SAFETY: descriptor/size from codegen.
+        unsafe { vs_alloc_object(object_desc, object_size) as *const u8 }
+    };
+    let mut parser = natives::JsonParser::new(&text);
+    let v = parser.parse(make);
+    // SAFETY: caller contract.
+    unsafe { *out = v };
+}
+
+/// URI/escape functions (§15.1.3, §B.2).
+///
+/// # Safety
+/// Pointer live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_encode_uri_component(s: *const VsString) -> *const VsString {
+    // SAFETY: caller contract.
+    VsString::from_rust(&natives::encode_uri_component(
+        &unsafe { require(s, "encodeURIComponent") }.to_rust(),
+    ))
+}
+
+/// decodeURIComponent.
+///
+/// # Safety
+/// Pointer live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_decode_uri_component(s: *const VsString) -> *const VsString {
+    // SAFETY: caller contract.
+    VsString::from_rust(&natives::decode_uri_component(
+        &unsafe { require(s, "decodeURIComponent") }.to_rust(),
+    ))
+}
+
+/// escape.
+///
+/// # Safety
+/// Pointer live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_escape(s: *const VsString) -> *const VsString {
+    // SAFETY: caller contract.
+    VsString::from_rust(&natives::escape(&unsafe { require(s, "escape") }.to_rust()))
+}
+
+/// unescape.
+///
+/// # Safety
+/// Pointer live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_unescape(s: *const VsString) -> *const VsString {
+    // SAFETY: caller contract.
+    VsString::from_rust(&natives::unescape(
+        &unsafe { require(s, "unescape") }.to_rust(),
+    ))
+}
+
+/// String#replace with a string pattern (§15.5.4.11: first occurrence).
+///
+/// # Safety
+/// Pointers live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_str_replace(
+    this: *const VsString,
+    search: *const VsString,
+    repl: *const VsString,
+) -> *const VsString {
+    // SAFETY: caller contract.
+    let s = unsafe { require(this, "replace") }.to_rust();
+    let search = unsafe { string::deref(search) }
+        .map(|s| s.to_rust())
+        .unwrap_or_default();
+    let repl = unsafe { string::deref(repl) }
+        .map(|s| s.to_rust())
+        .unwrap_or_default();
+    VsString::from_rust(&s.replacen(&search, &repl, 1))
+}
+
+/// Array iteration with callbacks: mode 0 forEach, 1 map, 2 filter,
+/// 3 some, 4 every (§15.4.4.16-20 shapes; callback(item, index, array)).
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_iterate(
+    a: *const VsArray,
+    cb: *const VsClosure,
+    mode: u32,
+    out: *mut VsAny,
+) {
+    // SAFETY: caller contract.
+    let array = unsafe { arr(a, "iterate") };
+    let items = array.data.borrow().clone();
+    let self_any = VsAny::array(a);
+    let mut mapped = Vec::new();
+    let mut filtered = Vec::new();
+    let mut result = VsAny::boolean(mode == 4); // some=false / every=true
+    for (i, item) in items.iter().enumerate() {
+        let args = [*item, VsAny::number(i as f64), self_any];
+        let mut r = VsAny::UNDEFINED;
+        // SAFETY: callback live.
+        unsafe { closure::invoke(cb, std::ptr::null(), 3, args.as_ptr(), &mut r) };
+        match (mode, conv::any_truthy(r)) {
+            (1, _) => mapped.push(r),
+            (2, true) => filtered.push(*item),
+            (3, true) => {
+                result = VsAny::boolean(true);
+                break;
+            }
+            (4, false) => {
+                result = VsAny::boolean(false);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let final_v = match mode {
+        1 => VsAny::array(seq::new_array(mapped)),
+        2 => VsAny::array(seq::new_array(filtered)),
+        3 | 4 => result,
+        _ => VsAny::UNDEFINED,
+    };
+    // SAFETY: caller contract.
+    unsafe { *out = final_v };
+}

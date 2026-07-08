@@ -197,6 +197,16 @@ impl Checker<'_> {
                 }
             }
             None => {
+                // Dynamic classes accept unknown members as expandos
+                // (SPECS §3.2) — typed `*`, resolved at runtime.
+                if self.registry.classes[class.0 as usize].is_dynamic {
+                    let boxed = self.coerce_to_any(object);
+                    return TExpr {
+                        ty: Ty::Any,
+                        span,
+                        kind: TExprKind::Member(Box::new(boxed), name.to_string()),
+                    };
+                }
                 self.error(
                     ErrorCode::UNKNOWN_PROPERTY,
                     format!(
@@ -302,6 +312,20 @@ impl Checker<'_> {
                 self.error_expr(span)
             }
             None => {
+                if self.registry.classes[class.0 as usize].is_dynamic {
+                    let boxed = self.coerce_to_any(object);
+                    let value = self.coerce_to_any(value);
+                    let ty = value.ty;
+                    return TExpr {
+                        ty,
+                        span,
+                        kind: TExprKind::MemberSet(
+                            Box::new(boxed),
+                            name.to_string(),
+                            Box::new(value),
+                        ),
+                    };
+                }
                 self.error(
                     ErrorCode::UNKNOWN_PROPERTY,
                     format!(
@@ -876,6 +900,92 @@ impl Checker<'_> {
             }
         }
         None
+    }
+
+    /// Native static member read (Math.PI etc.).
+    pub(crate) fn native_static_read(
+        &mut self,
+        class: &str,
+        name: &str,
+        span: Span,
+    ) -> Option<TExpr> {
+        if !crate::builtins::is_native_class(class) {
+            return None;
+        }
+        if let Some(consts) = crate::builtins::native_consts(class) {
+            if let Some(c) = consts.iter().find(|c| c.name == name) {
+                return Some(TExpr {
+                    ty: Ty::Number,
+                    span,
+                    kind: TExprKind::Number(c.value),
+                });
+            }
+        }
+        if let Some(methods) = crate::builtins::native_methods(class) {
+            if methods.iter().any(|m| m.name == name) {
+                self.error(
+                    ErrorCode::NOT_IMPLEMENTED,
+                    "native static methods as values — Phase 8",
+                    span,
+                );
+                return Some(self.error_expr(span));
+            }
+        }
+        self.error(
+            ErrorCode::UNKNOWN_PROPERTY,
+            format!("no static `{name}` on `{class}`"),
+            span,
+        );
+        Some(self.error_expr(span))
+    }
+
+    /// Native static call (Math.sqrt(x), System.exit(0), ...).
+    pub(crate) fn native_static_call(
+        &mut self,
+        class: &str,
+        name: &str,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Option<TExpr> {
+        let methods = crate::builtins::native_methods(class)?;
+        let Some(m) = methods.iter().find(|m| m.name == name) else {
+            self.error(
+                ErrorCode::UNKNOWN_PROPERTY,
+                format!("no static method `{name}` on `{class}`"),
+                span,
+            );
+            return Some(self.error_expr(span));
+        };
+        self.arity(
+            name,
+            args.len(),
+            m.sig.required,
+            m.sig.params.len(),
+            m.sig.variadic,
+            span,
+        );
+        let checked: Vec<TExpr> = args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let c = self.expr(a);
+                // Variadic tails share the last declared type (Math.min).
+                let ty = m
+                    .sig
+                    .params
+                    .get(i)
+                    .or(m.sig.params.last())
+                    .copied()
+                    .unwrap_or(Ty::Any);
+                self.coerce(c, ty, a.span)
+            })
+            .collect();
+        // Native String returns may be null (File.read, System.getenv).
+        Some(TExpr {
+            ty: m.sig.ret,
+            span,
+            kind: TExprKind::CallNative(m.func, checked),
+        })
     }
 
     /// Resolves a bare identifier as a class reference (static receiver).

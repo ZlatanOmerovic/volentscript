@@ -91,6 +91,11 @@ impl Checker<'_> {
                     self.expr_nullable(a) || self.expr_nullable(b)
                 }
             }
+            // Natives: only File.read / System.getenv return null.
+            TExprKind::CallNative(nf, _) => matches!(
+                nf,
+                crate::builtins::NativeFn::FileRead | crate::builtins::NativeFn::SystemGetenv
+            ),
             TExprKind::Coerce(_, v) => self.expr_nullable(v),
             TExprKind::Comma(_, b) => self.expr_nullable(b),
             // Anything coming out of `*` or unknown sources: assume

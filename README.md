@@ -62,18 +62,18 @@ and `runtime`.
 
 ## Status
 
-Phases 0–6 done: scaffold + CI (P0); lexer + parser (P1); sema with typed
-AST (P2); native compilation (P3); classes/interfaces/inheritance (P4);
-reified generics + null safety + Array + Vector.<T> (P5); **closures,
-exceptions, remaining control flow** (P6) — closure conversion with heap
-cells and multi-level capture, Function values (function expressions,
-bound method closures per SPECS §3.7, call/apply, sort comparators),
-try/catch/finally on a documented setjmp scheme with typed catch dispatch
-and finally on every exit path, the Error hierarchy as a compiled-in
-prelude (runtime TypeError/RangeError are catchable objects), and
-for..in / for each..in over Arrays and Vectors.
+Phases 0–7 done. The language surface: classes/interfaces/inheritance with
+native vtable + interface dispatch, reified generics, null safety (`T?`),
+closures and Function values, try/catch/finally with a real Error
+hierarchy, Array + `Vector.<T>` + dynamic objects (expandos, `in`,
+`delete`, object literals), `for..in`/`for each..in`, and a P7 stdlib:
+Math, JSON (stringify/parse), Array iteration callbacks
+(map/filter/forEach/some/every), `String#replace`, URI encoding, plus the
+CLI runtime — `System.args/exit/getenv/time`, `File.read/write/exists`,
+`Date.now()`.
 
-`vigorscript run file.as` compiles and executes native binaries for
-closure- and exception-heavy programs. Remaining gates: dynamic property
-access and stdlib breadth (P7); generic functions, namespaces, optimizing
-passes (P8). Phase plan: SPECS §11.
+`vigorscript build tool.as` produces a native binary for real CLI tools
+(the milestone golden test is a word-frequency tool with a JSON report).
+Remaining (P8+): RegExp, Date instances, generic functions, runtime
+namespaces, GC (currently leak-only), optimization passes, Linux
+cross-compile hardening. Phase plan: SPECS §11.

@@ -14,6 +14,10 @@ mod lower;
 
 pub use lower::lower;
 
+/// Re-exported native-function identity (sema's table drives typing; the
+/// backend drives emission).
+pub use sema::NativeFn as SemaNativeFn;
+
 use span::Span;
 
 /// A backend-level type. `Any` is the boxed dynamic value (`*`);
@@ -93,6 +97,8 @@ pub struct Class {
     pub ifaces: Vec<(u32, Vec<FnId>)>,
     /// `toString():String` override for RTTI display, if any.
     pub to_string: Option<FnId>,
+    /// `dynamic class` (SPECS §3.2): instances carry an expando slot.
+    pub is_dynamic: bool,
     /// Static field storage types.
     pub statics: Vec<Ty>,
 }
@@ -228,6 +234,10 @@ pub enum Builtin {
     ParseFloat,
     IsNaN,
     IsFinite,
+    EncodeUriComponent,
+    DecodeUriComponent,
+    Escape,
+    Unescape,
 }
 
 /// String instance methods with runtime implementations (SPECS §6, P3 set;
@@ -237,6 +247,9 @@ pub enum Builtin {
 pub enum StrMethod {
     /// `split(delim, limit)` → Array (§15.5.4.14).
     Split,
+    /// `replace(search, repl)` — string pattern, first occurrence
+    /// (§15.5.4.11; regex patterns are P8).
+    Replace,
     CharAt,
     CharCodeAt,
     IndexOf,
@@ -272,6 +285,13 @@ pub enum ArrMethod {
     Join,
     Reverse,
     Sort,
+    ForEach,
+    Map,
+    Filter,
+    /// `some(callback)` (named to avoid clashing with Option::Some in
+    /// glob-importing backends).
+    SomeM,
+    Every,
 }
 
 /// Vector methods.
@@ -487,4 +507,21 @@ pub enum ExprKind {
     EnumLen(Box<Expr>),
     EnumKey(Box<Expr>, Box<Expr>),
     EnumValue(Box<Expr>, Box<Expr>),
+    /// `{a: 1, ...}` — a fresh dynamic Object instance (SPECS §3.2).
+    ObjectLit(Vec<(String, Expr)>),
+    /// Dynamic property ops on boxed receivers.
+    PropGet(Box<Expr>, String),
+    PropSet(Box<Expr>, String, Box<Expr>),
+    AnyIndexGet(Box<Expr>, Box<Expr>),
+    AnyIndexSet(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// `o.m(args)` through a boxed receiver (property → Function → call
+    /// bound to the receiver).
+    PropCall(Box<Expr>, String, Vec<Expr>),
+    /// `key in obj` (§11.8.7).
+    HasProp(Box<Expr>, Box<Expr>),
+    /// `delete obj.name` (§11.4.1).
+    DeleteProp(Box<Expr>, String),
+    /// Native static call (Math/System/File/JSON/Date; emission strategy in
+    /// the backend).
+    CallNative(SemaNativeFn, Vec<Expr>),
 }

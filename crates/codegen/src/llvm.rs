@@ -152,6 +152,8 @@ struct ClassArt<'ctx> {
     instance_ty: StructType<'ctx>,
     /// ABI size of an instance in bytes.
     size: u64,
+    /// Expando slot byte offset (u32::MAX = sealed).
+    expando_off: u32,
     /// Static field globals.
     statics: Vec<PointerValue<'ctx>>,
 }
@@ -1402,6 +1404,194 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 self.expr(l);
                 self.expr(r)
             }
+            ExprKind::ObjectLit(props) => {
+                // A fresh dynamic Object instance (class 0), props via the
+                // runtime expando path.
+                let art = &cx.classes[0];
+                let (rtti, size) = (art.rtti, art.size);
+                let alloc = cx.runtime_fn(
+                    "vs_alloc_object",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.context.i64_type().into()],
+                );
+                let obj = self
+                    .cx
+                    .builder
+                    .build_call(
+                        alloc,
+                        &[
+                            rtti.into(),
+                            cx.context.i64_type().const_int(size, false).into(),
+                        ],
+                        "objlit",
+                    )
+                    .expect("call")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("value")
+                    .into_pointer_value();
+                let boxed = self.box_value(Val::Obj(obj));
+                let setp = cx.runtime_fn(
+                    "vs_any_set_prop",
+                    None,
+                    &[cx.ptr().into(), cx.ptr().into(), cx.ptr().into()],
+                );
+                for (name, value) in props {
+                    let key = self.const_string(name);
+                    let v = self.expr(value);
+                    let vboxed = match v {
+                        Val::Any(p) => p,
+                        other => self.box_value(other),
+                    };
+                    self.cx
+                        .builder
+                        .build_call(setp, &[boxed.into(), key.into(), vboxed.into()], "")
+                        .expect("call");
+                }
+                // Literals are `*`-typed (sema): hand back the box.
+                Val::Any(boxed)
+            }
+            ExprKind::PropGet(recv, name) => {
+                let p = self.as_any_ptr(recv);
+                let key = self.const_string(name);
+                let out = self.entry_alloca(cx.any_ty, "prop");
+                let f = cx.runtime_fn(
+                    "vs_any_get_prop",
+                    None,
+                    &[cx.ptr().into(), cx.ptr().into(), cx.ptr().into()],
+                );
+                self.cx
+                    .builder
+                    .build_call(f, &[p.into(), key.into(), out.into()], "")
+                    .expect("call");
+                self.unbox_any_ptr(out, e.ty)
+            }
+            ExprKind::PropSet(recv, name, value) => {
+                let p = self.as_any_ptr(recv);
+                let key = self.const_string(name);
+                let v = self.expr(value);
+                let vboxed = match v {
+                    Val::Any(vp) => vp,
+                    other => self.box_value(other),
+                };
+                let f = cx.runtime_fn(
+                    "vs_any_set_prop",
+                    None,
+                    &[cx.ptr().into(), cx.ptr().into(), cx.ptr().into()],
+                );
+                self.cx
+                    .builder
+                    .build_call(f, &[p.into(), key.into(), vboxed.into()], "")
+                    .expect("call");
+                v
+            }
+            ExprKind::AnyIndexGet(recv, key) => {
+                let p = self.as_any_ptr(recv);
+                let k = self.as_any_ptr(key);
+                let out = self.entry_alloca(cx.any_ty, "idx");
+                let f = cx.runtime_fn(
+                    "vs_any_index_get",
+                    None,
+                    &[cx.ptr().into(), cx.ptr().into(), cx.ptr().into()],
+                );
+                self.cx
+                    .builder
+                    .build_call(f, &[p.into(), k.into(), out.into()], "")
+                    .expect("call");
+                self.unbox_any_ptr(out, e.ty)
+            }
+            ExprKind::AnyIndexSet(recv, key, value) => {
+                let p = self.as_any_ptr(recv);
+                let k = self.as_any_ptr(key);
+                let v = self.expr(value);
+                let vboxed = match v {
+                    Val::Any(vp) => vp,
+                    other => self.box_value(other),
+                };
+                let f = cx.runtime_fn(
+                    "vs_any_index_set",
+                    None,
+                    &[cx.ptr().into(), cx.ptr().into(), cx.ptr().into()],
+                );
+                self.cx
+                    .builder
+                    .build_call(f, &[p.into(), k.into(), vboxed.into()], "")
+                    .expect("call");
+                v
+            }
+            ExprKind::PropCall(recv, name, args) => {
+                let p = self.as_any_ptr(recv);
+                let key = self.const_string(name);
+                let staged: Vec<Option<&mir::Expr>> = args.iter().map(Some).collect();
+                let buf = self.stage_any_array_opt(&staged);
+                let out = self.entry_alloca(cx.any_ty, "pcall");
+                let f = cx.runtime_fn(
+                    "vs_any_call_prop",
+                    None,
+                    &[
+                        cx.ptr().into(),
+                        cx.ptr().into(),
+                        cx.context.i32_type().into(),
+                        cx.ptr().into(),
+                        cx.ptr().into(),
+                    ],
+                );
+                let n = cx.context.i32_type().const_int(args.len() as u64, false);
+                self.cx
+                    .builder
+                    .build_call(
+                        f,
+                        &[p.into(), key.into(), n.into(), buf.into(), out.into()],
+                        "",
+                    )
+                    .expect("call");
+                self.unbox_any_ptr(out, e.ty)
+            }
+            ExprKind::HasProp(key, obj) => {
+                let k = self.as_any_ptr(key);
+                let o = self.as_any_ptr(obj);
+                let f = cx.runtime_fn(
+                    "vs_any_has_prop",
+                    Some(cx.context.i32_type().into()),
+                    &[cx.ptr().into(), cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[k.into(), o.into()], "hasp")
+                    .expect("call");
+                Val::Bool(
+                    self.nonzero(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("value")
+                            .into_int_value(),
+                    ),
+                )
+            }
+            ExprKind::DeleteProp(obj, name) => {
+                let o = self.as_any_ptr(obj);
+                let key = self.const_string(name);
+                let f = cx.runtime_fn(
+                    "vs_any_delete_prop",
+                    Some(cx.context.i32_type().into()),
+                    &[cx.ptr().into(), cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[o.into(), key.into()], "delp")
+                    .expect("call");
+                Val::Bool(
+                    self.nonzero(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("value")
+                            .into_int_value(),
+                    ),
+                )
+            }
+            ExprKind::CallNative(nf, args) => self.call_native(*nf, args, e.ty),
             ExprKind::CaptureGet(i) => {
                 let cell = self.capture_cell(*i);
                 let copy = self.entry_alloca(cx.any_ty, "capval");
@@ -1489,7 +1679,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             ExprKind::EnumLen(v) => {
                 let p = self.as_any_ptr(v);
                 let f = cx.runtime_fn(
-                    "vs_enum_len",
+                    "vs_enum_len2",
                     Some(cx.context.i32_type().into()),
                     &[cx.ptr().into()],
                 );
@@ -1972,7 +2162,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
         let vt = self
             .cx
             .builder
-            .build_struct_gep(rtti_ty, desc, 8, "vt")
+            .build_struct_gep(rtti_ty, desc, 10, "vt")
             .expect("gep");
         let slot_ptr = unsafe {
             self.cx.builder.build_in_bounds_gep(
@@ -3367,6 +3557,30 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                         .into_float_value(),
                 )
             }
+            Builtin::EncodeUriComponent
+            | Builtin::DecodeUriComponent
+            | Builtin::Escape
+            | Builtin::Unescape => {
+                let name = match b {
+                    Builtin::EncodeUriComponent => "vs_encode_uri_component",
+                    Builtin::DecodeUriComponent => "vs_decode_uri_component",
+                    Builtin::Escape => "vs_escape",
+                    _ => "vs_unescape",
+                };
+                let s = self.str_arg(&args[0]);
+                let f = cx.runtime_fn(name, Some(cx.ptr().into()), &[cx.ptr().into()]);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[s.into()], "uri")
+                    .expect("call");
+                Val::Str(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
             Builtin::IsNaN => {
                 let v = self.num_arg(&args[0]);
                 // NaN is the only value unordered with itself.
@@ -3418,6 +3632,27 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
     fn str_method(&mut self, m: StrMethod, recv: &mir::Expr, args: &[mir::Expr]) -> Val<'ctx> {
         let cx = self.cx;
         let this = self.str_arg(recv);
+        if m == StrMethod::Replace {
+            let this = self.str_arg(recv);
+            let search = self.str_arg(&args[0]);
+            let repl = self.str_arg(&args[1]);
+            let f = cx.runtime_fn(
+                "vs_str_replace",
+                Some(cx.ptr().into()),
+                &[cx.ptr().into(), cx.ptr().into(), cx.ptr().into()],
+            );
+            let call = self
+                .cx
+                .builder
+                .build_call(f, &[this.into(), search.into(), repl.into()], "repl")
+                .expect("call");
+            return Val::Str(
+                call.try_as_basic_value()
+                    .basic()
+                    .expect("value")
+                    .into_pointer_value(),
+            );
+        }
         if m == StrMethod::Split {
             let this = self.str_arg(recv);
             let delim = self.str_arg(&args[0]);
@@ -3444,7 +3679,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             );
         }
         let (name, arg_kinds, ret_str): (&str, &[ArgKind], bool) = match m {
-            StrMethod::Split => unreachable!("handled above"),
+            StrMethod::Split | StrMethod::Replace => unreachable!("handled above"),
             StrMethod::CharAt => ("vs_str_char_at", &[ArgKind::Num], true),
             StrMethod::CharCodeAt => ("vs_str_char_code_at", &[ArgKind::Num], false),
             StrMethod::IndexOf => ("vs_str_index_of", &[ArgKind::Str, ArgKind::Num], false),
@@ -3890,6 +4125,73 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                         .into_pointer_value(),
                 )
             }
+            ForEach | Map | Filter | SomeM | Every => {
+                let cb = match self.expr(&args[0]) {
+                    Val::Fun(c) => c,
+                    Val::Any(pp) => {
+                        let f = cx.runtime_fn(
+                            "vs_any_coerce_function",
+                            Some(cx.ptr().into()),
+                            &[cx.ptr().into()],
+                        );
+                        self.cx
+                            .builder
+                            .build_call(f, &[pp.into()], "cb")
+                            .expect("call")
+                            .try_as_basic_value()
+                            .basic()
+                            .expect("value")
+                            .into_pointer_value()
+                    }
+                    _ => unreachable!("callback type"),
+                };
+                let mode = i32t.const_int(
+                    match m {
+                        ForEach => 0,
+                        Map => 1,
+                        Filter => 2,
+                        SomeM => 3,
+                        _ => 4,
+                    },
+                    false,
+                );
+                let out = self.entry_alloca(cx.any_ty, "iter");
+                let f = cx.runtime_fn(
+                    "vs_arr_iterate",
+                    None,
+                    &[
+                        cx.ptr().into(),
+                        cx.ptr().into(),
+                        i32t.into(),
+                        cx.ptr().into(),
+                    ],
+                );
+                self.cx
+                    .builder
+                    .build_call(f, &[p.into(), cb.into(), mode.into(), out.into()], "")
+                    .expect("call");
+                match m {
+                    ForEach => Val::Void,
+                    Map | Filter => self.unbox_any_ptr(out, Ty::Array),
+                    _ => {
+                        let f =
+                            cx.runtime_fn("vs_any_truthy", Some(i32t.into()), &[cx.ptr().into()]);
+                        let call = self
+                            .cx
+                            .builder
+                            .build_call(f, &[out.into()], "b")
+                            .expect("call");
+                        Val::Bool(
+                            self.nonzero(
+                                call.try_as_basic_value()
+                                    .basic()
+                                    .expect("value")
+                                    .into_int_value(),
+                            ),
+                        )
+                    }
+                }
+            }
             Sort if !args.is_empty() => {
                 let cmp = match self.expr(&args[0]) {
                     Val::Fun(c) => c,
@@ -4110,11 +4412,21 @@ fn build_class_artifacts<'ctx>(
     // referenced regardless of declaration order.
     let mut arts: Vec<(ClassArt, inkwell::values::GlobalValue)> = Vec::new();
     for (index, class) in program.classes.iter().enumerate() {
-        let slot_tys: Vec<BasicTypeEnum> = std::iter::once(ptr.into())
+        let mut slot_tys: Vec<BasicTypeEnum> = std::iter::once(ptr.into())
             .chain(class.slots.iter().map(|&t| cx.basic_ty(t)))
             .collect();
+        if class.is_dynamic {
+            // Hidden expando-map slot (SPECS §3.2 dynamic classes).
+            slot_tys.push(ptr.into());
+        }
         let instance_ty = cx.context.struct_type(&slot_tys, false);
         let size = td.get_abi_size(&instance_ty);
+        let expando_off: u32 = if class.is_dynamic {
+            td.offset_of_element(&instance_ty, (slot_tys.len() - 1) as u32)
+                .unwrap_or(0) as u32
+        } else {
+            u32::MAX
+        };
         let vtable_ty = ptr.array_type(class.vtable.len() as u32);
         let rtti_ty = cx.context.struct_type(
             &[
@@ -4126,6 +4438,8 @@ fn build_class_artifacts<'ctx>(
                 i32t.into(),      // pad2
                 ptr.into(),       // ifaces
                 ptr.into(),       // to_string
+                i32t.into(),      // expando byte offset (u32::MAX = sealed)
+                i32t.into(),      // pad3
                 vtable_ty.into(), // vtable
             ],
             false,
@@ -4155,6 +4469,7 @@ fn build_class_artifacts<'ctx>(
                 rtti_ty,
                 instance_ty,
                 size,
+                expando_off,
                 statics,
             },
             global,
@@ -4245,6 +4560,8 @@ fn build_class_artifacts<'ctx>(
             i32t.const_zero().into(),
             ifaces_ptr.into(),
             to_string_ptr.into(),
+            i32t.const_int(u64::from(art.expando_off), false).into(),
+            i32t.const_zero().into(),
             ptr.const_array(&vtable_entries).into(),
         ]);
         global.set_initializer(&init);
@@ -4454,6 +4771,313 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
     }
 }
 
+impl<'a, 'ctx> FnCx<'a, 'ctx> {
+    /// A runtime string from a compile-time constant.
+    fn const_string(&mut self, s: &str) -> PointerValue<'ctx> {
+        let cx = self.cx;
+        let global = self
+            .cx
+            .builder
+            .build_global_string_ptr(s, "cstr")
+            .expect("global");
+        let f = cx.runtime_fn(
+            "vs_string_from_utf8",
+            Some(cx.ptr().into()),
+            &[cx.ptr().into(), cx.context.i32_type().into()],
+        );
+        let len = cx.context.i32_type().const_int(s.len() as u64, false);
+        self.cx
+            .builder
+            .build_call(f, &[global.as_pointer_value().into(), len.into()], "cs")
+            .expect("call")
+            .try_as_basic_value()
+            .basic()
+            .expect("value")
+            .into_pointer_value()
+    }
+
+    /// Native static dispatch (SPECS §6 P7 surfaces). Math routes to libm /
+    /// folded pairs; the rest are runtime calls.
+    fn call_native(&mut self, nf: mir::SemaNativeFn, args: &[mir::Expr], ret: Ty) -> Val<'ctx> {
+        use mir::SemaNativeFn as N;
+        let cx = self.cx;
+        let f64t = cx.context.f64_type();
+        let libm1 = |name: &str| name.to_string();
+        match nf {
+            N::MathAbs
+            | N::MathCeil
+            | N::MathFloor
+            | N::MathSqrt
+            | N::MathExp
+            | N::MathLog
+            | N::MathSin
+            | N::MathCos
+            | N::MathTan
+            | N::MathAsin
+            | N::MathAcos
+            | N::MathAtan => {
+                let name = match nf {
+                    N::MathAbs => libm1("fabs"),
+                    N::MathCeil => libm1("ceil"),
+                    N::MathFloor => libm1("floor"),
+                    N::MathSqrt => libm1("sqrt"),
+                    N::MathExp => libm1("exp"),
+                    N::MathLog => libm1("log"),
+                    N::MathSin => libm1("sin"),
+                    N::MathCos => libm1("cos"),
+                    N::MathTan => libm1("tan"),
+                    N::MathAsin => libm1("asin"),
+                    N::MathAcos => libm1("acos"),
+                    _ => libm1("atan"),
+                };
+                let x = self.num_arg(&args[0]);
+                let f = cx.runtime_fn(&name, Some(f64t.into()), &[f64t.into()]);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[x.into()], "m")
+                    .expect("call");
+                Val::Num(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_float_value(),
+                )
+            }
+            N::MathPow | N::MathAtan2 => {
+                let name = if nf == N::MathPow { "pow" } else { "atan2" };
+                let a = self.num_arg(&args[0]);
+                let b = self.num_arg(&args[1]);
+                let f = cx.runtime_fn(name, Some(f64t.into()), &[f64t.into(), f64t.into()]);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[a.into(), b.into()], "m2")
+                    .expect("call");
+                Val::Num(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_float_value(),
+                )
+            }
+            // §15.8.2.15: round = floor(x + 0.5).
+            N::MathRound => {
+                let x = self.num_arg(&args[0]);
+                let half = f64t.const_float(0.5);
+                let sum = self.cx.builder.build_float_add(x, half, "rh").expect("add");
+                let f = cx.runtime_fn("floor", Some(f64t.into()), &[f64t.into()]);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[sum.into()], "round")
+                    .expect("call");
+                Val::Num(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_float_value(),
+                )
+            }
+            // §15.8.2.11/12: fold pairwise, NaN propagates (runtime pair fn).
+            N::MathMin | N::MathMax => {
+                let name = if nf == N::MathMin {
+                    "vs_math_min2"
+                } else {
+                    "vs_math_max2"
+                };
+                let f = cx.runtime_fn(name, Some(f64t.into()), &[f64t.into(), f64t.into()]);
+                let mut acc = self.num_arg(&args[0]);
+                for a in &args[1..] {
+                    let b = self.num_arg(a);
+                    acc = self
+                        .cx
+                        .builder
+                        .build_call(f, &[acc.into(), b.into()], "mm")
+                        .expect("call")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_float_value();
+                }
+                Val::Num(acc)
+            }
+            N::MathRandom => {
+                let f = cx.runtime_fn("vs_math_random", Some(f64t.into()), &[]);
+                let call = self.cx.builder.build_call(f, &[], "rnd").expect("call");
+                Val::Num(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_float_value(),
+                )
+            }
+            N::SystemArgs => {
+                let f = cx.runtime_fn("vs_system_args", Some(cx.ptr().into()), &[]);
+                let call = self.cx.builder.build_call(f, &[], "argv").expect("call");
+                Val::Arr(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            N::SystemExit => {
+                let code = match self.expr(&args[0]) {
+                    Val::Int(i) | Val::UInt(i) => i,
+                    _ => unreachable!("exit code"),
+                };
+                let f = cx.runtime_fn("vs_system_exit", None, &[cx.context.i32_type().into()]);
+                self.cx
+                    .builder
+                    .build_call(f, &[code.into()], "")
+                    .expect("call");
+                self.cx.builder.build_unreachable().expect("unreachable");
+                let dead = self.new_block("after.exit");
+                self.cx.builder.position_at_end(dead);
+                Val::Void
+            }
+            N::SystemGetenv => {
+                let name = self.str_arg(&args[0]);
+                let f = cx.runtime_fn(
+                    "vs_system_getenv",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[name.into()], "env")
+                    .expect("call");
+                Val::Str(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            N::SystemTime | N::DateNow => {
+                let f = cx.runtime_fn("vs_system_time", Some(f64t.into()), &[]);
+                let call = self.cx.builder.build_call(f, &[], "ms").expect("call");
+                Val::Num(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_float_value(),
+                )
+            }
+            N::FileRead => {
+                let path = self.str_arg(&args[0]);
+                let f = cx.runtime_fn("vs_file_read", Some(cx.ptr().into()), &[cx.ptr().into()]);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[path.into()], "fr")
+                    .expect("call");
+                Val::Str(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            N::FileWrite => {
+                let path = self.str_arg(&args[0]);
+                let text = self.str_arg(&args[1]);
+                let f = cx.runtime_fn(
+                    "vs_file_write",
+                    Some(cx.context.i32_type().into()),
+                    &[cx.ptr().into(), cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[path.into(), text.into()], "fw")
+                    .expect("call");
+                Val::Bool(
+                    self.nonzero(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("value")
+                            .into_int_value(),
+                    ),
+                )
+            }
+            N::FileExists => {
+                let path = self.str_arg(&args[0]);
+                let f = cx.runtime_fn(
+                    "vs_file_exists",
+                    Some(cx.context.i32_type().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[path.into()], "fe")
+                    .expect("call");
+                Val::Bool(
+                    self.nonzero(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("value")
+                            .into_int_value(),
+                    ),
+                )
+            }
+            N::JsonStringify => {
+                let v = self.as_any_ptr(&args[0]);
+                let f = cx.runtime_fn(
+                    "vs_json_stringify",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[v.into()], "js")
+                    .expect("call");
+                Val::Str(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            N::JsonParse => {
+                let text = self.str_arg(&args[0]);
+                let art = &cx.classes[0];
+                let (rtti, size) = (art.rtti, art.size);
+                let out = self.entry_alloca(cx.any_ty, "parsed");
+                let f = cx.runtime_fn(
+                    "vs_json_parse",
+                    None,
+                    &[
+                        cx.ptr().into(),
+                        cx.ptr().into(),
+                        cx.context.i64_type().into(),
+                        cx.ptr().into(),
+                    ],
+                );
+                self.cx
+                    .builder
+                    .build_call(
+                        f,
+                        &[
+                            text.into(),
+                            rtti.into(),
+                            cx.context.i64_type().const_int(size, false).into(),
+                            out.into(),
+                        ],
+                        "",
+                    )
+                    .expect("call");
+                let _ = ret;
+                Val::Any(out)
+            }
+        }
+    }
+}
+
 /// What a boxed-ABI wrapper forwards to.
 enum WrapTarget {
     Direct(mir::FnId),
@@ -4627,7 +5251,7 @@ fn build_wrapper<'ctx>(
             let rtti_ty = cx.classes[class as usize].rtti_ty;
             let vt = cx
                 .builder
-                .build_struct_gep(rtti_ty, desc, 8, "vt")
+                .build_struct_gep(rtti_ty, desc, 10, "vt")
                 .expect("gep");
             let slot_ptr = unsafe {
                 cx.builder.build_in_bounds_gep(
