@@ -47,6 +47,9 @@ enum Command {
         /// Optimization level (0-3)
         #[arg(short = 'O', long = "opt", default_value = "2")]
         opt: u8,
+        /// Arguments passed to the program (System.args())
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Parse a .vlt file and print its AST (compiler development aid)
     Parse {
@@ -65,19 +68,20 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let (input, output, runtime_lib, opt, target, and_run) = match cli.command {
+    let (input, output, runtime_lib, opt, target, run_args) = match cli.command {
         Command::Build {
             input,
             output,
             runtime_lib,
             opt,
             target,
-        } => (input, output, runtime_lib, opt, target, false),
+        } => (input, output, runtime_lib, opt, target, None),
         Command::Run {
             input,
             runtime_lib,
             opt,
-        } => (input, None, runtime_lib, opt, None, true),
+            args,
+        } => (input, None, runtime_lib, opt, None, Some(args)),
         Command::Parse { input } => {
             return match driver::parse_dump(&input) {
                 Ok(dump) => {
@@ -116,8 +120,8 @@ fn main() -> ExitCode {
             _ => driver::OptLevel::O2,
         },
     };
-    if and_run {
-        match driver::run(&opts) {
+    if let Some(run_args) = run_args {
+        match driver::run(&opts, &run_args) {
             Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
             Err(errors) => report(errors),
         }

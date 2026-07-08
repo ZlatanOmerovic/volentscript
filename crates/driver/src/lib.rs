@@ -269,7 +269,7 @@ pub fn build(opts: &BuildOptions) -> Result<PathBuf, Errors> {
 }
 
 /// Builds and immediately runs; returns the program's exit code.
-pub fn run(opts: &BuildOptions) -> Result<i32, Errors> {
+pub fn run(opts: &BuildOptions, args: &[String]) -> Result<i32, Errors> {
     let exe = build(opts)?;
     let exe = if exe.is_absolute() {
         exe
@@ -277,6 +277,7 @@ pub fn run(opts: &BuildOptions) -> Result<i32, Errors> {
         Path::new(".").join(exe)
     };
     let status = Command::new(&exe)
+        .args(args)
         .status()
         .map_err(|e| Errors::message(format!("cannot run `{}`: {e}", exe.display())))?;
     Ok(status.code().unwrap_or(1))
