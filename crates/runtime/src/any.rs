@@ -19,7 +19,7 @@ pub enum Tag {
     Object = 7,
     /// Array; payload = VsArray pointer.
     Array = 8,
-    /// Vector.<T>; payload = VsVector pointer.
+    /// `Vector.<T>`; payload = VsVector pointer.
     Vector = 9,
     /// Function value; payload = VsClosure pointer.
     Function = 10,

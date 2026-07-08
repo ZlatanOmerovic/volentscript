@@ -31,7 +31,7 @@ pub enum OptLevel {
 }
 
 impl OptLevel {
-    /// The new-pass-manager pipeline string for [`inkwell`'s]
+    /// The new-pass-manager pipeline string for inkwell's
     /// `Module::run_passes` (same grammar as `opt -passes=`).
     pub fn pipeline(self) -> &'static str {
         match self {

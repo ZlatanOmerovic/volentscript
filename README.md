@@ -60,103 +60,69 @@ Layering: frontend crates never depend on `codegen`; `inkwell` types never
 appear above `codegen`. `#![forbid(unsafe_code)]` everywhere except `codegen`
 and `runtime`.
 
-## Status
+## Status: v1 complete (0.1.0)
 
-Phases 0–8 done. The language surface: classes/interfaces/inheritance with
-native vtable + interface dispatch, reified generics, null safety (`T?`),
-closures and Function values, try/catch/finally with a real Error
-hierarchy, Array + `Vector.<T>` + dynamic objects (expandos, `in`,
-`delete`, object literals), `for..in`/`for each..in`, and a P7 stdlib:
-Math, JSON (stringify/parse), Array iteration callbacks
-(map/filter/forEach/some/every), `String#replace`, URI encoding, plus the
-CLI runtime — `System.args/exit/getenv/time`, `File.read/write/exists`,
-`Date.now()`.
+Seventeen gated phases (P0-P16), each ending green (fmt, clippy
+`-D warnings`, full test suite). Everything SPECS §1-§11 mandates for v1
+is built and tested.
 
-P8 added generic functions (`function first.<T>(...)`, monomorphized like
-generic classes), the `main():int` program entry (invoked after top-level
-statements; its int return becomes the exit status, SPECS §7), and
-`is`-guard narrowing (`if (x is Ball) { var b:Ball = x as Ball; }` needs no
-`?`). The final golden test is `tests/showcase.as` — the whole language
-surface in one program, verified against its embedded expected output.
+**Language.** Classes, interfaces, inheritance with native vtable +
+interface dispatch; reified generics (classes and functions,
+monomorphized); null safety (`T?` with flow narrowing, incl. `&&`/`||`
+and `is`-guard narrowing); closures and Function values;
+try/catch/finally with a real Error hierarchy (setjmp unwinding);
+dynamic classes (expandos, `in`, `delete`, object literals);
+`for..in` / `for each..in`; namespaces — both the static layer
+(declarations, URI identity, namespaced members, `use namespace`,
+compile-time `ns::name`) and first-class `Namespace` values with
+runtime-computed qualification via per-class reflection tables;
+`main():int` program entry.
 
-`vigorscript build tool.as` produces a native binary for real CLI tools
-(the P7 milestone golden test is a word-frequency tool with a JSON report).
-P9 added the garbage collector (SPECS §7): conservative mark-sweep in
-`runtime::gc`, collecting only at backend-emitted safepoints (function
-entries and loop headers), with conservative stack + register + static
-root scanning, precise tracing of container side-storage, and size-class
-block pooling so heavy churn plateaus (a 1.5 GB-churn stress test holds
-~34 MB peak RSS). `System.gc()` / `System.gcLiveBytes()` are available;
-`VS_GC_LOG=1` prints per-collection stats.
+**Stdlib (SPECS §6).** String/Array/Vector full surface, Math, JSON,
+RegExp (backtracking engine: backreferences, lazy quantifiers, UTF-16
+indices), Date (constructors, local+UTC getters, avmplus string forms,
+`Date.UTC`), and the CLI runtime: `trace`, `System.args/exit/getenv/
+time/gc`, `File.read/write/exists`, blocking TCP sockets
+(`Socket.connect`, `ServerSocket.bind/accept`, line-oriented reads).
 
-P10 added RegExp (ES3 §15.10) on a backtracking engine (`fancy-regex` —
-ES3 needs backreferences and lazy quantifiers): `/pattern/flags` literals
-(division disambiguated by the standard prev-token heuristic),
-`new RegExp(p, f)`, `test`/`exec` with global `lastIndex`,
-`String.match/search/replace` ($&/$n substitutions), `is`/`as RegExp`,
-catchable SyntaxError on bad patterns, and GC-integrated regex objects.
-Indices are UTF-16 units per the spec. `VS_DUMP_IR=1` dumps the LLVM
-module (debugging aid).
+**Runtime.** Conservative mark-sweep GC (safepoint-triggered,
+stack/register/static-root scanning, kind-tagged blocks, size-class
+pooling — 1.5 GB-churn stress holds ~34 MB RSS); UTF-16 strings; boxed
+`*` values; catchable runtime errors.
 
-P11 added Date instances (ES3 §15.9): `new Date()` / `(millis)` /
-`(y, m, d, h, min, s, ms)`, all local + UTC getters, `getTimezoneOffset`,
-`setTime`, `Date.UTC`, and the avmplus AS3 string forms
-(`toString`/`toDateString`/`toTimeString`/`toUTCString`). Local time via
-chrono/the platform tz database (macOS links CoreFoundation). Backlog:
-`Date.parse`/string constructor, component setters, locale forms.
+**Compiler.** LLVM new-PM optimization pipeline (`-O 0..3`, default O2;
+try-functions pinned optnone for setjmp safety; inline ToInt32 fast
+paths — recursive int benchmark ~5x over unoptimized); Linux
+cross-compilation via `zig cc` (`--target x86_64/aarch64-unknown-linux-gnu`,
+full golden corpus byte-identical in Debian containers); ad-hoc
+codesigning on macOS arm64; diagnostics with stable codes and caret
+rendering throughout.
 
-P12 added static custom namespaces (ES4 draft, SPECS §5 scope):
-`namespace n;` / `namespace n = "uri";` (same URI = same namespace),
-namespaced class members (`red function f()`), qualified access
-`obj.ns::name` for reads/writes/calls with virtual dispatch, and
-`use namespace n` with lexically-scoped open sets and ambiguity
-diagnostics. Everything resolves at compile time by folding the
-namespace into the member's internal name — zero runtime cost.
-Namespace-as-runtime-value (the `Namespace` class) stays backlog.
+**Second backend (Cranelift): deferred post-v1** — the v1 exception
+scheme needs `returns_twice`, which Cranelift lacks (SPECS §11 DECISION).
+The `Backend` trait boundary is verified mechanically: no frontend crate
+depends on inkwell.
 
-P13 turned on the optimizer: the LLVM new-pass-manager pipeline
-(`default<O2>` by default, `-O 0..3` on build/run), target data layout
-wired to the machine (required — layout-less pipelines miscompile),
-inline ToInt32/ToUint32 fast paths (§9.5/§9.6 — in-range doubles truncate
-in one instruction instead of a runtime call), a one-flag GC safepoint
-fast path, and `memory(inaccessiblemem: readwrite)` on the safepoint so
-LLVM optimizes across it. Functions containing `try` are pinned to
-`optnone` (longjmp rolls registers back; locals must stay in memory).
-Recursive int benchmark: ~5x faster than the P12 compiler at -O2.
-`VS_DUMP_IR_OPT=1` dumps the post-pipeline module.
-
-P14 added Linux cross-compilation:
+## Usage
 
 ```sh
-rustup target add x86_64-unknown-linux-gnu     # once
-cargo build -p runtime --target x86_64-unknown-linux-gnu --release
+vigorscript build tool.as                 # native executable ./tool
+vigorscript build tool.as -O 3 -o fast    # optimization level
 vigorscript build tool.as --target x86_64-unknown-linux-gnu
+vigorscript run tool.as                   # compile + execute
+vigorscript check tool.as                 # type-check only
+vigorscript parse tool.as                 # AST dump
 ```
 
-`--target` supports `x86_64-unknown-linux-gnu` and
-`aarch64-unknown-linux-gnu`; linking goes through `zig cc` (bundled
-linker + glibc sysroots + libunwind for the Rust runtime's unwind refs).
-The entire golden corpus — GC churn, setjmp exceptions, regex, Date,
-the showcase — runs byte-identical on both Linux architectures
-(validated in Debian containers). Opt-in e2e:
-`cargo test -p e2e --test golden cross_linux -- --ignored`.
+Debug aids: `VS_DUMP_IR=1` (pre-optimization LLVM module),
+`VS_DUMP_IR_OPT=1` (post-pipeline), `VS_GC_LOG=1` (per-collection stats).
 
-P15 added TCP sockets (the last SPECS §6 I/O item): blocking,
-Redtamarin-shaped — `Socket.connect(host, port)`, instance
-`write`/`readLine`/`read`/`close`, `ServerSocket.bind(port)` (0 =
-ephemeral) with `accept()` and `localPort`. Reads return null at EOF
-(null-safety enforced); failures throw catchable Errors; unclosed
-sockets close on GC sweep. `&&`/`||` conditions now propagate null
-narrowing (`while (line != null && line != "quit")`). Verified with a
-native echo server/client pair over loopback on macOS and Linux.
+## Tests
 
-P16 made namespaces first-class (ES4 draft): `Namespace` values from
-declared namespaces or `new Namespace(uri)`, interned by URI (so `==`
-is URI identity), `.uri`/`toString`, boxing/`is`/`typeof`, and
-**runtime-computed qualification** — `obj.q::name` reads, calls, bound
-methods, and virtual dispatch resolve at runtime through per-class
-reflection tables the backend emits into the class descriptor (field
-offsets + boxed-ABI method wrappers). Missing members throw catchable
-ReferenceError.
+`cargo test --workspace` — unit suites per crate plus the e2e golden
+corpus in `tests/` (each `.as` program with expected stdout + exit 0),
+capped by `tests/showcase.as`, the whole-language golden test. Opt-in
+extras: `cross_linux` (needs zig + docker). Known deviations from AS3/ES4
+are documented per phase in the git history and SPECS.
 
-Remaining (backlog): Cranelift backend. Phase plan: SPECS §11.
+Next: project-wide rebrand (name + extension), tracked separately.

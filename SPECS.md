@@ -404,9 +404,18 @@ FULL SEND.
   Milestone: exception-handling + closures program runs.
 - **P7 — Stdlib breadth.** `Math`, `Date`, `String`/`Array` full surface, `JSON`,
   `RegExp`, CLI I/O (args, files, stdout). Milestone: a real CLI tool builds.
-- **P8+ — Advanced.** Custom runtime namespaces, optimization passes, Linux
-  cross-compile hardening, optional E4X/XML, second backend (Cranelift) behind
-  the `Backend` trait.
+- **P8+ — Advanced.** Custom runtime namespaces (P12/P16 ✓), optimization
+  passes (P13 ✓), Linux cross-compile hardening (P14 ✓), sockets (P15 ✓),
+  optional E4X/XML (out, §5), second backend (Cranelift) behind the
+  `Backend` trait — **DECISION (P17): deferred post-v1.** The v1 exception
+  scheme compiles `_setjmp` (returns_twice) into user code; Cranelift does
+  not support returns_twice, so a Cranelift port first requires redesigning
+  exception lowering (per-call throw-flag unwinding) and then a full
+  duplicate of class/closure/RTTI/reflection emission — double maintenance
+  for every future feature. The architectural claim the trait exists for is
+  verified mechanically instead: no frontend crate (lexer, parser, ast,
+  sema, mir) has any `inkwell`/LLVM dependency (`cargo tree` clean); only
+  `codegen` links LLVM. Revisit if a JIT/fast-debug-build need appears.
 
 ---
 
