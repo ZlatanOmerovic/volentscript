@@ -113,8 +113,8 @@ impl<'a> Checker<'a> {
     /// interface method lists and class layouts in dependency order.
     pub(crate) fn build_hierarchy(
         &mut self,
-        classes: &[(ClassId, &ast::ClassDecl)],
-        ifaces: &[(IfaceId, &ast::InterfaceDecl)],
+        classes: &[(ClassId, &'a ast::ClassDecl)],
+        ifaces: &[(IfaceId, &'a ast::InterfaceDecl)],
     ) {
         // Interfaces: resolve extends, then flatten (DFS; cycle -> error).
         for (id, decl) in ifaces {
@@ -243,7 +243,11 @@ impl<'a> Checker<'a> {
         cycle
     }
 
-    fn build_iface_methods(&mut self, id: IfaceId, decl: &ast::InterfaceDecl) -> Vec<IfaceMethod> {
+    fn build_iface_methods(
+        &mut self,
+        id: IfaceId,
+        decl: &'a ast::InterfaceDecl,
+    ) -> Vec<IfaceMethod> {
         // Inherited first (dispatch-table order), then own.
         let mut methods: Vec<IfaceMethod> = Vec::new();
         for &e in self.registry.ifaces[id.0 as usize].extends.clone().iter() {
@@ -281,7 +285,12 @@ impl<'a> Checker<'a> {
 
     /// Builds a checked signature from parameter syntax (types only; bodies
     /// are handled when the method is checked).
-    fn build_sig(&mut self, params: &[ast::Param], ret: Option<&ast::TypeRef>, kind: VKind) -> Sig {
+    fn build_sig(
+        &mut self,
+        params: &'a [ast::Param],
+        ret: Option<&'a ast::TypeRef>,
+        kind: VKind,
+    ) -> Sig {
         let mut tys = Vec::new();
         let mut nullables = Vec::new();
         let mut required = params.len();
@@ -322,7 +331,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn topo_order(&self, classes: &[(ClassId, &ast::ClassDecl)]) -> Vec<usize> {
+    fn topo_order(&self, classes: &[(ClassId, &'a ast::ClassDecl)]) -> Vec<usize> {
         // Parents before children; cycles were already broken.
         let mut order: Vec<usize> = (0..classes.len()).collect();
         order.sort_by_key(|&i| {
@@ -339,7 +348,7 @@ impl<'a> Checker<'a> {
 
     /// Pass B2 (per class, parents first): slots, vtable, statics,
     /// constructor signature. Bodies are checked later (pass C).
-    pub(crate) fn build_class_members(&mut self, id: ClassId, decl: &ast::ClassDecl) {
+    pub(crate) fn build_class_members(&mut self, id: ClassId, decl: &'a ast::ClassDecl) {
         let parent = self.registry.classes[id.0 as usize]
             .parent
             .unwrap_or(OBJECT);
@@ -547,7 +556,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Pass C: check field/static initializers and method bodies.
-    pub(crate) fn check_class_bodies(&mut self, id: ClassId, decl: &ast::ClassDecl) {
+    pub(crate) fn check_class_bodies(&mut self, id: ClassId, decl: &'a ast::ClassDecl) {
         let class_name = decl.name.clone();
         for member in &decl.members {
             match &member.kind {
@@ -657,7 +666,7 @@ impl<'a> Checker<'a> {
         self.ctor_saw_super = false;
     }
 
-    fn check_initializer(&mut self, class: ClassId, is_static: bool, init: &ast::Expr) -> TExpr {
+    fn check_initializer(&mut self, class: ClassId, is_static: bool, init: &'a ast::Expr) -> TExpr {
         self.method_ctx.push(Some(MethodCtx {
             class,
             is_static,
@@ -680,7 +689,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Checks one method/accessor/constructor body in class context.
-    fn check_method_body(&mut self, fn_id: FnId, f: &ast::FunctionDecl, ctx: MethodCtx) {
+    fn check_method_body(&mut self, fn_id: FnId, f: &'a ast::FunctionDecl, ctx: MethodCtx) {
         self.register_signature(fn_id, &f.params);
         self.scopes.push(Default::default());
         self.fn_stack.push(fn_id.0 as usize);

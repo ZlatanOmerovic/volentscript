@@ -190,6 +190,8 @@ pub struct Binding {
 pub struct FunctionDecl {
     /// Function name; `None` only for anonymous function expressions.
     pub name: Option<String>,
+    /// Generic type parameters (`function firstOf.<T>`, SPECS §4.2).
+    pub type_params: Vec<String>,
     /// Parameter list.
     pub params: Vec<Param>,
     /// Declared return type, if annotated.

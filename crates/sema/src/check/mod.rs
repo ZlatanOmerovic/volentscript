@@ -58,6 +58,7 @@ pub fn check(program: &ast::Program) -> CheckOutcome {
             functions: checker.functions,
             registry: checker.registry,
             vectors: checker.vector_insts,
+            entry_main: checker.entry_main,
         }),
         diagnostics: checker.diagnostics,
     }
@@ -133,8 +134,17 @@ pub(crate) struct Checker<'a> {
     /// Locals proven non-null in the current flow (SPECS §4.1 narrowing);
     /// one set per active narrowing scope.
     pub(crate) narrowed: Vec<std::collections::HashSet<LocalId>>,
+    /// Locals proven to be of a class by an `is` guard (SPECS §4.1): inside
+    /// `if (x is C)`, `x as C` cannot miss, so its result is non-nullable.
+    pub(crate) is_narrowed: Vec<Vec<(LocalId, Ty)>>,
     /// `T?` return flags parallel to `functions`.
     pub(crate) fn_ret_nullable_flags: Vec<bool>,
+    /// Generic function templates (SPECS §4.2): name → declaration.
+    pub(crate) fn_templates: Vec<(String, &'a ast::FunctionDecl)>,
+    /// Memoized generic-function instantiations.
+    pub(crate) fn_instantiations: HashMap<(usize, Vec<Ty>), FnId>,
+    /// The top-level `main` function, if declared (SPECS §7 entry).
+    pub(crate) entry_main: Option<FnId>,
 }
 
 impl<'a> Checker<'a> {
@@ -220,8 +230,8 @@ impl<'a> Checker<'a> {
     fn check_function_body(
         &mut self,
         id: FnId,
-        params: &[ast::Param],
-        stmts: &[ast::Stmt],
+        params: &'a [ast::Param],
+        stmts: &'a [ast::Stmt],
         span: Span,
     ) -> Vec<TStmt> {
         let fn_index = id.0 as usize;
@@ -288,12 +298,32 @@ impl<'a> Checker<'a> {
         // Hoist vars and nested function declarations (AS3 `var` is
         // function-scoped; declarations are visible before their statement,
         // ECMA-262 3rd ed. §10.1.3).
-        let mut nested: Vec<&ast::FunctionDecl> = Vec::new();
+        let mut nested: Vec<&'a ast::FunctionDecl> = Vec::new();
         self.hoist(fn_index, stmts, &mut nested);
 
         // Register nested function signatures before checking any body so
         // mutual references resolve.
         let mut nested_ids = Vec::new();
+        let nested: Vec<&'a ast::FunctionDecl> = nested
+            .into_iter()
+            .filter(|f| {
+                if f.type_params.is_empty() {
+                    return true;
+                }
+                // Generic function template: instantiated per callsite.
+                let name = f.name.clone().unwrap_or_default();
+                if self.fn_templates.iter().any(|(n, _)| n == &name) {
+                    self.error(
+                        ErrorCode::CONFLICTING_DECL,
+                        format!("generic function `{name}` is already declared"),
+                        f.span,
+                    );
+                } else {
+                    self.fn_templates.push((name, f));
+                }
+                false
+            })
+            .collect();
         for f in &nested {
             let name = f.name.clone().unwrap_or_else(|| "<anonymous>".into());
             let ret = f
@@ -309,6 +339,10 @@ impl<'a> Checker<'a> {
             self.register_signature(nested_id, &f.params);
             if let Some(n) = &f.name {
                 self.declare(n, Symbol::Fn(nested_id), f.span);
+                // SPECS §7: the runtime invokes a top-level `main`.
+                if n == "main" && self.fn_stack.len() == 1 {
+                    self.entry_main = Some(nested_id);
+                }
             }
             nested_ids.push(nested_id);
         }
@@ -378,7 +412,7 @@ impl<'a> Checker<'a> {
 
     /// Pre-computes a function's checked signature from its parameter list
     /// (types only — bodies come later).
-    fn register_signature(&mut self, id: FnId, params: &[ast::Param]) {
+    fn register_signature(&mut self, id: FnId, params: &'a [ast::Param]) {
         let mut sig_params = Vec::new();
         let mut required = params.len();
         let mut variadic = false;
@@ -418,17 +452,23 @@ impl<'a> Checker<'a> {
         } else if let Some(top) = self.narrowed.last_mut() {
             top.insert(id);
         }
+        // Any assignment invalidates an `is`-guard proof for the local.
+        for set in &mut self.is_narrowed {
+            set.retain(|(l, _)| *l != id);
+        }
     }
 
-    fn enter_function(&mut self, f: &ast::FunctionDecl, id: FnId) {
+    fn enter_function(&mut self, f: &'a ast::FunctionDecl, id: FnId) {
         self.scopes.push(Scope::default());
         self.fn_stack.push(id.0 as usize);
         let saved_jumps = std::mem::take(&mut self.jumps);
         let saved_labels = std::mem::take(&mut self.labels);
         let saved_narrow = std::mem::take(&mut self.narrowed);
+        let saved_is_narrow = std::mem::take(&mut self.is_narrowed);
         self.set_ret_nullable(id, f.return_type.as_ref().is_some_and(|t| t.nullable));
         let body = self.check_function_body(id, &f.params, &f.body.stmts, f.span);
         self.functions[id.0 as usize].body = body;
+        self.is_narrowed = saved_is_narrow;
         self.narrowed = saved_narrow;
         self.labels = saved_labels;
         self.jumps = saved_jumps;
@@ -439,11 +479,11 @@ impl<'a> Checker<'a> {
     /// Collects hoisted declarations: `var`/`const` bindings anywhere in the
     /// function (not crossing nested function boundaries) and directly
     /// declared functions.
-    fn hoist<'b>(
+    fn hoist(
         &mut self,
         fn_index: usize,
-        stmts: &'b [ast::Stmt],
-        nested: &mut Vec<&'b ast::FunctionDecl>,
+        stmts: &'a [ast::Stmt],
+        nested: &mut Vec<&'a ast::FunctionDecl>,
     ) {
         use ast::StmtKind::*;
         for stmt in stmts {
@@ -506,7 +546,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn hoist_var(&mut self, fn_index: usize, decl: &ast::VarDecl) {
+    fn hoist_var(&mut self, fn_index: usize, decl: &'a ast::VarDecl) {
         let fn_depth = self.fn_stack.len() - 1;
         for b in &decl.bindings {
             let ty =
@@ -587,7 +627,7 @@ impl<'a> Checker<'a> {
 
     // --- types ---------------------------------------------------------------
 
-    fn resolve_type(&mut self, t: &ast::TypeRef) -> Ty {
+    fn resolve_type(&mut self, t: &'a ast::TypeRef) -> Ty {
         let ty = self.resolve_type_allow_void(t);
         if ty == Ty::Void {
             self.error(
@@ -600,7 +640,7 @@ impl<'a> Checker<'a> {
         ty
     }
 
-    fn resolve_type_allow_void(&mut self, t: &ast::TypeRef) -> Ty {
+    fn resolve_type_allow_void(&mut self, t: &'a ast::TypeRef) -> Ty {
         // `T?` (SPECS §4.1) is parsed and recorded; enforcement is P5 —
         // nullable and plain types are identical until then.
         match &t.kind {
@@ -812,7 +852,7 @@ impl<'a> Checker<'a> {
 
     // --- statements ------------------------------------------------------------
 
-    fn stmt(&mut self, stmt: &ast::Stmt) -> TStmt {
+    fn stmt(&mut self, stmt: &'a ast::Stmt) -> TStmt {
         use ast::StmtKind as S;
         let span = stmt.span;
         let kind = match &stmt.kind {
@@ -837,8 +877,11 @@ impl<'a> Checker<'a> {
                 let cond = self.expr(cond);
                 let cond = self.coerce_condition(cond);
                 let (when_true, when_false) = Self::narrowing_of(&cond);
+                let is_when_true = Self::is_narrowing_of(&cond);
                 self.narrowed.push(when_true.iter().copied().collect());
+                self.is_narrowed.push(is_when_true);
                 let then_checked = Box::new(self.stmt(then_branch));
+                self.is_narrowed.pop();
                 self.narrowed.pop();
                 self.narrowed.push(when_false.iter().copied().collect());
                 let else_checked = else_branch.as_ref().map(|e| Box::new(self.stmt(e)));
@@ -1067,7 +1110,7 @@ impl<'a> Checker<'a> {
         TStmt { kind, span }
     }
 
-    fn loop_body(&mut self, body: &ast::Stmt, label: Option<String>) -> TStmt {
+    fn loop_body(&mut self, body: &'a ast::Stmt, label: Option<String>) -> TStmt {
         self.jumps.push(JumpCtx {
             label,
             is_loop: true,
@@ -1101,7 +1144,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn var_decl_stmt(&mut self, decl: &ast::VarDecl, span: Span) -> TStmt {
+    fn var_decl_stmt(&mut self, decl: &'a ast::VarDecl, span: Span) -> TStmt {
         // Bindings were hoisted; here we only check initializers.
         let mut inits = Vec::new();
         for b in &decl.bindings {
@@ -1142,7 +1185,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn for_in_target(&mut self, target: &ast::ForInTarget) -> LocalId {
+    fn for_in_target(&mut self, target: &'a ast::ForInTarget) -> LocalId {
         match target {
             ast::ForInTarget::VarDecl(decl) => {
                 let b = &decl.bindings[0];

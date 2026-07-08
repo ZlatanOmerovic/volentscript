@@ -29,7 +29,7 @@ pub(crate) enum ClassMember {
     },
 }
 
-impl Checker<'_> {
+impl<'a> Checker<'a> {
     pub(crate) fn current_method(&self) -> Option<MethodCtx> {
         self.method_ctx.last().copied().flatten()
     }
@@ -423,7 +423,7 @@ impl Checker<'_> {
         object: TExpr,
         class: ClassId,
         name: &str,
-        args: &[ast::Expr],
+        args: &'a [ast::Expr],
         span: Span,
     ) -> TExpr {
         if let Some((vis, def)) = self.member_visibility(class, name) {
@@ -479,7 +479,7 @@ impl Checker<'_> {
         object: TExpr,
         iface: IfaceId,
         name: &str,
-        args: &[ast::Expr],
+        args: &'a [ast::Expr],
         span: Span,
     ) -> TExpr {
         let Some((islot, m)) = self.registry.find_iface_method(iface, name, VKind::Method) else {
@@ -512,7 +512,7 @@ impl Checker<'_> {
         &mut self,
         sig: &Sig,
         name: &str,
-        args: &[ast::Expr],
+        args: &'a [ast::Expr],
         span: Span,
     ) -> Vec<TExpr> {
         self.arity(
@@ -542,7 +542,12 @@ impl Checker<'_> {
 
     /// `new C(args)` (SPECS §3.4); also `new Vector.<T>()`, `new Array(...)`
     /// and `new Box.<T>(args)`.
-    pub(crate) fn new_expr(&mut self, callee: &ast::Expr, args: &[ast::Expr], span: Span) -> TExpr {
+    pub(crate) fn new_expr(
+        &mut self,
+        callee: &'a ast::Expr,
+        args: &'a [ast::Expr],
+        span: Span,
+    ) -> TExpr {
         // Parameterized targets.
         if matches!(callee.kind, ExprKind::ApplyType(..)) {
             match self.apply_type_to_ty(callee) {
@@ -615,7 +620,7 @@ impl Checker<'_> {
     }
 
     /// Resolves an expression used as a class reference (`new X`, casts).
-    pub(crate) fn type_expr_to_class(&mut self, e: &ast::Expr) -> Option<ClassId> {
+    pub(crate) fn type_expr_to_class(&mut self, e: &'a ast::Expr) -> Option<ClassId> {
         let path = flatten_path(e)?;
         match self.type_names.get(&path).copied() {
             Some(TypeSym::Class(id)) => Some(id),
@@ -698,7 +703,7 @@ impl Checker<'_> {
         &mut self,
         class: ClassId,
         name: &str,
-        args: &[ast::Expr],
+        args: &'a [ast::Expr],
         span: Span,
     ) -> TExpr {
         let Some(m) = self.registry.find_static_method(class, name) else {
@@ -727,7 +732,7 @@ impl Checker<'_> {
     pub(crate) fn super_call(
         &mut self,
         method: Option<&str>,
-        args: &[ast::Expr],
+        args: &'a [ast::Expr],
         span: Span,
     ) -> TExpr {
         let Some(ctx) = self.current_method() else {
@@ -790,7 +795,7 @@ impl Checker<'_> {
     /// Explicit cast `Type(expr)` (ES4 draft: calling a type converts).
     /// Core types use the ES3 §9 conversions; classes use checked coercion
     /// (throws on mismatch, unlike `as` which yields null).
-    pub(crate) fn cast_call(&mut self, target: Ty, args: &[ast::Expr], span: Span) -> TExpr {
+    pub(crate) fn cast_call(&mut self, target: Ty, args: &'a [ast::Expr], span: Span) -> TExpr {
         if args.len() != 1 {
             self.error(
                 ErrorCode::WRONG_ARG_COUNT,
@@ -877,7 +882,7 @@ impl Checker<'_> {
     pub(crate) fn implicit_method_call(
         &mut self,
         name: &str,
-        args: &[ast::Expr],
+        args: &'a [ast::Expr],
         span: Span,
     ) -> Option<TExpr> {
         let ctx = self.current_method()?;
@@ -944,7 +949,7 @@ impl Checker<'_> {
         &mut self,
         class: &str,
         name: &str,
-        args: &[ast::Expr],
+        args: &'a [ast::Expr],
         span: Span,
     ) -> Option<TExpr> {
         let methods = crate::builtins::native_methods(class)?;
@@ -1023,7 +1028,7 @@ fn flatten_path(e: &ast::Expr) -> Option<String> {
     }
 }
 
-impl Checker<'_> {
+impl<'a> Checker<'a> {
     /// Whether a bare name is shadowed by a local/function symbol (locals
     /// shadow type names and members).
     pub(crate) fn is_shadowed(&self, name: &str) -> bool {

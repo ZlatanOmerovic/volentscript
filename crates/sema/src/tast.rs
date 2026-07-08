@@ -30,6 +30,9 @@ pub struct TProgram {
     /// `Vector.<T>` instantiation table: index = `Ty::Vector` payload,
     /// value = element type.
     pub vectors: Vec<crate::ty::Ty>,
+    /// The top-level `main` function, when declared (SPECS §7: invoked
+    /// after top-level statements; an int return becomes the exit code).
+    pub entry_main: Option<FnId>,
 }
 
 /// The id of the synthesized top-level script function.

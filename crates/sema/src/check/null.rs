@@ -20,7 +20,7 @@ use crate::ty::Ty;
 
 use super::Checker;
 
-impl Checker<'_> {
+impl<'a> Checker<'a> {
     /// Whether null-safety applies to this type at all: reference types
     /// except the `*` escape hatch.
     pub(crate) fn null_tracked(&self, ty: Ty) -> bool {
@@ -38,8 +38,9 @@ impl Checker<'_> {
         }
         match &e.kind {
             TExprKind::Null => true,
-            // `as` yields null on mismatch (SPECS §3.1).
-            TExprKind::As(..) => true,
+            // `as` yields null on mismatch (SPECS §3.1) — unless an `is`
+            // guard on the same local proves the cast cannot miss.
+            TExprKind::As(inner, ty) => !self.is_guarded(inner, *ty),
             TExprKind::Str(_)
             | TExprKind::New(..)
             | TExprKind::This
@@ -148,6 +149,39 @@ impl Checker<'_> {
                 span,
             );
         }
+    }
+
+    /// Whether an active `is` guard proves `inner as ty` cannot miss.
+    fn is_guarded(&self, inner: &TExpr, ty: Ty) -> bool {
+        match &inner.kind {
+            TExprKind::LocalGet(id) => self
+                .is_narrowed
+                .iter()
+                .any(|set| set.iter().any(|&(l, t)| l == *id && t == ty)),
+            TExprKind::Coerce(_, v) => self.is_guarded(v, ty),
+            _ => false,
+        }
+    }
+
+    /// `(local, class)` pairs a condition proves via `is` when true.
+    pub(crate) fn is_narrowing_of(cond: &TExpr) -> Vec<(LocalId, Ty)> {
+        fn local_of(e: &TExpr) -> Option<LocalId> {
+            match &e.kind {
+                TExprKind::LocalGet(id) => Some(*id),
+                TExprKind::Coerce(_, v) => local_of(v),
+                _ => None,
+            }
+        }
+        let mut cond = cond;
+        if let TExprKind::Coerce(Coercion::ToBoolean, v) = &cond.kind {
+            cond = v;
+        }
+        if let TExprKind::Is(inner, ty) = &cond.kind {
+            if let Some(id) = local_of(inner) {
+                return vec![(id, *ty)];
+            }
+        }
+        Vec::new()
     }
 
     /// Locals a condition proves non-null when true / when false.

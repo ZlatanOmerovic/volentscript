@@ -67,7 +67,7 @@ impl<'a> Checker<'a> {
         &mut self,
         object: TExpr,
         name: &str,
-        args: &[ast::Expr],
+        args: &'a [ast::Expr],
         span: Span,
     ) -> TExpr {
         use ArrMethod::{Some as Some_, *};
@@ -164,7 +164,7 @@ impl<'a> Checker<'a> {
         object: TExpr,
         inst: u32,
         name: &str,
-        args: &[ast::Expr],
+        args: &'a [ast::Expr],
         span: Span,
     ) -> TExpr {
         use VecMethod::*;
@@ -251,8 +251,8 @@ impl<'a> Checker<'a> {
     /// `new <T>[...]` literal (SPECS §4.3).
     pub(crate) fn vector_literal(
         &mut self,
-        elem: &ast::TypeRef,
-        elements: &[ast::Expr],
+        elem: &'a ast::TypeRef,
+        elements: &'a [ast::Expr],
         span: Span,
     ) -> TExpr {
         let elem_ty = self.resolve_type(elem);
@@ -386,7 +386,7 @@ impl<'a> Checker<'a> {
 
     /// Resolves an `ApplyType` expression (`Vector.<int>`, `Box.<T>`) used
     /// in type position (`new`, `is`/`as`).
-    pub(crate) fn apply_type_to_ty(&mut self, e: &ast::Expr) -> Option<Ty> {
+    pub(crate) fn apply_type_to_ty(&mut self, e: &'a ast::Expr) -> Option<Ty> {
         let ExprKind::ApplyType(base, targs) = &e.kind else {
             return None;
         };
@@ -413,5 +413,65 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn template_index(&self, name: &str) -> Option<usize> {
         self.templates.iter().position(|(n, _)| n == name)
+    }
+
+    /// Instantiates a generic function (SPECS §4.2) for the given type
+    /// arguments — monomorphized like generic classes.
+    pub(crate) fn instantiate_fn_template(
+        &mut self,
+        tid: usize,
+        args: Vec<Ty>,
+        span: Span,
+    ) -> Option<crate::tast::FnId> {
+        if let Some(id) = self.fn_instantiations.get(&(tid, args.clone())) {
+            return Some(*id);
+        }
+        let (name, decl) = {
+            let (n, d) = &self.fn_templates[tid];
+            (n.clone(), *d)
+        };
+        let decl: &'a ast::FunctionDecl = decl;
+        if args.len() != decl.type_params.len() {
+            self.error(
+                ErrorCode::WRONG_ARG_COUNT,
+                format!(
+                    "`{name}` takes {} type argument(s), got {}",
+                    decl.type_params.len(),
+                    args.len()
+                ),
+                span,
+            );
+            return None;
+        }
+        let display = format!(
+            "{name}.<{}>",
+            args.iter()
+                .map(|&a| self.ty_name(a))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let map: std::collections::HashMap<String, Ty> = decl
+            .type_params
+            .iter()
+            .cloned()
+            .zip(args.iter().copied())
+            .collect();
+        self.subst.push(map);
+        let ret = decl
+            .return_type
+            .as_ref()
+            .map(|t| self.resolve_type_allow_void(t))
+            .unwrap_or(Ty::Any);
+        let id = self.new_function(&display, ret, decl.span);
+        self.fn_instantiations.insert((tid, args), id);
+        self.set_ret_nullable(id, decl.return_type.as_ref().is_some_and(|t| t.nullable));
+        self.register_signature(id, &decl.params);
+        self.enter_function(decl, id);
+        self.subst.pop();
+        Some(id)
+    }
+
+    pub(crate) fn fn_template_index(&self, name: &str) -> Option<usize> {
+        self.fn_templates.iter().position(|(n, _)| n == name)
     }
 }

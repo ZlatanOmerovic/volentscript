@@ -5,3 +5,4 @@
 # SOURCES.md stays tracked so the set is reproducible; see links.md.
 /docs/*
 !/docs/SOURCES.md
+/tests/showcase

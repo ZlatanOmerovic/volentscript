@@ -40,7 +40,15 @@ pub fn lower(program: &sema::TProgram) -> Result<Program, Vec<Diagnostic>> {
         temp_base: 0,
         temps: Vec::new(),
     };
-    let mut functions: Vec<Function> = program.functions.iter().map(|f| lo.function(f)).collect();
+    let mut functions: Vec<Function> = program
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            lo.current_fn = i;
+            lo.function(f)
+        })
+        .collect();
     // Synthesized default constructors land at their reserved indices.
     for (index, info) in program.registry.classes.iter().enumerate() {
         if info.ctor.is_none() {
@@ -66,6 +74,28 @@ pub fn lower(program: &sema::TProgram) -> Result<Program, Vec<Diagnostic>> {
     let mut static_inits = lo.static_init_stmts();
     static_inits.append(&mut functions[0].body);
     functions[0].body = static_inits;
+    // SPECS §7: after the top-level statements run, a global `main` is
+    // invoked; an `int` return becomes the process exit status.
+    if let Some(main) = program.entry_main {
+        let idx = main.0 as usize;
+        let span = functions[idx].span;
+        let ret = functions[idx].ret;
+        let call = Expr {
+            ty: ret,
+            span,
+            kind: ExprKind::CallFn(FnId(main.0), Vec::new()),
+        };
+        let stmt = if ret == Ty::Int {
+            Stmt::Expr(Expr {
+                ty: Ty::Void,
+                span,
+                kind: ExprKind::CallNative(SemaNativeFn::SystemExit, vec![call]),
+            })
+        } else {
+            Stmt::Expr(call)
+        };
+        functions[0].body.push(stmt);
+    }
     if lo.diagnostics.is_empty() {
         Ok(Program {
             functions,

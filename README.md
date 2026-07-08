@@ -62,7 +62,7 @@ and `runtime`.
 
 ## Status
 
-Phases 0–7 done. The language surface: classes/interfaces/inheritance with
+Phases 0–8 done. The language surface: classes/interfaces/inheritance with
 native vtable + interface dispatch, reified generics, null safety (`T?`),
 closures and Function values, try/catch/finally with a real Error
 hierarchy, Array + `Vector.<T>` + dynamic objects (expandos, `in`,
@@ -72,8 +72,15 @@ Math, JSON (stringify/parse), Array iteration callbacks
 CLI runtime — `System.args/exit/getenv/time`, `File.read/write/exists`,
 `Date.now()`.
 
+P8 added generic functions (`function first.<T>(...)`, monomorphized like
+generic classes), the `main():int` program entry (invoked after top-level
+statements; its int return becomes the exit status, SPECS §7), and
+`is`-guard narrowing (`if (x is Ball) { var b:Ball = x as Ball; }` needs no
+`?`). The final golden test is `tests/showcase.as` — the whole language
+surface in one program, verified against its embedded expected output.
+
 `vigorscript build tool.as` produces a native binary for real CLI tools
-(the milestone golden test is a word-frequency tool with a JSON report).
-Remaining (P8+): RegExp, Date instances, generic functions, runtime
-namespaces, GC (currently leak-only), optimization passes, Linux
-cross-compile hardening. Phase plan: SPECS §11.
+(the P7 milestone golden test is a word-frequency tool with a JSON report).
+Remaining (backlog): GC (currently leak-only — the biggest debt vs SPECS
+§7), RegExp, Date instances, runtime namespaces, optimization passes,
+Linux cross-compile hardening. Phase plan: SPECS §11.

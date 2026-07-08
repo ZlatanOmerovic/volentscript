@@ -11,8 +11,8 @@ use crate::builtins::{self, Member, Signature};
 use crate::tast::*;
 use crate::ty::Ty;
 
-impl Checker<'_> {
-    pub(crate) fn expr(&mut self, e: &ast::Expr) -> TExpr {
+impl<'a> Checker<'a> {
+    pub(crate) fn expr(&mut self, e: &'a ast::Expr) -> TExpr {
         let span = e.span;
         match &e.kind {
             ExprKind::Int(v) => mk(Ty::Int, span, TExprKind::Int(*v)),
@@ -162,6 +162,14 @@ impl Checker<'_> {
                 if let Some(member) = self.implicit_member(name, span) {
                     return member;
                 }
+                if self.fn_template_index(name).is_some() {
+                    self.error(
+                        ErrorCode::WRONG_ARG_COUNT,
+                        format!("generic function `{name}` needs explicit type arguments: `{name}.<T>(...)`"),
+                        span,
+                    );
+                    return self.error_expr(span);
+                }
                 if self.ident_as_type(name).is_some() {
                     // Type name as a value: the Class type is P6.
                     return self.not_implemented(
@@ -181,7 +189,7 @@ impl Checker<'_> {
 
     // --- operators -----------------------------------------------------------
 
-    fn unary(&mut self, op: UnaryOp, operand: &ast::Expr, span: Span) -> TExpr {
+    fn unary(&mut self, op: UnaryOp, operand: &'a ast::Expr, span: Span) -> TExpr {
         let checked = self.expr(operand);
         match op {
             // OP_not → BOOLEAN_TYPE, operand ToBoolean (Verifier.cpp:2311).
@@ -257,7 +265,7 @@ impl Checker<'_> {
         }
     }
 
-    fn binary(&mut self, op: BinaryOp, l: &ast::Expr, r: &ast::Expr, span: Span) -> TExpr {
+    fn binary(&mut self, op: BinaryOp, l: &'a ast::Expr, r: &'a ast::Expr, span: Span) -> TExpr {
         use BinaryOp::*;
         // `is`/`as`: RHS is a type name, resolved statically in P2 (class
         // values arrive P4).
@@ -418,7 +426,7 @@ impl Checker<'_> {
     }
 
     /// Resolves the RHS of `is`/`as` to a core type, class, or interface.
-    fn type_operand(&mut self, e: &ast::Expr) -> Ty {
+    fn type_operand(&mut self, e: &'a ast::Expr) -> Ty {
         if let Some(ty) = self.apply_type_to_ty(e) {
             return ty;
         }
@@ -439,7 +447,13 @@ impl Checker<'_> {
 
     // --- assignment -------------------------------------------------------------
 
-    fn assign(&mut self, op: AssignOp, target: &ast::Expr, value: &ast::Expr, span: Span) -> TExpr {
+    fn assign(
+        &mut self,
+        op: AssignOp,
+        target: &'a ast::Expr,
+        value: &'a ast::Expr,
+        span: Span,
+    ) -> TExpr {
         // Compound assignment on properties needs receiver temps (P4's
         // lowering); locals only for now.
         if op != AssignOp::Assign && !matches!(target.kind, ExprKind::Ident(_)) {
@@ -599,7 +613,7 @@ impl Checker<'_> {
         target_ty: Ty,
         target: LocalId,
         cap_slot: Option<usize>,
-        value: &ast::Expr,
+        value: &'a ast::Expr,
         span: Span,
     ) -> TExpr {
         let bin_op = match op {
@@ -628,10 +642,26 @@ impl Checker<'_> {
 
     // --- calls ------------------------------------------------------------------
 
-    fn call(&mut self, callee: &ast::Expr, args: &[ast::Expr], span: Span) -> TExpr {
+    fn call(&mut self, callee: &'a ast::Expr, args: &'a [ast::Expr], span: Span) -> TExpr {
         // `super(...)` constructor chain.
         if matches!(callee.kind, ExprKind::Super) {
             return self.super_call(None, args, span);
+        }
+        // Generic function call: `firstOf.<int>(v)` (SPECS §4.2).
+        if let ExprKind::ApplyType(base, targs) = &callee.kind {
+            if let ExprKind::Ident(name) = &base.kind {
+                if !self.is_shadowed(name) {
+                    if let Some(tid) = self.fn_template_index(name) {
+                        let targs: Vec<Ty> = targs.iter().map(|t| self.resolve_type(t)).collect();
+                        if let Some(id) = self.instantiate_fn_template(tid, targs, span) {
+                            let checked = self.check_args_fn(id, args, span);
+                            let ret = self.fn_return(id);
+                            return mk(ret, span, TExprKind::CallFn(id, checked));
+                        }
+                        return self.error_expr(span);
+                    }
+                }
+            }
         }
         // Direct references get checked calls; everything else is an
         // indirect `Function`/`*` call (unchecked, returns `*` — AS3's
@@ -838,7 +868,7 @@ impl Checker<'_> {
         }
     }
 
-    fn args_to_any(&mut self, args: &[ast::Expr]) -> Vec<TExpr> {
+    fn args_to_any(&mut self, args: &'a [ast::Expr]) -> Vec<TExpr> {
         args.iter()
             .map(|a| {
                 let checked = self.expr(a);
@@ -851,7 +881,7 @@ impl Checker<'_> {
         &mut self,
         sig: &Signature,
         name: &str,
-        args: &[ast::Expr],
+        args: &'a [ast::Expr],
         span: Span,
     ) -> Vec<TExpr> {
         self.arity(
@@ -878,7 +908,7 @@ impl Checker<'_> {
             .collect()
     }
 
-    fn check_args_fn(&mut self, id: FnId, args: &[ast::Expr], span: Span) -> Vec<TExpr> {
+    fn check_args_fn(&mut self, id: FnId, args: &'a [ast::Expr], span: Span) -> Vec<TExpr> {
         let (params, required, variadic, name) = self.fn_sig_parts(id);
         self.arity(&name, args.len(), required, params.len(), variadic, span);
         args.iter()
@@ -1003,7 +1033,7 @@ impl Checker<'_> {
         )
     }
 
-    fn function_expr(&mut self, f: &ast::FunctionDecl, span: Span) -> TExpr {
+    fn function_expr(&mut self, f: &'a ast::FunctionDecl, span: Span) -> TExpr {
         let name = f.name.clone().unwrap_or_else(|| "<anonymous>".into());
         let ret = f
             .return_type

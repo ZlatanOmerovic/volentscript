@@ -164,3 +164,48 @@ fn cli_tool() {
     );
     let _ = std::fs::remove_dir_all(&out_dir);
 }
+
+/// The final golden test (SPECS §10): `tests/showcase.as` exercises the
+/// whole language surface; its expected stdout lives in the comment block
+/// at the bottom of the source file itself.
+#[test]
+fn showcase() {
+    let root = workspace_root();
+    let program = root.join("tests/showcase.as");
+    let source = std::fs::read_to_string(&program).expect("showcase source");
+
+    // Extract the expected block: after the "EXPECTED STDOUT" banner line
+    // and its explanatory lines, up to the closing dashed line.
+    let mut lines = source
+        .lines()
+        .skip_while(|l| !l.contains("EXPECTED STDOUT"));
+    lines.next(); // banner
+    let expected: String = lines
+        .skip_while(|l| !l.is_empty()) // rest of the explanation
+        .skip(1) // the blank separator itself
+        .take_while(|l| !l.starts_with("---"))
+        .flat_map(|l| [l, "\n"])
+        .collect();
+    assert!(!expected.is_empty(), "expected-stdout block not found");
+
+    let out_dir = std::env::temp_dir().join(format!("vs-golden-showcase-{}", std::process::id()));
+    std::fs::create_dir_all(&out_dir).expect("temp dir");
+    let exe = out_dir.join("showcase");
+    let built = driver::build(&driver::BuildOptions {
+        input: program,
+        output: Some(exe.clone()),
+        runtime_lib: Some(runtime_lib()),
+    })
+    .unwrap_or_else(|e| panic!("build failed:\n{}", e.rendered.join("\n")));
+
+    let output = Command::new(&built).output().expect("run compiled binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "non-zero exit; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(stdout, expected, "showcase stdout mismatch");
+    let _ = std::fs::remove_dir_all(&out_dir);
+}

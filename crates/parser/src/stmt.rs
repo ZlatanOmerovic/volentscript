@@ -212,6 +212,17 @@ impl Parser {
             }
             None
         };
+        // Generic type parameters: `function firstOf.<T>(...)` (SPECS §4.2).
+        let mut type_params = Vec::new();
+        if self.eat(&TokenKind::LeftDotAngle) {
+            loop {
+                type_params.push(self.expect_ident().0);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect_type_close();
+        }
         self.expect(&TokenKind::LParen);
         let mut params = Vec::new();
         if !self.at(&TokenKind::RParen) {
@@ -232,6 +243,7 @@ impl Parser {
         let span = keyword_span.to(body.span);
         FunctionDecl {
             name,
+            type_params,
             params,
             return_type,
             body,
