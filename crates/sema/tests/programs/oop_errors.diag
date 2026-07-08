@@ -1,0 +1,50 @@
+error[E0305]: class `Bad` is missing `talk` required by interface `Talker`
+  --> oop_errors.as:9:1
+   |
+ 9 | class Bad extends Base implements Talker {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+error[E0305]: `greet` overrides an inherited member and must be marked `override`
+   --> oop_errors.as:10:5
+    |
+ 10 |     public function greet():String { return "yo"; }         // E0305 missing override
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+error[E0305]: `id` cannot override a final member
+   --> oop_errors.as:11:5
+    |
+ 11 |     override public function id():int { return 2; }         // E0305 final override
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+error[E0305]: `nothing` is marked `override` but overrides nothing
+   --> oop_errors.as:12:5
+    |
+ 12 |     override public function nothing():void {}              // E0305 overrides nothing
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+error[E0305]: class `Cycle` inherits from itself
+   --> oop_errors.as:14:1
+    |
+ 14 | class Cycle extends Cycle {}                                 // E0305 self-inherit
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+error[E0305]: cannot extend final class `Sealed`
+   --> oop_errors.as:16:21
+    |
+ 16 | class Child extends Sealed {}                                // E0305 extends final
+    |                     ^^^^^^
+error[E0307]: `secret` is private to `Base`
+   --> oop_errors.as:18:7
+    |
+ 18 | trace(b.secret);                                             // E0307 private
+    |       ^^^^^^^^
+error[E0303]: `id` takes at most 0 argument(s), got 1
+   --> oop_errors.as:19:1
+    |
+ 19 | b.id(1);                                                     // E0303 arity
+    | ^^^^^^^
+error[E0302]: cannot implicitly convert `Base` to `Talker`
+   --> oop_errors.as:20:16
+    |
+ 20 | var t:Talker = b;                                            // E0302 not implementing
+    |                ^
+error[E0302]: cannot implicitly convert `Base` to `int`
+   --> oop_errors.as:21:13
+    |
+ 21 | var x:int = new Base();                                      // E0302 class -> int
+    |             ^^^^^^^^^^

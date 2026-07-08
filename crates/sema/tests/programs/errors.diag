@@ -78,7 +78,7 @@ error[E0310]: `continue missing2`: no enclosing loop is labeled `missing2`
     |
  31 | continue missing2;                 // E0310 label not in scope (loop ended)
     | ^^^^^^^^
-error[E0311]: the right side of `is`/`as` must be a type (core types only until Phase 4)
+error[E0311]: the right side of `is`/`as` must name a type
    --> errors.as:33:28
     |
  33 | var isIt:Boolean = five is missing3;   // E0311 not a type
@@ -88,7 +88,7 @@ warning: `instanceof` is deprecated; use `is`
     |
  34 | var old:Boolean = five instanceof int; // warning: deprecated
     |                   ^^^^^^^^^^^^^^^^^^^
-error[E0001]: using a type as a value requires the Class type — Phase 4
+error[E0001]: using a type as a value requires the Class type — Phase 6
    --> errors.as:34:35
     |
  34 | var old:Boolean = five instanceof int; // warning: deprecated

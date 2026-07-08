@@ -302,6 +302,10 @@ impl Parser {
                 self.advance();
                 ExprKind::This
             }
+            Super => {
+                self.advance();
+                ExprKind::Super
+            }
             Ident(ref name) => {
                 let name = name.clone();
                 self.advance();

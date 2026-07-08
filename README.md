@@ -62,15 +62,17 @@ and `runtime`.
 
 ## Status
 
-Phases 0–3 done: scaffold + CI (P0); lexer + parser (P1); semantic analysis
-with typed AST and coercion insertion (P2); **native compilation** (P3) —
-MIR lowering, LLVM codegen, Rust runtime static lib (UTF-16 strings, boxed
-`*`, ES3 §9 conversions, trace/parseInt/parseFloat/isNaN/isFinite, String &
-Number methods), system-linker link step, macOS ad-hoc codesign.
+Phases 0–4 done: scaffold + CI (P0); lexer + parser (P1); semantic analysis
+with typed AST and coercion insertion (P2); native compilation via MIR +
+LLVM + Rust runtime with link/codesign (P3); **classes, interfaces,
+inheritance** (P4) — sealed classes with native struct layouts, vtable
+dispatch, interface method tables, mandatory `override` + `final`
+enforcement, get/set accessors, statics, constructors with implicit
+`super()` chains and field initializers, access control
+(public/private/protected/internal), packages (single file), `is`/`as` on
+class hierarchies, `Object` root with `toString`.
 
-`vigorscript run file.as` compiles and executes a real arm64/x86-64 binary.
-Core subset works end to end: functions (defaults, recursion), all numeric
-semantics, strings + methods, control flow incl. labeled jumps and switch
-fall-through, `is`/`as`/`typeof`, dynamic `*` values. Later-phase constructs
-(classes, closures, exceptions, for..in, Array/Object literals) fail with
-phase-gated `error[E0001]` diagnostics. Phase plan: SPECS §11.
+`vigorscript run file.as` compiles and executes a real arm64/x86-64 binary
+— including polymorphic OOP programs. Remaining phase-gated constructs
+(closures/Function values, exceptions, for..in, Array/Vector generics,
+dynamic-class expando) report honest `error[E0001]`s. Phase plan: SPECS §11.

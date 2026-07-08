@@ -9,12 +9,17 @@
 
 mod builtins;
 mod check;
+mod classes;
 mod tast;
 mod tdump;
 mod ty;
 
 pub use builtins::BuiltinFn;
 pub use check::{CheckOutcome, check};
+pub use classes::{
+    ClassId, ClassInfo, FieldInfo, IfaceId, IfaceInfo, IfaceMethod, OBJECT, Registry, Sig,
+    StaticField, StaticMethod, VKind, VMethod,
+};
 pub use tast::*;
 pub use tdump::dump;
 pub use ty::Ty;

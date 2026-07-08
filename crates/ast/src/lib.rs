@@ -40,6 +40,18 @@ pub enum StmtKind {
     Expr(Expr),
     VarDecl(VarDecl),
     Function(Box<FunctionDecl>),
+    /// `package a.b { ... }` (SPECS §3.6). Empty path = default package.
+    Package {
+        path: Vec<String>,
+        body: Vec<Stmt>,
+    },
+    /// `import a.b.C;` / `import a.b.*;`
+    Import {
+        path: Vec<String>,
+        wildcard: bool,
+    },
+    Class(Box<ClassDecl>),
+    Interface(Box<InterfaceDecl>),
     Block(Block),
     If {
         cond: Expr,
@@ -203,6 +215,116 @@ pub struct Param {
     pub span: Span,
 }
 
+// --- classes & interfaces ---------------------------------------------------
+
+/// Access-control visibility (SPECS §3.4, §3.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(missing_docs)]
+pub enum Visibility {
+    Public,
+    Private,
+    Protected,
+    /// Package-visible; also the AS3 default when unspecified.
+    #[default]
+    Internal,
+}
+
+/// Modifiers collected before a declaration or member.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Attributes {
+    /// Access control; `None` = unspecified (internal by default).
+    pub visibility: Option<Visibility>,
+    /// `static` member.
+    pub is_static: bool,
+    /// `final` class or method.
+    pub is_final: bool,
+    /// `override` method/accessor (mandatory when overriding, SPECS §3.4).
+    pub is_override: bool,
+    /// `dynamic` class (SPECS §3.2).
+    pub is_dynamic: bool,
+    /// `native` declaration (runtime-provided body).
+    pub is_native: bool,
+}
+
+/// `class C extends B implements I, J { ... }` (SPECS §3.4).
+#[derive(Debug)]
+pub struct ClassDecl {
+    /// Modifiers.
+    pub attrs: Attributes,
+    /// Class name.
+    pub name: String,
+    /// Superclass; `None` = Object.
+    pub extends: Option<TypeRef>,
+    /// Implemented interfaces.
+    pub implements: Vec<TypeRef>,
+    /// Members in source order.
+    pub members: Vec<Member>,
+    /// Source range.
+    pub span: Span,
+}
+
+/// One class member.
+#[derive(Debug)]
+pub struct Member {
+    /// Modifiers.
+    pub attrs: Attributes,
+    /// What it is.
+    pub kind: MemberKind,
+    /// Source range.
+    pub span: Span,
+}
+
+/// Class member kinds. A method whose name equals the class name is the
+/// constructor (detected in sema).
+#[derive(Debug)]
+#[allow(missing_docs)]
+pub enum MemberKind {
+    /// `var`/`const` field(s).
+    Field(VarDecl),
+    Method(Box<FunctionDecl>),
+    Getter(Box<FunctionDecl>),
+    Setter(Box<FunctionDecl>),
+}
+
+/// `interface I extends J, K { ... }` (SPECS §3.5).
+#[derive(Debug)]
+pub struct InterfaceDecl {
+    /// Modifiers (visibility only is meaningful).
+    pub attrs: Attributes,
+    /// Interface name.
+    pub name: String,
+    /// Extended interfaces.
+    pub extends: Vec<TypeRef>,
+    /// Method/accessor signatures.
+    pub members: Vec<InterfaceMember>,
+    /// Source range.
+    pub span: Span,
+}
+
+/// One interface signature (no body).
+#[derive(Debug)]
+pub struct InterfaceMember {
+    /// Method vs accessor.
+    pub kind: SigKind,
+    /// Member name.
+    pub name: String,
+    /// Parameters.
+    pub params: Vec<Param>,
+    /// Return type.
+    pub return_type: Option<TypeRef>,
+    /// Source range.
+    pub span: Span,
+}
+
+/// Signature kinds in an interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum SigKind {
+    Method,
+    Getter,
+    Setter,
+}
+
 // --- types ---------------------------------------------------------------------
 
 /// A syntactic type reference (SPECS §9 `typeRef`).
@@ -256,6 +378,8 @@ pub enum ExprKind {
     Bool(bool),
     Null,
     This,
+    /// `super` — only as `super(args)` or `super.name(...)` receiver.
+    Super,
     Ident(String),
     /// `[a, , b]` — `None` elements are elisions (sparse arrays, SPECS §3.10).
     Array(Vec<Option<Expr>>),

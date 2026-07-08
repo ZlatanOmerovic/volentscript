@@ -32,6 +32,7 @@ mod tag {
     pub const UINT: u32 = 4;
     pub const NUMBER: u32 = 5;
     pub const STRING: u32 = 6;
+    pub const OBJECT: u32 = 7;
 }
 
 /// LLVM implementor of [`Backend`].
@@ -54,7 +55,7 @@ impl Backend for LlvmBackend {
         })?;
         module.set_triple(&machine.get_triple());
 
-        let cx = Cx {
+        let mut cx = Cx {
             context: &context,
             module,
             builder: context.create_builder(),
@@ -62,6 +63,7 @@ impl Backend for LlvmBackend {
                 &[context.i32_type().into(), context.i64_type().into()],
                 false,
             ),
+            classes: Vec::new(),
         };
 
         // Declare every function first (mutual recursion), then emit bodies.
@@ -71,8 +73,9 @@ impl Backend for LlvmBackend {
             .enumerate()
             .map(|(i, f)| cx.declare_function(i, f))
             .collect();
+        cx.classes = build_class_artifacts(&cx, program, &fns, &machine.get_target_data());
         for (f, decl) in program.functions.iter().zip(&fns) {
-            FnCx::emit(&cx, &fns, f, *decl);
+            FnCx::emit(&cx, &fns, program, f, *decl);
         }
 
         if let Err(e) = cx.module.verify() {
@@ -122,6 +125,23 @@ struct Cx<'ctx> {
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     any_ty: StructType<'ctx>,
+    /// Per-class artifacts (RTTI globals, layouts, statics); index = class.
+    classes: Vec<ClassArt<'ctx>>,
+}
+
+/// Per-class codegen artifacts.
+struct ClassArt<'ctx> {
+    /// The descriptor/RTTI global (VsClassDesc prefix + vtable — layout
+    /// contract with runtime/src/object.rs).
+    rtti: PointerValue<'ctx>,
+    /// Its struct type (for vtable geps).
+    rtti_ty: StructType<'ctx>,
+    /// Instance layout: { descriptor ptr, slots... }.
+    instance_ty: StructType<'ctx>,
+    /// ABI size of an instance in bytes.
+    size: u64,
+    /// Static field globals.
+    statics: Vec<PointerValue<'ctx>>,
 }
 
 /// A computed value.
@@ -133,6 +153,8 @@ enum Val<'ctx> {
     Bool(IntValue<'ctx>),
     /// String pointer (possibly null).
     Str(PointerValue<'ctx>),
+    /// Class instance pointer (possibly null).
+    Obj(PointerValue<'ctx>),
     /// Pointer to an entry-block alloca holding a `{i32, i64}` box.
     Any(PointerValue<'ctx>),
     Void,
@@ -149,6 +171,7 @@ impl<'ctx> Cx<'ctx> {
             Ty::Number => self.context.f64_type().into(),
             Ty::Boolean => self.context.bool_type().into(),
             Ty::String => self.ptr().into(),
+            Ty::Object(_) | Ty::Iface(_) => self.ptr().into(),
             Ty::Any => self.any_ty.into(),
             Ty::Void => unreachable!("void has no storage"),
         }
@@ -161,10 +184,16 @@ impl<'ctx> Cx<'ctx> {
         } else {
             format!("vs_fn{index}")
         };
-        let params: Vec<BasicMetadataTypeEnum> = f.locals[..f.param_count]
-            .iter()
-            .map(|&t| self.basic_ty(t).into())
-            .collect();
+        // Instance methods/constructors receive `this` first.
+        let mut params: Vec<BasicMetadataTypeEnum> = Vec::new();
+        if f.this_class.is_some() {
+            params.push(self.ptr().into());
+        }
+        params.extend(
+            f.locals[..f.param_count]
+                .iter()
+                .map(|&t| BasicMetadataTypeEnum::from(self.basic_ty(t))),
+        );
         let fn_type = match f.ret {
             Ty::Void => self.context.void_type().fn_type(&params, false),
             t => self.basic_ty(t).fn_type(&params, false),
@@ -202,6 +231,7 @@ struct Frame<'ctx> {
 struct FnCx<'a, 'ctx> {
     cx: &'a Cx<'ctx>,
     fns: &'a [FunctionValue<'ctx>],
+    program: &'a mir::Program,
     function: FunctionValue<'ctx>,
     mir_fn: &'a mir::Function,
     locals: Vec<(PointerValue<'ctx>, Ty)>,
@@ -213,6 +243,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
     fn emit(
         cx: &'a Cx<'ctx>,
         fns: &'a [FunctionValue<'ctx>],
+        program: &'a mir::Program,
         mir_fn: &'a mir::Function,
         function: FunctionValue<'ctx>,
     ) {
@@ -222,6 +253,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
         let mut fcx = FnCx {
             cx,
             fns,
+            program,
             function,
             mir_fn,
             locals: Vec::new(),
@@ -233,7 +265,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             let slot = fcx.entry_alloca(cx.basic_ty(ty), &format!("local{i}"));
             fcx.locals.push((slot, ty));
             if i < mir_fn.param_count {
-                let arg = function.get_nth_param(i as u32).expect("param");
+                let arg_index = i as u32 + u32::from(mir_fn.this_class.is_some());
+                let arg = function.get_nth_param(arg_index).expect("param");
                 cx.builder.build_store(slot, arg).expect("store");
             } else {
                 // Non-param locals get their type's default (SPECS §3.11)
@@ -242,7 +275,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     Ty::Int | Ty::UInt => cx.context.i32_type().const_zero().into(),
                     Ty::Number => cx.context.f64_type().const_float(f64::NAN).into(),
                     Ty::Boolean => cx.context.bool_type().const_zero().into(),
-                    Ty::String => cx.ptr().const_null().into(),
+                    Ty::String | Ty::Object(_) | Ty::Iface(_) => cx.ptr().const_null().into(),
                     Ty::Any => cx.any_ty.const_zero().into(), // tag 0 = undefined
                     Ty::Void => unreachable!(),
                 };
@@ -282,7 +315,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             Ty::Boolean => b
                 .build_return(Some(&self.cx.context.bool_type().const_zero()))
                 .expect("ret"),
-            Ty::String => b
+            Ty::String | Ty::Object(_) | Ty::Iface(_) => b
                 .build_return(Some(&self.cx.ptr().const_null()))
                 .expect("ret"),
             Ty::Any => b
@@ -676,6 +709,50 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             ExprKind::Logical { is_and, lhs, rhs } => self.logical(*is_and, lhs, rhs, e.ty),
             ExprKind::Conditional(c, t, f) => self.conditional(c, t, f, e.ty),
             ExprKind::Is(v, target) => {
+                if let Ty::Object(class) = *target {
+                    let p = self.as_any_ptr(v);
+                    let f = cx.runtime_fn(
+                        "vs_any_is_class",
+                        Some(cx.context.i32_type().into()),
+                        &[cx.ptr().into(), cx.ptr().into()],
+                    );
+                    let rtti = cx.classes[class as usize].rtti;
+                    let call = self
+                        .cx
+                        .builder
+                        .build_call(f, &[p.into(), rtti.into()], "is_c")
+                        .expect("call");
+                    return Val::Bool(
+                        self.nonzero(
+                            call.try_as_basic_value()
+                                .basic()
+                                .expect("value")
+                                .into_int_value(),
+                        ),
+                    );
+                }
+                if let Ty::Iface(iface) = *target {
+                    let p = self.as_any_ptr(v);
+                    let f = cx.runtime_fn(
+                        "vs_any_is_iface",
+                        Some(cx.context.i32_type().into()),
+                        &[cx.ptr().into(), cx.context.i32_type().into()],
+                    );
+                    let id = cx.context.i32_type().const_int(u64::from(iface), false);
+                    let call = self
+                        .cx
+                        .builder
+                        .build_call(f, &[p.into(), id.into()], "is_i")
+                        .expect("call");
+                    return Val::Bool(
+                        self.nonzero(
+                            call.try_as_basic_value()
+                                .basic()
+                                .expect("value")
+                                .into_int_value(),
+                        ),
+                    );
+                }
                 let p = self.as_any_ptr(v);
                 let f = cx.runtime_fn(
                     "vs_any_is",
@@ -701,6 +778,46 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 )
             }
             ExprKind::As(v, target) => {
+                if let Ty::Object(class) = *target {
+                    let p = self.as_any_ptr(v);
+                    let f = cx.runtime_fn(
+                        "vs_any_as_class",
+                        Some(cx.ptr().into()),
+                        &[cx.ptr().into(), cx.ptr().into()],
+                    );
+                    let rtti = cx.classes[class as usize].rtti;
+                    let call = self
+                        .cx
+                        .builder
+                        .build_call(f, &[p.into(), rtti.into()], "as_c")
+                        .expect("call");
+                    return Val::Obj(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("value")
+                            .into_pointer_value(),
+                    );
+                }
+                if let Ty::Iface(iface) = *target {
+                    let p = self.as_any_ptr(v);
+                    let f = cx.runtime_fn(
+                        "vs_any_as_iface",
+                        Some(cx.ptr().into()),
+                        &[cx.ptr().into(), cx.context.i32_type().into()],
+                    );
+                    let id = cx.context.i32_type().const_int(u64::from(iface), false);
+                    let call = self
+                        .cx
+                        .builder
+                        .build_call(f, &[p.into(), id.into()], "as_i")
+                        .expect("call");
+                    return Val::Obj(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("value")
+                            .into_pointer_value(),
+                    );
+                }
                 let p = self.as_any_ptr(v);
                 if *target == Ty::String {
                     let f = cx.runtime_fn(
@@ -746,7 +863,375 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 self.expr(l);
                 self.expr(r)
             }
+            ExprKind::StaticIncDec {
+                class,
+                index,
+                is_inc,
+                is_prefix,
+            } => {
+                let g = self.cx.classes[*class as usize].statics[*index];
+                let ty = self.program.classes[*class as usize].statics[*index];
+                self.inc_dec_at(g, ty, *is_inc, *is_prefix)
+            }
+            ExprKind::FieldIncDec {
+                recv,
+                class,
+                slot,
+                is_inc,
+                is_prefix,
+            } => {
+                let obj = self.obj_operand(recv);
+                self.null_check(obj);
+                let (p, ty) = self.field_ptr(obj, *class, *slot);
+                self.inc_dec_at(p, ty, *is_inc, *is_prefix)
+            }
+            ExprKind::This => Val::Obj(
+                self.function
+                    .get_nth_param(0)
+                    .expect("this param")
+                    .into_pointer_value(),
+            ),
+            ExprKind::New(class, args) => self.new_object(*class, args),
+            ExprKind::FieldGet(recv, class, slot) => {
+                let obj = self.obj_operand(recv);
+                self.null_check(obj);
+                let (p, ty) = self.field_ptr(obj, *class, *slot);
+                let v = self
+                    .cx
+                    .builder
+                    .build_load(cx.basic_ty(ty), p, "fld")
+                    .expect("load");
+                self.wrap_basic(v, ty)
+            }
+            ExprKind::FieldSet(recv, class, slot, value) => {
+                let obj = self.obj_operand(recv);
+                self.null_check(obj);
+                let v = self.expr(value);
+                let (p, ty) = self.field_ptr(obj, *class, *slot);
+                let basic = self.ref_tolerant_basic(v, ty);
+                self.cx.builder.build_store(p, basic).expect("store");
+                self.wrap_basic(basic, ty)
+            }
+            ExprKind::CallVirtual {
+                recv,
+                class,
+                vslot,
+                args,
+            } => self.call_virtual(recv, *class, *vslot, args, e.ty),
+            ExprKind::CallIface {
+                recv,
+                iface,
+                islot,
+                ret,
+                args,
+            } => self.call_iface(recv, *iface, *islot, *ret, args, e.ty),
+            ExprKind::CallDirect { fn_id, recv, args } => {
+                let obj = self.obj_operand(recv);
+                let mut argv: Vec<BasicMetadataValueEnum> = vec![obj.into()];
+                for a in args {
+                    let v = self.expr(a);
+                    argv.push(self.materialize(v).into());
+                }
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(self.fns[fn_id.0 as usize], &argv, "direct")
+                    .expect("call");
+                match self.program.functions[fn_id.0 as usize].ret {
+                    Ty::Void => Val::Void,
+                    t => self.wrap_basic(call.try_as_basic_value().basic().expect("value"), t),
+                }
+            }
+            ExprKind::StaticGet(class, index) => {
+                let g = self.cx.classes[*class as usize].statics[*index];
+                let ty = self.program.classes[*class as usize].statics[*index];
+                let v = self
+                    .cx
+                    .builder
+                    .build_load(cx.basic_ty(ty), g, "sget")
+                    .expect("load");
+                self.wrap_basic(v, ty)
+            }
+            ExprKind::StaticSet(class, index, value) => {
+                let g = self.cx.classes[*class as usize].statics[*index];
+                let ty = self.program.classes[*class as usize].statics[*index];
+                let v = self.expr(value);
+                let basic = self.ref_tolerant_basic(v, ty);
+                self.cx.builder.build_store(g, basic).expect("store");
+                self.wrap_basic(basic, ty)
+            }
         }
+    }
+
+    /// Object-typed operand (null String literals flow in as `Str`).
+    fn obj_operand(&mut self, e: &mir::Expr) -> PointerValue<'ctx> {
+        match self.expr(e) {
+            Val::Obj(p) | Val::Str(p) => p,
+            _ => unreachable!("object operand"),
+        }
+    }
+
+    fn null_check(&mut self, obj: PointerValue<'ctx>) {
+        let f = self
+            .cx
+            .runtime_fn("vs_null_check", None, &[self.cx.ptr().into()]);
+        self.cx
+            .builder
+            .build_call(f, &[obj.into()], "")
+            .expect("call");
+    }
+
+    /// Pointer to instance slot `slot` using the owning class's layout.
+    fn field_ptr(
+        &mut self,
+        obj: PointerValue<'ctx>,
+        class: u32,
+        slot: usize,
+    ) -> (PointerValue<'ctx>, Ty) {
+        let art = &self.cx.classes[class as usize];
+        let ty = self.program.classes[class as usize].slots[slot];
+        let p = self
+            .cx
+            .builder
+            .build_struct_gep(art.instance_ty, obj, (slot + 1) as u32, "fldp")
+            .expect("gep");
+        (p, ty)
+    }
+
+    /// Store-compatible basic value: reference kinds (String/Object/Iface)
+    /// interchange freely as pointers (null literals, upcasts).
+    fn ref_tolerant_basic(&mut self, v: Val<'ctx>, target: Ty) -> BasicValueEnum<'ctx> {
+        match (target, v) {
+            (Ty::Object(_) | Ty::Iface(_), Val::Str(p)) => p.into(),
+            (Ty::String, Val::Obj(p)) => p.into(),
+            _ => self.materialize(v),
+        }
+    }
+
+    fn new_object(&mut self, class: u32, args: &[mir::Expr]) -> Val<'ctx> {
+        let cx = self.cx;
+        let art = &cx.classes[class as usize];
+        let (rtti, size, instance_ty) = (art.rtti, art.size, art.instance_ty);
+        let alloc = cx.runtime_fn(
+            "vs_alloc_object",
+            Some(cx.ptr().into()),
+            &[cx.ptr().into(), cx.context.i64_type().into()],
+        );
+        let call = self
+            .cx
+            .builder
+            .build_call(
+                alloc,
+                &[
+                    rtti.into(),
+                    cx.context.i64_type().const_int(size, false).into(),
+                ],
+                "obj",
+            )
+            .expect("call");
+        let obj = call
+            .try_as_basic_value()
+            .basic()
+            .expect("value")
+            .into_pointer_value();
+        // Zeroed memory covers every default except Number = NaN
+        // (SPECS §3.11).
+        let slots: Vec<(usize, Ty)> = self.program.classes[class as usize]
+            .slots
+            .iter()
+            .copied()
+            .enumerate()
+            .collect();
+        for (slot, ty) in slots {
+            if ty == Ty::Number {
+                let p = self
+                    .cx
+                    .builder
+                    .build_struct_gep(instance_ty, obj, (slot + 1) as u32, "nanp")
+                    .expect("gep");
+                self.cx
+                    .builder
+                    .build_store(p, cx.context.f64_type().const_float(f64::NAN))
+                    .expect("store");
+            }
+        }
+        // Run the constructor chain.
+        let ctor = self.program.classes[class as usize].ctor;
+        let mut argv: Vec<BasicMetadataValueEnum> = vec![obj.into()];
+        for a in args {
+            let v = self.expr(a);
+            argv.push(self.materialize(v).into());
+        }
+        self.cx
+            .builder
+            .build_call(self.fns[ctor.0 as usize], &argv, "")
+            .expect("call");
+        Val::Obj(obj)
+    }
+
+    /// Builds the LLVM function type of a method from its MIR definition.
+    fn method_fn_type(&self, fn_id: mir::FnId) -> inkwell::types::FunctionType<'ctx> {
+        let cx = self.cx;
+        let f = &self.program.functions[fn_id.0 as usize];
+        let mut params: Vec<BasicMetadataTypeEnum> = vec![cx.ptr().into()];
+        params.extend(
+            f.locals[..f.param_count]
+                .iter()
+                .map(|&t| BasicMetadataTypeEnum::from(cx.basic_ty(t))),
+        );
+        match f.ret {
+            Ty::Void => cx.context.void_type().fn_type(&params, false),
+            t => cx.basic_ty(t).fn_type(&params, false),
+        }
+    }
+
+    fn call_virtual(
+        &mut self,
+        recv: &mir::Expr,
+        class: u32,
+        vslot: usize,
+        args: &[mir::Expr],
+        expr_ty: Ty,
+    ) -> Val<'ctx> {
+        let cx = self.cx;
+        let obj = self.obj_operand(recv);
+        self.null_check(obj);
+        // Header word 0 = descriptor pointer; vtable is rtti field 8.
+        let desc = self
+            .cx
+            .builder
+            .build_load(cx.ptr(), obj, "desc")
+            .expect("load")
+            .into_pointer_value();
+        let rtti_ty = cx.classes[class as usize].rtti_ty;
+        let vt = self
+            .cx
+            .builder
+            .build_struct_gep(rtti_ty, desc, 8, "vt")
+            .expect("gep");
+        let slot_ptr = unsafe {
+            self.cx.builder.build_in_bounds_gep(
+                cx.ptr().array_type(0),
+                vt,
+                &[
+                    cx.context.i32_type().const_zero(),
+                    cx.context.i32_type().const_int(vslot as u64, false),
+                ],
+                "vslot",
+            )
+        }
+        .expect("gep");
+        let fptr = self
+            .cx
+            .builder
+            .build_load(cx.ptr(), slot_ptr, "vfn")
+            .expect("load")
+            .into_pointer_value();
+        let target = self.program.classes[class as usize].vtable[vslot];
+        let fn_ty = self.method_fn_type(target);
+        let mut argv: Vec<BasicMetadataValueEnum> = vec![obj.into()];
+        let mut first_arg: Option<Val> = None;
+        for a in args {
+            let v = self.expr(a);
+            first_arg.get_or_insert(v);
+            argv.push(self.materialize(v).into());
+        }
+        let call = self
+            .cx
+            .builder
+            .build_indirect_call(fn_ty, fptr, &argv, "vcall")
+            .expect("call");
+        let callee_ret = self.program.functions[target.0 as usize].ret;
+        if callee_ret == Ty::Void {
+            // Setter calls: the assignment expression's value is the
+            // assigned operand.
+            if expr_ty != Ty::Void {
+                return first_arg.unwrap_or(Val::Void);
+            }
+            return Val::Void;
+        }
+        self.wrap_basic(
+            call.try_as_basic_value().basic().expect("value"),
+            callee_ret,
+        )
+    }
+
+    fn call_iface(
+        &mut self,
+        recv: &mir::Expr,
+        iface: u32,
+        islot: usize,
+        ret: Ty,
+        args: &[mir::Expr],
+        expr_ty: Ty,
+    ) -> Val<'ctx> {
+        let cx = self.cx;
+        let obj = self.obj_operand(recv);
+        let lookup = cx.runtime_fn(
+            "vs_iface_table",
+            Some(cx.ptr().into()),
+            &[cx.ptr().into(), cx.context.i32_type().into()],
+        );
+        let table = self
+            .cx
+            .builder
+            .build_call(
+                lookup,
+                &[
+                    obj.into(),
+                    cx.context
+                        .i32_type()
+                        .const_int(u64::from(iface), false)
+                        .into(),
+                ],
+                "itab",
+            )
+            .expect("call")
+            .try_as_basic_value()
+            .basic()
+            .expect("value")
+            .into_pointer_value();
+        let slot_ptr = unsafe {
+            self.cx.builder.build_in_bounds_gep(
+                cx.ptr(),
+                table,
+                &[cx.context.i32_type().const_int(islot as u64, false)],
+                "islot",
+            )
+        }
+        .expect("gep");
+        let fptr = self
+            .cx
+            .builder
+            .build_load(cx.ptr(), slot_ptr, "ifn")
+            .expect("load")
+            .into_pointer_value();
+        // Function type: this + coerced arg types, declared return.
+        let mut params: Vec<BasicMetadataTypeEnum> = vec![cx.ptr().into()];
+        let mut argv: Vec<BasicMetadataValueEnum> = vec![obj.into()];
+        let mut first_arg: Option<Val> = None;
+        for a in args {
+            let v = self.expr(a);
+            first_arg.get_or_insert(v);
+            params.push(BasicMetadataTypeEnum::from(cx.basic_ty(a.ty)));
+            argv.push(self.materialize(v).into());
+        }
+        let fn_ty = match ret {
+            Ty::Void => cx.context.void_type().fn_type(&params, false),
+            t => cx.basic_ty(t).fn_type(&params, false),
+        };
+        let call = self
+            .cx
+            .builder
+            .build_indirect_call(fn_ty, fptr, &argv, "icall")
+            .expect("call");
+        if ret == Ty::Void {
+            if expr_ty != Ty::Void {
+                return first_arg.unwrap_or(Val::Void);
+            }
+            return Val::Void;
+        }
+        self.wrap_basic(call.try_as_basic_value().basic().expect("value"), ret)
     }
 
     fn load_local(&mut self, id: mir::LocalId) -> Val<'ctx> {
@@ -777,6 +1262,14 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
 
     fn store_local(&mut self, id: mir::LocalId, v: Val<'ctx>) {
         let (slot, ty) = self.locals[id.0 as usize];
+        // Reference kinds (String/Object/Iface) interchange as pointers
+        // (null literals, upcasts share representation).
+        if matches!(ty, Ty::Object(_) | Ty::Iface(_) | Ty::String) {
+            if let Val::Str(p) | Val::Obj(p) = v {
+                self.cx.builder.build_store(slot, p).expect("store");
+                return;
+            }
+        }
         match (ty, v) {
             (Ty::Any, Val::Any(p)) => {
                 let value = self
@@ -797,7 +1290,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
         match v {
             Val::Int(v) | Val::UInt(v) | Val::Bool(v) => v.into(),
             Val::Num(v) => v.into(),
-            Val::Str(p) => p.into(),
+            Val::Str(p) | Val::Obj(p) => p.into(),
             Val::Any(p) => self
                 .cx
                 .builder
@@ -814,6 +1307,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             Ty::Number => Val::Num(v.into_float_value()),
             Ty::Boolean => Val::Bool(v.into_int_value()),
             Ty::String => Val::Str(v.into_pointer_value()),
+            Ty::Object(_) | Ty::Iface(_) => Val::Obj(v.into_pointer_value()),
             Ty::Any => {
                 let slot = self.entry_alloca(self.cx.any_ty, "anyv");
                 self.cx.builder.build_store(slot, v).expect("store");
@@ -929,6 +1423,50 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                         .into_pointer_value(),
                 )
             }
+            Conv::AnyToObject(class) => {
+                let Val::Any(p) = v else {
+                    unreachable!("AnyToObject operand")
+                };
+                let f = cx.runtime_fn(
+                    "vs_any_coerce_class",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.ptr().into()],
+                );
+                let rtti = cx.classes[class as usize].rtti;
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), rtti.into()], "coerce_o")
+                    .expect("call");
+                Val::Obj(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            Conv::AnyToIface(iface) => {
+                let Val::Any(p) = v else {
+                    unreachable!("AnyToIface operand")
+                };
+                let f = cx.runtime_fn(
+                    "vs_any_coerce_iface",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.context.i32_type().into()],
+                );
+                let id = cx.context.i32_type().const_int(u64::from(iface), false);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), id.into()], "coerce_i")
+                    .expect("call");
+                Val::Obj(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
         }
     }
 
@@ -984,6 +1522,14 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
         let cx = self.cx;
         let call = match v {
             Val::Str(p) => return p,
+            Val::Obj(p) => {
+                let rf = cx.runtime_fn(
+                    "vs_object_to_string",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                self.cx.builder.build_call(rf, &[p.into()], "o2s")
+            }
             Val::Num(f) => {
                 let rf = cx.runtime_fn(
                     "vs_num_to_string",
@@ -1108,6 +1654,27 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .expect("cast");
                 (t, bits)
             }
+            Val::Obj(p) => {
+                // null object boxes as the null value.
+                let is_null = self.cx.builder.build_is_null(p, "isnull").expect("isnull");
+                let t = self
+                    .cx
+                    .builder
+                    .build_select(
+                        is_null,
+                        i32t.const_int(u64::from(tag::NULL), false),
+                        i32t.const_int(u64::from(tag::OBJECT), false),
+                        "tag",
+                    )
+                    .expect("select")
+                    .into_int_value();
+                let bits = self
+                    .cx
+                    .builder
+                    .build_ptr_to_int(p, i64t, "p2i")
+                    .expect("cast");
+                (t, bits)
+            }
             Val::Any(_) | Val::Void => unreachable!(),
         };
         let tag_ptr = self
@@ -1154,6 +1721,11 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     "tob",
                 )
                 .expect("cmp"),
+            Val::Obj(p) => self
+                .cx
+                .builder
+                .build_is_not_null(p, "objtrue")
+                .expect("isnull"),
             Val::Str(_) | Val::Any(_) => {
                 let p = match v {
                     Val::Any(p) => p,
@@ -1244,6 +1816,52 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 )
             }
         }
+    }
+
+    /// Increment/decrement of any addressable numeric slot.
+    fn inc_dec_at(
+        &mut self,
+        slot: PointerValue<'ctx>,
+        ty: Ty,
+        is_inc: bool,
+        is_prefix: bool,
+    ) -> Val<'ctx> {
+        let loaded = self
+            .cx
+            .builder
+            .build_load(self.cx.basic_ty(ty), slot, "old")
+            .expect("load");
+        let old = self.wrap_basic(loaded, ty);
+        let new = match old {
+            Val::Int(i) | Val::UInt(i) => {
+                let one = self.cx.context.i32_type().const_int(1, false);
+                let n = if is_inc {
+                    self.cx.builder.build_int_add(i, one, "inc")
+                } else {
+                    self.cx.builder.build_int_sub(i, one, "dec")
+                }
+                .expect("arith");
+                match old {
+                    Val::Int(_) => Val::Int(n),
+                    _ => Val::UInt(n),
+                }
+            }
+            Val::Num(f) => {
+                let one = self.cx.context.f64_type().const_float(1.0);
+                Val::Num(
+                    if is_inc {
+                        self.cx.builder.build_float_add(f, one, "inc")
+                    } else {
+                        self.cx.builder.build_float_sub(f, one, "dec")
+                    }
+                    .expect("arith"),
+                )
+            }
+            _ => unreachable!("numeric inc/dec target"),
+        };
+        let basic = self.materialize(new);
+        self.cx.builder.build_store(slot, basic).expect("store");
+        if is_prefix { new } else { old }
     }
 
     fn inc_dec(&mut self, target: mir::LocalId, is_inc: bool, is_prefix: bool) -> Val<'ctx> {
@@ -1508,6 +2126,26 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 .cx
                 .builder
                 .build_int_compare(IntPredicate::EQ, a, b, "eq")
+                .expect("cmp"),
+            // Object reference identity (§11.9.6 step 13). A null String
+            // literal compared against an object also lands here.
+            (Val::Obj(a), Val::Obj(b))
+            | (Val::Obj(a), Val::Str(b))
+            | (Val::Str(a), Val::Obj(b)) => self
+                .cx
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    self.cx
+                        .builder
+                        .build_ptr_to_int(a, self.cx.context.i64_type(), "pa")
+                        .expect("cast"),
+                    self.cx
+                        .builder
+                        .build_ptr_to_int(b, self.cx.context.i64_type(), "pb")
+                        .expect("cast"),
+                    "refeq",
+                )
                 .expect("cmp"),
             (Val::Str(a), Val::Str(b)) => {
                 let f = cx.runtime_fn(
@@ -1863,6 +2501,164 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
     }
 }
 
+/// Builds RTTI globals, instance layouts, interface tables, and static
+/// storage for every class (layout contract: runtime/src/object.rs).
+fn build_class_artifacts<'ctx>(
+    cx: &Cx<'ctx>,
+    program: &mir::Program,
+    fns: &[FunctionValue<'ctx>],
+    td: &inkwell::targets::TargetData,
+) -> Vec<ClassArt<'ctx>> {
+    let i32t = cx.context.i32_type();
+    let ptr = cx.ptr();
+
+    // Pass 1: create globals (types + declarations) so parents can be
+    // referenced regardless of declaration order.
+    let mut arts: Vec<(ClassArt, inkwell::values::GlobalValue)> = Vec::new();
+    for (index, class) in program.classes.iter().enumerate() {
+        let slot_tys: Vec<BasicTypeEnum> = std::iter::once(ptr.into())
+            .chain(class.slots.iter().map(|&t| cx.basic_ty(t)))
+            .collect();
+        let instance_ty = cx.context.struct_type(&slot_tys, false);
+        let size = td.get_abi_size(&instance_ty);
+        let vtable_ty = ptr.array_type(class.vtable.len() as u32);
+        let rtti_ty = cx.context.struct_type(
+            &[
+                i32t.into(),      // type_id
+                i32t.into(),      // pad
+                ptr.into(),       // parent
+                ptr.into(),       // name
+                i32t.into(),      // iface_count
+                i32t.into(),      // pad2
+                ptr.into(),       // ifaces
+                ptr.into(),       // to_string
+                vtable_ty.into(), // vtable
+            ],
+            false,
+        );
+        let global = cx
+            .module
+            .add_global(rtti_ty, None, &format!("vs_rtti{index}"));
+        let statics: Vec<PointerValue> = class
+            .statics
+            .iter()
+            .enumerate()
+            .map(|(si, &ty)| {
+                let g =
+                    cx.module
+                        .add_global(cx.basic_ty(ty), None, &format!("vs_static{index}_{si}"));
+                let init: BasicValueEnum = match ty {
+                    Ty::Number => cx.context.f64_type().const_float(f64::NAN).into(),
+                    t => cx.basic_ty(t).const_zero(),
+                };
+                g.set_initializer(&init);
+                g.as_pointer_value()
+            })
+            .collect();
+        arts.push((
+            ClassArt {
+                rtti: global.as_pointer_value(),
+                rtti_ty,
+                instance_ty,
+                size,
+                statics,
+            },
+            global,
+        ));
+    }
+
+    // Pass 2: initializers.
+    for (index, class) in program.classes.iter().enumerate() {
+        let (art, global) = &arts[index];
+        // Qualified name as a constant VsString {i32 len, ptr data}.
+        let units: Vec<u16> = class.name.encode_utf16().collect();
+        let data_init: Vec<IntValue> = units
+            .iter()
+            .map(|&u| cx.context.i16_type().const_int(u64::from(u), false))
+            .collect();
+        let data_global = cx.module.add_global(
+            cx.context.i16_type().array_type(units.len() as u32),
+            None,
+            &format!("vs_name_data{index}"),
+        );
+        data_global.set_initializer(&cx.context.i16_type().const_array(&data_init));
+        data_global.set_constant(true);
+        let str_ty = cx.context.struct_type(&[i32t.into(), ptr.into()], false);
+        let name_global = cx
+            .module
+            .add_global(str_ty, None, &format!("vs_name{index}"));
+        name_global.set_initializer(&str_ty.const_named_struct(&[
+            i32t.const_int(units.len() as u64, false).into(),
+            data_global.as_pointer_value().into(),
+        ]));
+        name_global.set_constant(true);
+
+        // Interface tables + pair array.
+        let pair_ty = cx
+            .context
+            .struct_type(&[i32t.into(), i32t.into(), ptr.into()], false);
+        let mut pairs: Vec<inkwell::values::StructValue> = Vec::new();
+        for (iface_id, table) in &class.ifaces {
+            let entries: Vec<PointerValue> = table
+                .iter()
+                .map(|f| fns[f.0 as usize].as_global_value().as_pointer_value())
+                .collect();
+            let table_global = cx.module.add_global(
+                ptr.array_type(entries.len() as u32),
+                None,
+                &format!("vs_itab{index}_{iface_id}"),
+            );
+            table_global.set_initializer(&ptr.const_array(&entries));
+            table_global.set_constant(true);
+            pairs.push(pair_ty.const_named_struct(&[
+                i32t.const_int(u64::from(*iface_id), false).into(),
+                i32t.const_zero().into(),
+                table_global.as_pointer_value().into(),
+            ]));
+        }
+        let ifaces_ptr: PointerValue = if pairs.is_empty() {
+            ptr.const_null()
+        } else {
+            let pairs_global = cx.module.add_global(
+                pair_ty.array_type(pairs.len() as u32),
+                None,
+                &format!("vs_ipairs{index}"),
+            );
+            pairs_global.set_initializer(&pair_ty.const_array(&pairs));
+            pairs_global.set_constant(true);
+            pairs_global.as_pointer_value()
+        };
+
+        let parent_ptr: PointerValue = match class.parent {
+            Some(p) => arts[p as usize].0.rtti,
+            None => ptr.const_null(),
+        };
+        let to_string_ptr: PointerValue = match class.to_string {
+            Some(f) => fns[f.0 as usize].as_global_value().as_pointer_value(),
+            None => ptr.const_null(),
+        };
+        let vtable_entries: Vec<PointerValue> = class
+            .vtable
+            .iter()
+            .map(|f| fns[f.0 as usize].as_global_value().as_pointer_value())
+            .collect();
+        let init = art.rtti_ty.const_named_struct(&[
+            i32t.const_int(index as u64, false).into(),
+            i32t.const_zero().into(),
+            parent_ptr.into(),
+            name_global.as_pointer_value().into(),
+            i32t.const_int(class.ifaces.len() as u64, false).into(),
+            i32t.const_zero().into(),
+            ifaces_ptr.into(),
+            to_string_ptr.into(),
+            ptr.const_array(&vtable_entries).into(),
+        ]);
+        global.set_initializer(&init);
+        global.set_constant(true);
+    }
+    arts.into_iter().map(|(a, _)| a).collect()
+}
+
 enum ArgKind {
     Num,
     Str,
@@ -1875,7 +2671,9 @@ fn ty_tag(ty: Ty) -> u32 {
         Ty::Number => tag::NUMBER,
         Ty::Boolean => tag::BOOLEAN,
         Ty::String => tag::STRING,
-        Ty::Any | Ty::Void => tag::NULL,
+        // Class/interface targets dispatch through the object-model
+        // runtime calls, never through core tags.
+        Ty::Any | Ty::Void | Ty::Object(_) | Ty::Iface(_) => tag::NULL,
     }
 }
 

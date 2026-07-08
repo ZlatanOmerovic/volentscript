@@ -6,16 +6,29 @@
 //! not present in `docs/` (see P2 report), the conservative choice is taken
 //! and marked `DOC GAP`.
 
+mod decl;
 mod expr;
+mod expr_class;
 
 use std::collections::HashMap;
 
 use diagnostics::{Diagnostic, ErrorCode, Severity};
 use span::Span;
 
+pub(crate) use decl::TypeSym;
+
 use crate::builtins::{self, BuiltinFn};
+use crate::classes::{ClassId, Registry};
 use crate::tast::*;
 use crate::ty::Ty;
+
+/// Class context of the function currently being checked.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MethodCtx {
+    pub(crate) class: ClassId,
+    pub(crate) is_static: bool,
+    pub(crate) is_ctor: bool,
+}
 
 /// Result of checking: a typed program when no errors occurred, plus all
 /// diagnostics (warnings survive success).
@@ -41,6 +54,7 @@ pub fn check(program: &ast::Program) -> CheckOutcome {
     CheckOutcome {
         program: (!failed).then_some(TProgram {
             functions: checker.functions,
+            registry: checker.registry,
         }),
         diagnostics: checker.diagnostics,
     }
@@ -97,25 +111,58 @@ pub(crate) struct Checker {
     fn_stack: Vec<usize>,
     jumps: Vec<JumpCtx>,
     labels: Vec<String>,
+    /// Class/interface registry (SPECS §3.4/§3.5).
+    pub(crate) registry: Registry,
+    /// Simple and qualified type names → registry ids.
+    pub(crate) type_names: HashMap<String, TypeSym>,
+    /// Class context per function frame (`None` = plain function).
+    pub(crate) method_ctx: Vec<Option<MethodCtx>>,
+    /// Set when the constructor being checked contains a `super(...)` call.
+    pub(crate) ctor_saw_super: bool,
 }
 
 impl Checker {
     fn check_script(&mut self, program: &ast::Program) {
+        self.registry = Registry::with_object_root();
         // The script body is function 0 with no params (SPECS §7 entry).
         let script = self.new_function("<script>", Ty::Void, program.span);
         debug_assert_eq!(script, SCRIPT_FN);
         self.scopes.push(Scope::default());
         self.fn_stack.push(0);
+        self.method_ctx.push(None);
+
+        // Pass A/B: types first so the script body can reference classes.
+        let mut classes = Vec::new();
+        let mut ifaces = Vec::new();
+        self.collect_types(&program.directives, &[], &mut classes, &mut ifaces);
+        self.build_hierarchy(&classes, &ifaces);
+        // Pass C: the script body (hoists script-level functions/vars into
+        // the global scope so method bodies can see them).
         let body = self.check_function_body(script, &[], &program.directives, program.span);
         self.functions[0].body = body;
+        // Pass D: field/static initializers and method bodies.
+        for (id, decl) in &classes {
+            self.check_class_bodies(*id, decl);
+        }
+        self.method_ctx.pop();
         self.fn_stack.pop();
         self.scopes.pop();
+    }
+
+    /// Human-readable type name for diagnostics.
+    pub(crate) fn ty_name(&self, ty: Ty) -> String {
+        match ty {
+            Ty::Class(id) => self.registry.classes[id.0 as usize].qualified(),
+            Ty::Iface(id) => self.registry.ifaces[id.0 as usize].name.clone(),
+            other => other.to_string(),
+        }
     }
 
     fn new_function(&mut self, name: &str, return_ty: Ty, span: Span) -> FnId {
         let id = FnId(u32::try_from(self.functions.len()).expect("too many functions"));
         self.functions.push(TFunction {
             name: name.to_string(),
+            method_of: None,
             return_ty,
             locals: Vec::new(),
             param_count: 0,
@@ -345,6 +392,10 @@ impl Checker {
                         self.hoist(fn_index, &f.stmts, nested);
                     }
                 }
+                // Package-level functions/vars hoist like top-level ones;
+                // class/interface members do not hoist here.
+                Package { body, .. } => self.hoist(fn_index, body, nested),
+                Class(_) | Interface(_) | Import { .. } => {}
                 Expr(_) | Break { .. } | Continue { .. } | Return { .. } | Throw { .. } | Empty => {
                 }
             }
@@ -463,6 +514,15 @@ impl Checker {
                         return ty;
                     }
                 }
+                match self.type_names.get(&path.join(".")) {
+                    Some(TypeSym::Class(id)) => return Ty::Class(*id),
+                    Some(TypeSym::Iface(id)) => return Ty::Iface(*id),
+                    None => {}
+                }
+                // `Object` is the implicit root class (SPECS §3.10).
+                if path.as_slice() == ["Object"] {
+                    return Ty::Class(crate::classes::OBJECT);
+                }
                 self.error(
                     ErrorCode::UNRESOLVED_NAME,
                     format!("unknown type `{}`", path.join(".")),
@@ -484,7 +544,7 @@ impl Checker {
     /// NOT implicit (String is not numeric-family). DOC GAP: numeric→Boolean
     /// in assignment is rejected here (conservative; the ASC strict-mode
     /// table is absent from docs/ — flagged in the P2 report).
-    fn conversion(from: Ty, to: Ty) -> Option<Option<Coercion>> {
+    fn conversion(&self, from: Ty, to: Ty) -> Option<Option<Coercion>> {
         use Ty::*;
         if from == to || from == Error || to == Error {
             return Some(None);
@@ -499,7 +559,15 @@ impl Checker {
             (Int | UInt | Number, Int) => Some(Some(Coercion::ToInt)),
             (Int | UInt | Number, UInt) => Some(Some(Coercion::ToUInt)),
             (Int | UInt | Number, Number) => Some(Some(Coercion::ToNumber)),
-            (Null, String | Function) => Some(None),
+            (Null, String | Function | Class(_) | Iface(_)) => Some(None),
+            // Widening reference conversions are representation no-ops
+            // (SPECS §4.5 nominal subtyping). Narrowing needs `as`/a cast
+            // (ASC error 1118 territory).
+            (Class(a), Class(b)) if self.registry.is_subclass(a, b) => Some(None),
+            (Class(a), Iface(i)) if self.registry.implements(a, i) => Some(None),
+            (Iface(a), Iface(b)) if self.registry.iface_extends(a, b) => Some(None),
+            // Every interface value is an Object.
+            (Iface(_), Class(c)) if c == crate::classes::OBJECT => Some(None),
             _ => None,
         }
     }
@@ -518,7 +586,7 @@ impl Checker {
                 kind: TExprKind::Error,
             };
         }
-        match Self::conversion(expr.ty, to) {
+        match self.conversion(expr.ty, to) {
             Some(None) => expr,
             Some(Some(c)) => TExpr {
                 ty: to,
@@ -528,7 +596,11 @@ impl Checker {
             None => {
                 self.error(
                     ErrorCode::INCOMPATIBLE_TYPES,
-                    format!("cannot implicitly convert `{}` to `{to}`", expr.ty),
+                    format!(
+                        "cannot implicitly convert `{}` to `{}`",
+                        self.ty_name(expr.ty),
+                        self.ty_name(to)
+                    ),
                     span,
                 );
                 TExpr {
@@ -608,6 +680,14 @@ impl Checker {
             S::VarDecl(decl) => return self.var_decl_stmt(decl, span),
             // Hoisted; the declaration site itself is inert.
             S::Function(_) => TStmtKind::Empty,
+            // Types were processed in passes A–C; imports resolve within
+            // the single compilation unit already.
+            S::Class(_) | S::Interface(_) | S::Import { .. } => TStmtKind::Empty,
+            // Package bodies execute like top-level code (declarations were
+            // collected in pass A).
+            S::Package { body, .. } => {
+                TStmtKind::Block(body.iter().map(|s| self.stmt(s)).collect())
+            }
             S::Block(b) => TStmtKind::Block(b.stmts.iter().map(|s| self.stmt(s)).collect()),
             S::If {
                 cond,

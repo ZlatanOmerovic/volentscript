@@ -18,6 +18,7 @@
 mod any;
 mod conv;
 mod ffi;
+mod object;
 mod string;
 
 pub use any::{Tag, VsAny};

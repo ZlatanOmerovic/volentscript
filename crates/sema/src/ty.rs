@@ -6,9 +6,15 @@
 
 use std::fmt;
 
+use crate::classes::{ClassId, IfaceId};
+
 /// A semantic type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ty {
+    /// Instance of a registered class (nominal identity, SPECS §4.5).
+    Class(ClassId),
+    /// Value typed by a registered interface.
+    Iface(IfaceId),
     /// 32-bit signed integer (SPECS §3.3).
     Int,
     /// 32-bit unsigned integer.
@@ -42,13 +48,19 @@ impl Ty {
     /// Types whose storage is a reference and can hold `null` in AS3
     /// (P5 null-safety narrows this; see SPECS §4.1).
     pub fn is_reference(self) -> bool {
-        matches!(self, Ty::String | Ty::Function | Ty::Any | Ty::Null)
+        matches!(
+            self,
+            Ty::String | Ty::Function | Ty::Any | Ty::Null | Ty::Class(_) | Ty::Iface(_)
+        )
     }
 }
 
 impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            // Bare ids; diagnostics use `Checker::ty_name` for real names.
+            Ty::Class(id) => return write!(f, "class#{}", id.0),
+            Ty::Iface(id) => return write!(f, "interface#{}", id.0),
             Ty::Int => "int",
             Ty::UInt => "uint",
             Ty::Number => "Number",

@@ -14,17 +14,59 @@ use crate::*;
 /// Lowers a checked program. Errors are phase-gate diagnostics (constructs
 /// sema accepts but no backend supports yet).
 pub fn lower(program: &sema::TProgram) -> Result<Program, Vec<Diagnostic>> {
+    // Every class gets an effective constructor function. Reserve ids up
+    // front (classes may extend classes declared later in the file).
+    let sema_count = u32::try_from(program.functions.len()).expect("function count");
+    let mut synthesized = 0u32;
+    let ctor_fn: Vec<FnId> = program
+        .registry
+        .classes
+        .iter()
+        .map(|c| match c.ctor {
+            Some(f) => FnId(f.0),
+            None => {
+                let id = FnId(sema_count + synthesized);
+                synthesized += 1;
+                id
+            }
+        })
+        .collect();
+
     let mut lo = Lowerer {
         program,
         diagnostics: Vec::new(),
+        ctor_fn,
     };
-    let functions = program
-        .functions
-        .iter()
-        .map(|f| lo.function(f))
-        .collect::<Vec<_>>();
+    let mut functions: Vec<Function> = program.functions.iter().map(|f| lo.function(f)).collect();
+    // Synthesized default constructors land at their reserved indices.
+    for (index, info) in program.registry.classes.iter().enumerate() {
+        if info.ctor.is_none() {
+            functions.push(Function {
+                name: format!("{}$ctor", info.name),
+                this_class: Some(index as u32),
+                ret: Ty::Void,
+                locals: Vec::new(),
+                param_count: 0,
+                param_defaults: Vec::new(),
+                body: Vec::new(),
+                span: info.span,
+            });
+        }
+    }
+    // Constructor prologues: implicit super chain + field initializers.
+    lo.inject_ctor_prologues(&mut functions);
+    let classes = lo.lower_classes();
+    // Static initializers run before top-level statements, in declaration
+    // order (they are the class-load side effects).
+    let mut static_inits = lo.static_init_stmts();
+    static_inits.append(&mut functions[0].body);
+    functions[0].body = static_inits;
     if lo.diagnostics.is_empty() {
-        Ok(Program { functions })
+        Ok(Program {
+            functions,
+            classes,
+            iface_count: u32::try_from(program.registry.ifaces.len()).unwrap_or(0),
+        })
     } else {
         lo.diagnostics
             .sort_by_key(|d| d.span.map(|s| (s.start, s.end)));
@@ -35,6 +77,8 @@ pub fn lower(program: &sema::TProgram) -> Result<Program, Vec<Diagnostic>> {
 struct Lowerer<'a> {
     program: &'a sema::TProgram,
     diagnostics: Vec<Diagnostic>,
+    /// Effective constructor function per class (user or synthesized).
+    ctor_fn: Vec<FnId>,
 }
 
 impl Lowerer<'_> {
@@ -55,6 +99,7 @@ impl Lowerer<'_> {
             .collect();
         Function {
             name: f.name.clone(),
+            this_class: f.method_of.map(|c| c.0),
             ret: self.ty(f.return_ty, f.span),
             locals,
             param_count: f.param_count,
@@ -70,11 +115,14 @@ impl Lowerer<'_> {
             sema::Ty::UInt => Ty::UInt,
             sema::Ty::Number => Ty::Number,
             sema::Ty::Boolean => Ty::Boolean,
-            // A bare `null` only reaches MIR in String context (other
-            // reference types are later phases); it is the null String.
+            // A bare `null` reaches MIR when no coercion was needed
+            // (String/class contexts); every reference type is a pointer,
+            // so the String kind is a safe carrier for the null literal.
             sema::Ty::String | sema::Ty::Null => Ty::String,
             sema::Ty::Void => Ty::Void,
             sema::Ty::Any => Ty::Any,
+            sema::Ty::Class(id) => Ty::Object(id.0),
+            sema::Ty::Iface(id) => Ty::Iface(id.0),
             sema::Ty::Function => {
                 self.gate(span, "Function values need closures — Phase 6");
                 Ty::Any
@@ -103,6 +151,191 @@ impl Lowerer<'_> {
             span,
             kind: ExprKind::Undefined,
         }
+    }
+
+    // --- classes ----------------------------------------------------------
+
+    /// Prepends implicit `super()` (when the source constructor has no
+    /// explicit call) and field initializers to each class's effective
+    /// constructor.
+    ///
+    /// Deviation note: AVM2 runs instance initializers via iinit before the
+    /// constructor body; with an explicit `super(...)` placed mid-body our
+    /// initializers still run first (documented; revisit with exceptions).
+    fn inject_ctor_prologues(&mut self, functions: &mut [Function]) {
+        for (index, info) in self.program.registry.classes.iter().enumerate() {
+            if index == 0 {
+                continue; // Object root
+            }
+            let span = info.span;
+            let mut prologue: Vec<Stmt> = Vec::new();
+            // Implicit super chain: only when the user wrote none.
+            let explicit_super = info
+                .ctor
+                .map(|f| tast_has_super(&self.program.functions[f.0 as usize].body))
+                .unwrap_or(false);
+            if !explicit_super {
+                if let Some(parent) = info.parent {
+                    if parent.0 != 0 {
+                        prologue.push(Stmt::Expr(Expr {
+                            ty: Ty::Void,
+                            span,
+                            kind: ExprKind::CallDirect {
+                                fn_id: self.ctor_fn[parent.0 as usize],
+                                recv: Box::new(this_expr(parent.0, span)),
+                                args: self.ctor_default_args(parent.0),
+                            },
+                        }));
+                    }
+                }
+            }
+            for f in &info.fields {
+                let Some(init) = &f.init else { continue };
+                let value = self.expr(init);
+                prologue.push(Stmt::Expr(Expr {
+                    ty: value.ty,
+                    span,
+                    kind: ExprKind::FieldSet(
+                        Box::new(this_expr(index as u32, span)),
+                        index as u32,
+                        f.slot,
+                        Box::new(value),
+                    ),
+                }));
+            }
+            if prologue.is_empty() {
+                continue;
+            }
+            let ctor = self.ctor_fn[index];
+            let body = &mut functions[ctor.0 as usize].body;
+            prologue.append(body);
+            *body = prologue;
+        }
+    }
+
+    /// Default arguments for a zero-arg call of `class`'s constructor
+    /// (sema guaranteed all params are defaulted when the chain is
+    /// implicit).
+    fn ctor_default_args(&mut self, class: u32) -> Vec<Expr> {
+        let Some(ctor) = self.program.registry.classes[class as usize].ctor else {
+            return Vec::new();
+        };
+        let callee = &self.program.functions[ctor.0 as usize];
+        (0..callee.param_count)
+            .filter_map(|i| callee.locals[i].default.as_ref())
+            .map(|d| self.expr(d))
+            .collect()
+    }
+
+    fn lower_classes(&mut self) -> Vec<Class> {
+        let registry = &self.program.registry;
+        let mut classes = Vec::with_capacity(registry.classes.len());
+        for (index, info) in registry.classes.iter().enumerate() {
+            let span = info.span;
+            // Full slot table: ancestors own the low slots.
+            let mut slot_tys = vec![(Ty::Any, span); info.total_slots];
+            let mut cur = Some(sema::ClassId(index as u32));
+            while let Some(c) = cur {
+                let ci = &registry.classes[c.0 as usize];
+                for f in &ci.fields {
+                    slot_tys[f.slot] = (Ty::Any, span); // placeholder, fixed below
+                }
+                cur = ci.parent;
+            }
+            // Resolve real slot types (separate pass to appease borrows).
+            let mut slots = vec![Ty::Any; info.total_slots];
+            let mut cur = Some(sema::ClassId(index as u32));
+            let mut pending: Vec<(usize, sema::Ty)> = Vec::new();
+            while let Some(c) = cur {
+                let ci = &registry.classes[c.0 as usize];
+                for f in &ci.fields {
+                    pending.push((f.slot, f.ty));
+                }
+                cur = ci.parent;
+            }
+            for (slot, ty) in pending {
+                slots[slot] = self.ty(ty, span);
+            }
+            let registry = &self.program.registry;
+            let info = &registry.classes[index];
+
+            let vtable: Vec<FnId> = info.vtable.iter().map(|m| FnId(m.fn_id.0)).collect();
+            let to_string = registry
+                .find_vmethod(sema::ClassId(index as u32), "toString", sema::VKind::Method)
+                .filter(|(_, v)| v.sig.params.is_empty() && v.sig.ret == sema::Ty::String)
+                .map(|(_, v)| FnId(v.fn_id.0));
+            // Interfaces from the whole ancestor chain: each class carries
+            // its own tables so overrides dispatch correctly through
+            // interface-typed references.
+            let mut all_ifaces: Vec<u32> = Vec::new();
+            let mut cur = Some(sema::ClassId(index as u32));
+            while let Some(c) = cur {
+                let ci = &registry.classes[c.0 as usize];
+                for i in &ci.interfaces {
+                    if !all_ifaces.contains(&i.0) {
+                        all_ifaces.push(i.0);
+                    }
+                }
+                cur = ci.parent;
+            }
+            let ifaces = all_ifaces
+                .into_iter()
+                .map(|iface| {
+                    let table = registry.ifaces[iface as usize]
+                        .methods
+                        .iter()
+                        .map(|m| {
+                            registry
+                                .find_vmethod(sema::ClassId(index as u32), &m.name, m.kind)
+                                .map(|(_, v)| FnId(v.fn_id.0))
+                                .unwrap_or(FnId(0)) // conformance checked by sema
+                        })
+                        .collect();
+                    (iface, table)
+                })
+                .collect();
+            let mut statics = Vec::new();
+            let static_tys: Vec<sema::Ty> = info.static_fields.iter().map(|f| f.ty).collect();
+            for ty in static_tys {
+                statics.push(self.ty(ty, span));
+            }
+            let registry = &self.program.registry;
+            let info = &registry.classes[index];
+            classes.push(Class {
+                name: info.qualified(),
+                parent: info.parent.map(|p| p.0),
+                slots,
+                vtable,
+                ctor: self.ctor_fn[index],
+                ifaces,
+                to_string,
+                statics,
+            });
+        }
+        classes
+    }
+
+    /// Static initializer statements for the script prologue.
+    fn static_init_stmts(&mut self) -> Vec<Stmt> {
+        let mut out = Vec::new();
+        for index in 0..self.program.registry.classes.len() {
+            let info = &self.program.registry.classes[index];
+            let span = info.span;
+            let inits: Vec<(usize, &sema::TExpr)> = info
+                .static_fields
+                .iter()
+                .filter_map(|f| f.init.as_ref().map(|e| (f.index, e)))
+                .collect();
+            for (sindex, init) in inits {
+                let value = self.expr(init);
+                out.push(Stmt::Expr(Expr {
+                    ty: value.ty,
+                    span,
+                    kind: ExprKind::StaticSet(index as u32, sindex, Box::new(value)),
+                }));
+            }
+        }
+        out
     }
 
     // --- statements -----------------------------------------------------
@@ -317,11 +550,14 @@ impl Lowerer<'_> {
                     sema::Coercion::FromAny => match e.ty {
                         // AVM2 coerce_s: null/undefined → null, else ToString.
                         sema::Ty::String => Conv::AnyToString,
+                        // AVM2 coerce: checked class/interface conversion.
+                        sema::Ty::Class(c) => Conv::AnyToObject(c.0),
+                        sema::Ty::Iface(i) => Conv::AnyToIface(i.0),
                         _ => {
                             return self.gated_expr(
                                 span,
                                 ty,
-                                "checked `*` coercion to this type — Phase 4",
+                                "checked `*` coercion to this type — Phase 6",
                             );
                         }
                     },
@@ -329,9 +565,107 @@ impl Lowerer<'_> {
                 ExprKind::Conv(conv, Box::new(self.expr(v)))
             }
             E::Comma(l, r) => ExprKind::Comma(Box::new(self.expr(l)), Box::new(self.expr(r))),
+            E::This => ExprKind::This,
+            E::New(class, args) => {
+                let mut lowered: Vec<Expr> = args.iter().map(|a| self.expr(a)).collect();
+                self.fill_method_defaults(
+                    self.program.registry.classes[class.0 as usize].ctor,
+                    &mut lowered,
+                );
+                ExprKind::New(class.0, lowered)
+            }
+            E::FieldGet(o, class, slot) => {
+                ExprKind::FieldGet(Box::new(self.expr(o)), class.0, *slot)
+            }
+            E::FieldSet(o, class, slot, v) => ExprKind::FieldSet(
+                Box::new(self.expr(o)),
+                class.0,
+                *slot,
+                Box::new(self.expr(v)),
+            ),
+            E::CallVirtual {
+                recv,
+                class,
+                vslot,
+                args,
+            } => {
+                let mut lowered: Vec<Expr> = args.iter().map(|a| self.expr(a)).collect();
+                // Defaults come from the static target (deviation: an
+                // override changing default values is resolved statically).
+                let target = self.program.registry.classes[class.0 as usize].vtable[*vslot].fn_id;
+                self.fill_method_defaults(Some(target), &mut lowered);
+                ExprKind::CallVirtual {
+                    recv: Box::new(self.expr(recv)),
+                    class: class.0,
+                    vslot: *vslot,
+                    args: lowered,
+                }
+            }
+            E::CallIface {
+                recv,
+                iface,
+                islot,
+                args,
+            } => {
+                // Interface dispatch can't know the implementation's
+                // defaults; require all declared parameters for now.
+                let m = &self.program.registry.ifaces[iface.0 as usize].methods[*islot];
+                if args.len() < m.sig.params.len() {
+                    return self.gated_expr(
+                        span,
+                        ty,
+                        "omitting optional arguments in interface calls — Phase 6",
+                    );
+                }
+                let ret = self.ty(m.sig.ret, span);
+                ExprKind::CallIface {
+                    recv: Box::new(self.expr(recv)),
+                    iface: iface.0,
+                    islot: *islot,
+                    ret,
+                    args: args.iter().map(|a| self.expr(a)).collect(),
+                }
+            }
+            E::CallDirect { fn_id, recv, args } => {
+                let mut lowered: Vec<Expr> = args.iter().map(|a| self.expr(a)).collect();
+                self.fill_method_defaults(Some(sema::FnId(fn_id.0)), &mut lowered);
+                ExprKind::CallDirect {
+                    fn_id: FnId(fn_id.0),
+                    recv: Box::new(self.expr(recv)),
+                    args: lowered,
+                }
+            }
+            E::SuperCtor(parent, args) => {
+                let mut lowered: Vec<Expr> = args.iter().map(|a| self.expr(a)).collect();
+                self.fill_method_defaults(
+                    self.program.registry.classes[parent.0 as usize].ctor,
+                    &mut lowered,
+                );
+                ExprKind::CallDirect {
+                    fn_id: self.ctor_fn[parent.0 as usize],
+                    recv: Box::new(this_expr(parent.0, span)),
+                    args: lowered,
+                }
+            }
+            E::StaticGet(class, index) => ExprKind::StaticGet(class.0, *index),
+            E::StaticSet(class, index, v) => {
+                ExprKind::StaticSet(class.0, *index, Box::new(self.expr(v)))
+            }
             E::Error => unreachable!("error expr survived sema"),
         };
         Expr { ty, span, kind }
+    }
+
+    /// Appends omitted defaulted arguments from a sema function's parameter
+    /// list (AVM2 fills from the method's option list).
+    fn fill_method_defaults(&mut self, callee: Option<sema::FnId>, lowered: &mut Vec<Expr>) {
+        let Some(callee) = callee else { return };
+        let callee = &self.program.functions[callee.0 as usize];
+        for i in lowered.len()..callee.param_count {
+            if let Some(default) = &callee.locals[i].default {
+                lowered.push(self.expr(default));
+            }
+        }
     }
 
     fn unary(&mut self, op: ast::UnaryOp, v: &sema::TExpr, ty: Ty, span: Span) -> Expr {
@@ -384,11 +718,32 @@ impl Lowerer<'_> {
                 },
             };
         }
-        self.gated_expr(
-            span,
-            ty,
-            "++/-- on non-local or non-numeric targets — Phase 4",
-        )
+        if let sema::TExprKind::StaticGet(class, index) = &operand.kind {
+            return Expr {
+                ty,
+                span,
+                kind: ExprKind::StaticIncDec {
+                    class: class.0,
+                    index: *index,
+                    is_inc,
+                    is_prefix,
+                },
+            };
+        }
+        if let sema::TExprKind::FieldGet(recv, class, slot) = &operand.kind {
+            return Expr {
+                ty,
+                span,
+                kind: ExprKind::FieldIncDec {
+                    recv: Box::new(self.expr(recv)),
+                    class: class.0,
+                    slot: *slot,
+                    is_inc,
+                    is_prefix,
+                },
+            };
+        }
+        self.gated_expr(span, ty, "++/-- on this kind of target — Phase 6")
     }
 
     fn binary(
@@ -609,6 +964,99 @@ impl Lowerer<'_> {
             ),
         }
     }
+}
+
+fn this_expr(class: u32, span: Span) -> Expr {
+    Expr {
+        ty: Ty::Object(class),
+        span,
+        kind: ExprKind::This,
+    }
+}
+
+/// Whether a checked constructor body contains an explicit `super(...)`
+/// call (recursive TAST scan).
+fn tast_has_super(stmts: &[sema::TStmt]) -> bool {
+    fn in_expr(e: &sema::TExpr) -> bool {
+        use sema::TExprKind as E;
+        match &e.kind {
+            E::SuperCtor(..) => true,
+            E::LocalSet(_, v)
+            | E::Coerce(_, v)
+            | E::Unary(_, v)
+            | E::Postfix(_, v)
+            | E::Is(v, _)
+            | E::As(v, _)
+            | E::StaticSet(_, _, v) => in_expr(v),
+            E::Binary(_, a, b) | E::Logical(_, a, b) | E::Comma(a, b) => in_expr(a) || in_expr(b),
+            E::Conditional(a, b, c) => in_expr(a) || in_expr(b) || in_expr(c),
+            E::CallFn(_, args) | E::CallBuiltin(_, args) | E::New(_, args) => {
+                args.iter().any(in_expr)
+            }
+            E::CallMethod(r, _, args)
+            | E::CallVirtual { recv: r, args, .. }
+            | E::CallIface { recv: r, args, .. }
+            | E::CallDirect { recv: r, args, .. } => in_expr(r) || args.iter().any(in_expr),
+            E::FieldGet(o, ..) => in_expr(o),
+            E::FieldSet(o, _, _, v) => in_expr(o) || in_expr(v),
+            E::Member(o, _) => in_expr(o),
+            E::MemberSet(o, _, v) => in_expr(o) || in_expr(v),
+            E::Index(o, i) => in_expr(o) || in_expr(i),
+            E::IndexSet(o, i, v) => in_expr(o) || in_expr(i) || in_expr(v),
+            E::CallIndirect(c, args) => in_expr(c) || args.iter().any(in_expr),
+            E::Array(els) => els.iter().flatten().any(in_expr),
+            E::Object(props) => props.iter().any(|(_, v)| in_expr(v)),
+            _ => false,
+        }
+    }
+    fn in_stmt(s: &sema::TStmt) -> bool {
+        use sema::TStmtKind as S;
+        match &s.kind {
+            S::Expr(e) | S::Assign(_, e) | S::Throw { value: e } => in_expr(e),
+            S::Block(b) => b.iter().any(in_stmt),
+            S::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                in_expr(cond)
+                    || in_stmt(then_branch)
+                    || else_branch.as_ref().is_some_and(|e| in_stmt(e))
+            }
+            S::While { cond, body } | S::DoWhile { body, cond } => in_expr(cond) || in_stmt(body),
+            S::For {
+                init,
+                cond,
+                update,
+                body,
+            } => {
+                init.as_ref().is_some_and(|i| in_stmt(i))
+                    || cond.as_ref().is_some_and(in_expr)
+                    || update.as_ref().is_some_and(in_expr)
+                    || in_stmt(body)
+            }
+            S::ForIn { object, body, .. } => in_expr(object) || in_stmt(body),
+            S::Switch { scrutinee, cases } => {
+                in_expr(scrutinee)
+                    || cases
+                        .iter()
+                        .any(|c| c.test.as_ref().is_some_and(in_expr) || c.body.iter().any(in_stmt))
+            }
+            S::Return { value } => value.as_ref().is_some_and(in_expr),
+            S::Try {
+                block,
+                catches,
+                finally,
+            } => {
+                block.iter().any(in_stmt)
+                    || catches.iter().any(|c| c.body.iter().any(in_stmt))
+                    || finally.as_ref().is_some_and(|f| f.iter().any(in_stmt))
+            }
+            S::Labeled { body, .. } => in_stmt(body),
+            S::Break { .. } | S::Continue { .. } | S::Empty => false,
+        }
+    }
+    stmts.iter().any(in_stmt)
 }
 
 fn str_lit(s: &str, span: Span) -> Expr {

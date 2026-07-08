@@ -46,6 +46,21 @@ impl Dumper {
             }
             StmtKind::VarDecl(v) => self.var_decl(v),
             StmtKind::Function(f) => self.function(f),
+            StmtKind::Package { path, body } => {
+                self.line(format!("Package {}", path.join(".")));
+                self.indented(|d| {
+                    for s in body {
+                        d.stmt(s);
+                    }
+                });
+            }
+            StmtKind::Import { path, wildcard } => self.line(format!(
+                "Import {}{}",
+                path.join("."),
+                if *wildcard { ".*" } else { "" }
+            )),
+            StmtKind::Class(c) => self.class(c),
+            StmtKind::Interface(i) => self.interface(i),
             StmtKind::Block(b) => self.block(b),
             StmtKind::If {
                 cond,
@@ -196,6 +211,108 @@ impl Dumper {
         self.indented(f);
     }
 
+    fn attrs_text(attrs: &Attributes) -> String {
+        let mut out = String::new();
+        if let Some(v) = attrs.visibility {
+            let _ = write!(out, "{} ", format!("{v:?}").to_lowercase());
+        }
+        for (on, word) in [
+            (attrs.is_static, "static"),
+            (attrs.is_final, "final"),
+            (attrs.is_override, "override"),
+            (attrs.is_dynamic, "dynamic"),
+            (attrs.is_native, "native"),
+        ] {
+            if on {
+                let _ = write!(out, "{word} ");
+            }
+        }
+        out
+    }
+
+    fn class(&mut self, c: &ClassDecl) {
+        let mut header = format!("Class {}{}", Self::attrs_text(&c.attrs), c.name);
+        if let Some(e) = &c.extends {
+            let _ = write!(header, " extends {}", type_text(e));
+        }
+        if !c.implements.is_empty() {
+            let _ = write!(
+                header,
+                " implements {}",
+                c.implements
+                    .iter()
+                    .map(type_text)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
+        self.line(header);
+        self.indented(|d| {
+            for m in &c.members {
+                let attrs = Self::attrs_text(&m.attrs);
+                match &m.kind {
+                    MemberKind::Field(v) => {
+                        d.line(format!("Field {attrs}"));
+                        d.indented(|d| d.var_decl(v));
+                    }
+                    MemberKind::Method(f) => {
+                        d.line(format!("Method {attrs}"));
+                        d.indented(|d| d.function(f));
+                    }
+                    MemberKind::Getter(f) => {
+                        d.line(format!("Getter {attrs}"));
+                        d.indented(|d| d.function(f));
+                    }
+                    MemberKind::Setter(f) => {
+                        d.line(format!("Setter {attrs}"));
+                        d.indented(|d| d.function(f));
+                    }
+                }
+            }
+        });
+    }
+
+    fn interface(&mut self, i: &InterfaceDecl) {
+        let mut header = format!("Interface {}{}", Self::attrs_text(&i.attrs), i.name);
+        if !i.extends.is_empty() {
+            let _ = write!(
+                header,
+                " extends {}",
+                i.extends
+                    .iter()
+                    .map(type_text)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
+        self.line(header);
+        self.indented(|d| {
+            for m in &i.members {
+                let mut text = format!("{:?} {}(", m.kind, m.name);
+                let params: Vec<String> = m
+                    .params
+                    .iter()
+                    .map(|p| {
+                        let mut s = String::new();
+                        if p.rest {
+                            s.push_str("...");
+                        }
+                        s.push_str(&p.name);
+                        if let Some(t) = &p.ty {
+                            let _ = write!(s, ":{}", type_text(t));
+                        }
+                        s
+                    })
+                    .collect();
+                let _ = write!(text, "{})", params.join(", "));
+                if let Some(r) = &m.return_type {
+                    let _ = write!(text, ":{}", type_text(r));
+                }
+                d.line(text);
+            }
+        });
+    }
+
     fn block(&mut self, block: &Block) {
         self.line("Block");
         self.indented(|d| {
@@ -262,6 +379,7 @@ impl Dumper {
             ExprKind::Bool(v) => self.line(format!("Bool {v}")),
             ExprKind::Null => self.line("Null"),
             ExprKind::This => self.line("This"),
+            ExprKind::Super => self.line("Super"),
             ExprKind::Ident(name) => self.line(format!("Ident {name}")),
             ExprKind::Array(elements) => {
                 self.line("Array");

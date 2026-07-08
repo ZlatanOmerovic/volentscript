@@ -39,20 +39,11 @@ impl Parser {
             Return => self.return_statement(),
             Throw => self.throw_statement(),
             Try => self.try_statement(),
-            // Later-phase constructs: recognizable, honest diagnostic.
-            Class | Interface | Package | Import => {
-                let token = self.advance();
-                self.error(
-                    ErrorCode::NOT_IMPLEMENTED,
-                    format!("{} is not implemented until Phase 4", token.kind.describe()),
-                    token.span,
-                );
-                self.recover_to_statement_boundary();
-                Stmt {
-                    kind: StmtKind::Empty,
-                    span: token.span,
-                }
-            }
+            Package => self.package_decl(),
+            Import => self.import_decl(),
+            // Declarations, possibly preceded by modifiers.
+            Class | Interface | Public | Private | Protected | Internal | Final | Dynamic
+            | Native | Override | Static => self.attributed_declaration(),
             Goto => {
                 // Reserved word, no semantics (avmplus reserves it too,
                 // generate-keyword-lexer.as:34).
@@ -276,6 +267,330 @@ impl Parser {
             rest,
             span: start.to(end),
         }
+    }
+
+    // --- packages, classes, interfaces ------------------------------------------
+
+    /// `package a.b { directives }` (SPECS §9 packageDecl).
+    fn package_decl(&mut self) -> Stmt {
+        let start = self.advance().span; // `package`
+        let mut path = Vec::new();
+        if matches!(self.current().kind, TokenKind::Ident(_)) {
+            path.push(self.expect_ident().0);
+            while self.at(&TokenKind::Dot) {
+                self.advance();
+                path.push(self.expect_ident().0);
+            }
+        }
+        self.expect(&TokenKind::LBrace);
+        let mut body = Vec::new();
+        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            let before = self.pos;
+            body.push(self.statement());
+            if self.pos == before {
+                self.advance();
+            }
+        }
+        let end = self.expect(&TokenKind::RBrace);
+        Stmt {
+            kind: StmtKind::Package { path, body },
+            span: start.to(end),
+        }
+    }
+
+    fn import_decl(&mut self) -> Stmt {
+        let start = self.advance().span; // `import`
+        let mut path = vec![self.expect_ident().0];
+        let mut wildcard = false;
+        while self.eat(&TokenKind::Dot) {
+            if self.eat(&TokenKind::Star) {
+                wildcard = true;
+                break;
+            }
+            path.push(self.expect_ident().0);
+        }
+        self.semicolon();
+        Stmt {
+            kind: StmtKind::Import { path, wildcard },
+            span: start,
+        }
+    }
+
+    /// Collects modifier keywords (avmplus dispatches these the same way,
+    /// eval-parse.cpp:205), then parses the declaration they precede.
+    fn attributed_declaration(&mut self) -> Stmt {
+        use TokenKind::*;
+        let start = self.current().span;
+        let mut attrs = Attributes::default();
+        loop {
+            let vis = match self.current().kind {
+                Public => Some(Visibility::Public),
+                Private => Some(Visibility::Private),
+                Protected => Some(Visibility::Protected),
+                Internal => Some(Visibility::Internal),
+                _ => None,
+            };
+            if let Some(v) = vis {
+                if attrs.visibility.is_some() {
+                    let span = self.current().span;
+                    self.error(
+                        ErrorCode::UNEXPECTED_TOKEN,
+                        "only one access modifier is allowed",
+                        span,
+                    );
+                }
+                attrs.visibility = Some(v);
+                self.advance();
+                continue;
+            }
+            match self.current().kind {
+                Static => attrs.is_static = true,
+                Final => attrs.is_final = true,
+                Override => attrs.is_override = true,
+                Dynamic => attrs.is_dynamic = true,
+                Native => attrs.is_native = true,
+                _ => break,
+            }
+            self.advance();
+        }
+        match self.current().kind {
+            Class => self.class_decl(start, attrs),
+            Interface => self.interface_decl(start, attrs),
+            // Modifiers on functions/vars at package level.
+            Function => {
+                let stmt = self.function_declaration();
+                Stmt {
+                    span: start.to(stmt.span),
+                    ..stmt
+                }
+            }
+            Var | Const => self.var_statement(),
+            _ => {
+                let span = self.current().span;
+                self.error(
+                    ErrorCode::UNEXPECTED_TOKEN,
+                    format!(
+                        "expected a declaration after modifiers, found {}",
+                        self.current().kind.describe()
+                    ),
+                    span,
+                );
+                self.recover_to_statement_boundary();
+                Stmt {
+                    kind: StmtKind::Empty,
+                    span,
+                }
+            }
+        }
+    }
+
+    /// `class C extends B implements I, J { members }` (SPECS §9).
+    fn class_decl(&mut self, start: Span, attrs: Attributes) -> Stmt {
+        self.advance(); // `class`
+        let (name, _) = self.expect_ident();
+        let extends = if self.eat(&TokenKind::Extends) {
+            Some(self.type_ref())
+        } else {
+            None
+        };
+        let mut implements = Vec::new();
+        if self.eat(&TokenKind::Implements) {
+            loop {
+                implements.push(self.type_ref());
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::LBrace);
+        let mut members = Vec::new();
+        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            let before = self.pos;
+            if let Some(m) = self.class_member() {
+                members.push(m);
+            }
+            if self.pos == before {
+                self.advance();
+            }
+        }
+        let end = self.expect(&TokenKind::RBrace);
+        let span = start.to(end);
+        Stmt {
+            kind: StmtKind::Class(Box::new(ClassDecl {
+                attrs,
+                name,
+                extends,
+                implements,
+                members,
+                span,
+            })),
+            span,
+        }
+    }
+
+    fn class_member(&mut self) -> Option<Member> {
+        use TokenKind::*;
+        if self.eat(&Semicolon) {
+            return None;
+        }
+        let start = self.current().span;
+        let mut attrs = Attributes::default();
+        loop {
+            let vis = match self.current().kind {
+                Public => Some(Visibility::Public),
+                Private => Some(Visibility::Private),
+                Protected => Some(Visibility::Protected),
+                Internal => Some(Visibility::Internal),
+                _ => None,
+            };
+            if let Some(v) = vis {
+                attrs.visibility = Some(v);
+                self.advance();
+                continue;
+            }
+            match self.current().kind {
+                Static => attrs.is_static = true,
+                Final => attrs.is_final = true,
+                Override => attrs.is_override = true,
+                Native => attrs.is_native = true,
+                _ => break,
+            }
+            self.advance();
+        }
+        let kind = match self.current().kind {
+            Var | Const => {
+                let decl = self.var_declaration();
+                self.semicolon();
+                MemberKind::Field(decl)
+            }
+            Function => {
+                let keyword_span = self.advance().span;
+                // `get`/`set` are contextual: accessor only when another
+                // identifier follows (avmplus eval-parse.cpp:1128).
+                let accessor = match &self.current().kind {
+                    Ident(word)
+                        if (word == "get" || word == "set")
+                            && matches!(self.peek_kind(1), Ident(_)) =>
+                    {
+                        let is_get = word == "get";
+                        self.advance();
+                        Some(is_get)
+                    }
+                    _ => None,
+                };
+                let decl = Box::new(self.function_after_keyword(keyword_span, true));
+                match accessor {
+                    Some(true) => MemberKind::Getter(decl),
+                    Some(false) => MemberKind::Setter(decl),
+                    None => MemberKind::Method(decl),
+                }
+            }
+            _ => {
+                let span = self.current().span;
+                self.error(
+                    ErrorCode::UNEXPECTED_TOKEN,
+                    format!(
+                        "expected a class member, found {}",
+                        self.current().kind.describe()
+                    ),
+                    span,
+                );
+                self.recover_to_statement_boundary();
+                return None;
+            }
+        };
+        let end = self.tokens[self.pos.saturating_sub(1)].span;
+        Some(Member {
+            attrs,
+            kind,
+            span: start.to(end),
+        })
+    }
+
+    /// `interface I extends J, K { signatures }` (SPECS §3.5).
+    fn interface_decl(&mut self, start: Span, attrs: Attributes) -> Stmt {
+        self.advance(); // `interface`
+        let (name, _) = self.expect_ident();
+        let mut extends = Vec::new();
+        if self.eat(&TokenKind::Extends) {
+            loop {
+                extends.push(self.type_ref());
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::LBrace);
+        let mut members = Vec::new();
+        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            let before = self.pos;
+            if self.eat(&TokenKind::Semicolon) {
+                continue;
+            }
+            if let Some(m) = self.interface_member() {
+                members.push(m);
+            }
+            if self.pos == before {
+                self.advance();
+            }
+        }
+        let end = self.expect(&TokenKind::RBrace);
+        let span = start.to(end);
+        Stmt {
+            kind: StmtKind::Interface(Box::new(InterfaceDecl {
+                attrs,
+                name,
+                extends,
+                members,
+                span,
+            })),
+            span,
+        }
+    }
+
+    fn interface_member(&mut self) -> Option<InterfaceMember> {
+        let start = self.expect(&TokenKind::Function);
+        let kind = match &self.current().kind {
+            TokenKind::Ident(word)
+                if (word == "get" || word == "set")
+                    && matches!(self.peek_kind(1), TokenKind::Ident(_)) =>
+            {
+                let k = if word == "get" {
+                    SigKind::Getter
+                } else {
+                    SigKind::Setter
+                };
+                self.advance();
+                k
+            }
+            _ => SigKind::Method,
+        };
+        let (name, _) = self.expect_ident();
+        self.expect(&TokenKind::LParen);
+        let mut params = Vec::new();
+        if !self.at(&TokenKind::RParen) {
+            loop {
+                params.push(self.parameter());
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::RParen);
+        let return_type = if self.eat(&TokenKind::Colon) {
+            Some(self.type_ref())
+        } else {
+            None
+        };
+        self.semicolon();
+        let end = self.tokens[self.pos.saturating_sub(1)].span;
+        Some(InterfaceMember {
+            kind,
+            name,
+            params,
+            return_type,
+            span: start.to(end),
+        })
     }
 
     // --- types -----------------------------------------------------------------

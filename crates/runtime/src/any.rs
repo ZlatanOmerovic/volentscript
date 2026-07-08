@@ -15,6 +15,8 @@ pub enum Tag {
     UInt = 4,
     Number = 5,
     String = 6,
+    /// Class instance; payload = object pointer (header = descriptor ptr).
+    Object = 7,
 }
 
 /// A boxed dynamic value (`*`). 16 bytes, passed/returned by value.
@@ -85,6 +87,23 @@ impl VsAny {
         }
     }
 
+    /// Boxes an object pointer (null boxes as `null`).
+    pub fn object(ptr: *const u8) -> VsAny {
+        if ptr.is_null() {
+            VsAny::NULL
+        } else {
+            VsAny {
+                tag: Tag::Object as u32,
+                data: ptr as usize as u64,
+            }
+        }
+    }
+
+    /// Object payload (only when `tag == Object`).
+    pub fn as_object_ptr(&self) -> *const u8 {
+        self.data as usize as *const u8
+    }
+
     /// The tag, decoded.
     pub fn tag(&self) -> Tag {
         match self.tag {
@@ -94,6 +113,7 @@ impl VsAny {
             4 => Tag::UInt,
             5 => Tag::Number,
             6 => Tag::String,
+            7 => Tag::Object,
             _ => Tag::Undefined,
         }
     }

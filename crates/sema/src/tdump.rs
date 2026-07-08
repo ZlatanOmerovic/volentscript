@@ -325,6 +325,78 @@ impl Dumper {
                 self.line(format!("{header}Coerce {c:?}"));
                 self.indented(|d| d.expr(v));
             }
+            TExprKind::This => self.line(format!("{header}This")),
+            TExprKind::New(class, args) => {
+                self.line(format!("{header}New class#{}", class.0));
+                self.indented(|d| {
+                    for a in args {
+                        d.expr(a);
+                    }
+                });
+            }
+            TExprKind::FieldGet(o, class, slot) => {
+                self.line(format!("{header}FieldGet class#{} slot{slot}", class.0));
+                self.indented(|d| d.expr(o));
+            }
+            TExprKind::FieldSet(o, class, slot, v) => {
+                self.line(format!("{header}FieldSet class#{} slot{slot}", class.0));
+                self.indented(|d| {
+                    d.expr(o);
+                    d.expr(v);
+                });
+            }
+            TExprKind::CallVirtual {
+                recv,
+                class,
+                vslot,
+                args,
+            } => {
+                self.line(format!("{header}CallVirtual class#{} v{vslot}", class.0));
+                self.indented(|d| {
+                    d.expr(recv);
+                    for a in args {
+                        d.expr(a);
+                    }
+                });
+            }
+            TExprKind::CallIface {
+                recv,
+                iface,
+                islot,
+                args,
+            } => {
+                self.line(format!("{header}CallIface iface#{} i{islot}", iface.0));
+                self.indented(|d| {
+                    d.expr(recv);
+                    for a in args {
+                        d.expr(a);
+                    }
+                });
+            }
+            TExprKind::CallDirect { fn_id, recv, args } => {
+                self.line(format!("{header}CallDirect #{}", fn_id.0));
+                self.indented(|d| {
+                    d.expr(recv);
+                    for a in args {
+                        d.expr(a);
+                    }
+                });
+            }
+            TExprKind::SuperCtor(class, args) => {
+                self.line(format!("{header}SuperCtor class#{}", class.0));
+                self.indented(|d| {
+                    for a in args {
+                        d.expr(a);
+                    }
+                });
+            }
+            TExprKind::StaticGet(class, i) => {
+                self.line(format!("{header}StaticGet class#{} s{i}", class.0))
+            }
+            TExprKind::StaticSet(class, i, v) => {
+                self.line(format!("{header}StaticSet class#{} s{i}", class.0));
+                self.indented(|d| d.expr(v));
+            }
             TExprKind::Array(elements) => {
                 self.line(format!("{header}Array"));
                 self.indented(|d| {

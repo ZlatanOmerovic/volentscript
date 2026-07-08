@@ -89,3 +89,10 @@ fn control_flow() {
 fn dynamic_any() {
     run_golden("any");
 }
+
+/// The Phase 4 milestone: polymorphic OOP — classes, interfaces,
+/// inheritance, override dispatch, accessors, statics, super, toString.
+#[test]
+fn oop_polymorphism() {
+    run_golden("oop");
+}

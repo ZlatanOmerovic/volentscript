@@ -21,8 +21,15 @@ impl Checker {
             ExprKind::Str(v) => mk(Ty::String, span, TExprKind::Str(v.clone())),
             ExprKind::Bool(v) => mk(Ty::Boolean, span, TExprKind::Bool(*v)),
             ExprKind::Null => mk(Ty::Null, span, TExprKind::Null),
-            // `this` is meaningful with classes (P4).
-            ExprKind::This => self.not_implemented(span, "`this` is not implemented until Phase 4"),
+            ExprKind::This => self.this_expr(span),
+            ExprKind::Super => {
+                self.error(
+                    ErrorCode::UNEXPECTED_TOKEN,
+                    "`super` is only valid as `super(...)` or `super.method(...)`",
+                    span,
+                );
+                self.error_expr(span)
+            }
             ExprKind::Ident(name) => self.ident(name, span),
             // Array literal: the Array class lands in P5; `*` until then.
             ExprKind::Array(elements) => {
@@ -84,8 +91,16 @@ impl Checker {
                 )
             }
             ExprKind::Call(callee, args) => self.call(callee, args, span),
-            ExprKind::New(..) => self.not_implemented(span, "`new` requires classes — Phase 4"),
+            ExprKind::New(callee, args) => self.new_expr(callee, args, span),
             ExprKind::Member(object, name) => {
+                // Static access: unshadowed class name as receiver.
+                if let ExprKind::Ident(recv) = &object.kind {
+                    if !self.is_shadowed(recv) {
+                        if let Some(class) = self.ident_as_class(recv) {
+                            return self.static_read(class, name, span);
+                        }
+                    }
+                }
                 let object = self.expr(object);
                 self.member_read(object, name, span)
             }
@@ -126,11 +141,15 @@ impl Checker {
                 mk(ty, span, kind)
             }
             None => {
-                if builtins::type_name(name).is_some() {
-                    // Type name as a value: Class objects are P4.
+                // Unqualified class members / statics of the enclosing class.
+                if let Some(member) = self.implicit_member(name, span) {
+                    return member;
+                }
+                if self.ident_as_type(name).is_some() {
+                    // Type name as a value: the Class type is P6.
                     return self.not_implemented(
                         span,
-                        "using a type as a value requires the Class type — Phase 4",
+                        "using a type as a value requires the Class type — Phase 6",
                     );
                 }
                 self.error(
@@ -359,16 +378,18 @@ impl Checker {
         }
     }
 
-    /// Resolves the RHS of `is`/`as` to a core type.
+    /// Resolves the RHS of `is`/`as` to a core type, class, or interface.
     fn type_operand(&mut self, e: &ast::Expr) -> Ty {
         if let ExprKind::Ident(name) = &e.kind {
-            if let Some(ty) = builtins::type_name(name) {
-                return ty;
+            if !self.is_shadowed(name) {
+                if let Some(ty) = self.ident_as_type(name) {
+                    return ty;
+                }
             }
         }
         self.error(
             ErrorCode::NOT_A_TYPE,
-            "the right side of `is`/`as` must be a type (core types only until Phase 4)",
+            "the right side of `is`/`as` must name a type",
             e.span,
         );
         Ty::Error
@@ -388,12 +409,16 @@ impl Checker {
         match &target.kind {
             ExprKind::Ident(name) => {
                 let Some(sym) = self.lookup(name) else {
+                    // Unqualified field/static of the enclosing class.
+                    let checked = self.expr(value);
+                    if let Some(result) = self.implicit_member_write(name, checked, span) {
+                        return result;
+                    }
                     self.error(
                         ErrorCode::UNRESOLVED_NAME,
                         format!("cannot find `{name}` in this scope"),
                         target.span,
                     );
-                    self.expr(value);
                     return self.error_expr(span);
                 };
                 let (id, ty) = match sym {
@@ -424,7 +449,27 @@ impl Checker {
                 mk(ty, span, TExprKind::LocalSet(id, Box::new(rhs)))
             }
             ExprKind::Member(object, name) => {
+                // Static member write.
+                if let ExprKind::Ident(recv) = &object.kind {
+                    if !self.is_shadowed(recv) {
+                        if let Some(class) = self.ident_as_class(recv) {
+                            let checked = self.expr(value);
+                            return self.static_write(class, name, checked, span);
+                        }
+                    }
+                }
                 let object = self.expr(object);
+                match object.ty {
+                    Ty::Class(class) => {
+                        let checked = self.expr(value);
+                        return self.class_member_write(object, class, name, checked, span);
+                    }
+                    Ty::Iface(iface) => {
+                        let checked = self.expr(value);
+                        return self.iface_member_write(object, iface, name, checked, span);
+                    }
+                    _ => {}
+                }
                 let value_checked = self.expr(value);
                 if object.ty == Ty::Any || object.ty == Ty::Error {
                     let value_checked = self.coerce_to_any(value_checked);
@@ -514,6 +559,10 @@ impl Checker {
     // --- calls ------------------------------------------------------------------
 
     fn call(&mut self, callee: &ast::Expr, args: &[ast::Expr], span: Span) -> TExpr {
+        // `super(...)` constructor chain.
+        if matches!(callee.kind, ExprKind::Super) {
+            return self.super_call(None, args, span);
+        }
         // Direct references get checked calls; everything else is an
         // indirect `Function`/`*` call (unchecked, returns `*` — AS3's
         // Function carries no signature).
@@ -529,11 +578,42 @@ impl Checker {
                     let checked = self.check_args(&sig, b.name(), args, span);
                     return mk(sig.ret, span, TExprKind::CallBuiltin(b, checked));
                 }
-                _ => {}
+                Some(_) => {}
+                None => {
+                    // Unqualified method/static call in class context.
+                    if let Some(result) = self.implicit_method_call(name, args, span) {
+                        return result;
+                    }
+                    // `Type(expr)` cast (ES4 draft: calling a type converts).
+                    if let Some(target) = self.ident_as_type(name) {
+                        return self.cast_call(target, args, span);
+                    }
+                }
+            }
+        }
+        if let ExprKind::Member(object, method) = &callee.kind {
+            // `super.m(...)` — statically bound.
+            if matches!(object.kind, ExprKind::Super) {
+                return self.super_call(Some(method), args, span);
+            }
+            // Static method call: unshadowed class name receiver.
+            if let ExprKind::Ident(recv) = &object.kind {
+                if !self.is_shadowed(recv) {
+                    if let Some(class) = self.ident_as_class(recv) {
+                        return self.static_call(class, method, args, span);
+                    }
+                }
             }
         }
         if let ExprKind::Member(object, method) = &callee.kind {
             let object = self.expr(object);
+            // Class / interface dispatch.
+            if let Ty::Class(class) = object.ty {
+                return self.class_method_call(object, class, method, args, span);
+            }
+            if let Ty::Iface(iface) = object.ty {
+                return self.iface_method_call(object, iface, method, args, span);
+            }
             if object.ty != Ty::Any && object.ty != Ty::Error {
                 return match builtins::member(object.ty, method) {
                     Some(Member::Method(sig)) => {
@@ -657,7 +737,7 @@ impl Checker {
             .collect()
     }
 
-    fn arity(
+    pub(super) fn arity(
         &mut self,
         name: &str,
         given: usize,
@@ -684,6 +764,11 @@ impl Checker {
     // --- members ----------------------------------------------------------------
 
     fn member_read(&mut self, object: TExpr, name: &str, span: Span) -> TExpr {
+        match object.ty {
+            Ty::Class(class) => return self.class_member_read(object, class, name, span),
+            Ty::Iface(iface) => return self.iface_member_read(object, iface, name, span),
+            _ => {}
+        }
         match object.ty {
             Ty::Any | Ty::Error => {
                 let ty = object.ty;
@@ -781,7 +866,8 @@ fn mk(ty: Ty, span: Span, kind: TExprKind) -> TExpr {
 }
 
 /// The verifier's join of two branch types: identical stays, numeric pairs
-/// widen to Number, anything else erases to `*` (frame-merge behavior).
+/// widen to Number, object pairs join at Object, anything else erases to
+/// `*` (frame-merge behavior).
 fn merge_types(a: Ty, b: Ty) -> Ty {
     if a == b {
         return a;
@@ -791,6 +877,12 @@ fn merge_types(a: Ty, b: Ty) -> Ty {
     }
     if a.is_numeric() && b.is_numeric() {
         return Ty::Number;
+    }
+    // A precise least-common-ancestor would be better; Object is always
+    // sound for two object-like values (null included).
+    let object_like = |t: Ty| matches!(t, Ty::Class(_) | Ty::Iface(_) | Ty::Null);
+    if object_like(a) && object_like(b) {
+        return Ty::Class(crate::classes::OBJECT);
     }
     Ty::Any
 }

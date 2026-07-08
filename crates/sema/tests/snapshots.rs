@@ -72,3 +72,11 @@ fn closures_gated_until_p6() {
     );
     assert!(out.contains("Phase 6"), "{out}");
 }
+
+/// P4 negative corpus: override enforcement, final, conformance,
+/// hierarchy cycles, access control.
+#[test]
+fn oop_errors_snapshot() {
+    let text = include_str!("programs/oop_errors.as");
+    expect_file!["programs/oop_errors.diag"].assert_eq(&run("oop_errors.as", text));
+}

@@ -7,6 +7,7 @@
 
 use span::Span;
 
+use crate::classes::{ClassId, IfaceId, Registry};
 use crate::ty::Ty;
 
 /// Index of a function in [`TProgram::functions`].
@@ -20,9 +21,12 @@ pub struct LocalId(pub u32);
 /// A fully type-checked program.
 #[derive(Debug)]
 pub struct TProgram {
-    /// All functions, including nested ones and function expressions.
-    /// `functions[0]` is the synthesized script body (top-level statements).
+    /// All functions, including nested ones, function expressions, methods,
+    /// constructors, and accessors. `functions[0]` is the synthesized script
+    /// body (top-level statements, preceded by static initializers).
     pub functions: Vec<TFunction>,
+    /// The class/interface registry (layouts, vtables).
+    pub registry: Registry,
 }
 
 /// The id of the synthesized top-level script function.
@@ -33,6 +37,9 @@ pub const SCRIPT_FN: FnId = FnId(0);
 pub struct TFunction {
     /// Source name; script body is `<script>`, anonymous exprs `<anonymous>`.
     pub name: String,
+    /// When this is an instance method/accessor/constructor: the class whose
+    /// `this` it receives (backends add the implicit receiver parameter).
+    pub method_of: Option<ClassId>,
     /// Declared return type (`Void` when unannotated per AS3, but the
     /// checker records what was declared).
     pub return_ty: Ty,
@@ -201,9 +208,43 @@ pub enum TExprKind {
     /// binaries for lowering.
     Logical(ast::BinaryOp, Box<TExpr>, Box<TExpr>),
     Conditional(Box<TExpr>, Box<TExpr>, Box<TExpr>),
-    /// Runtime type test/cast where the target is a builtin core type.
+    /// Runtime type test/cast against a core type, class, or interface.
     Is(Box<TExpr>, Ty),
     As(Box<TExpr>, Ty),
+    /// `this` inside an instance member.
+    This,
+    /// `new C(args)` — allocate, init fields, run constructor.
+    New(ClassId, Vec<TExpr>),
+    /// Instance field read: (receiver, defining class, slot).
+    FieldGet(Box<TExpr>, ClassId, usize),
+    /// Instance field write.
+    FieldSet(Box<TExpr>, ClassId, usize, Box<TExpr>),
+    /// Virtual dispatch through the receiver's vtable slot.
+    CallVirtual {
+        recv: Box<TExpr>,
+        class: ClassId,
+        vslot: usize,
+        args: Vec<TExpr>,
+    },
+    /// Dispatch through an interface method table.
+    CallIface {
+        recv: Box<TExpr>,
+        iface: IfaceId,
+        islot: usize,
+        args: Vec<TExpr>,
+    },
+    /// Statically bound call with an explicit receiver: `super.m(...)`
+    /// and constructor-chained calls.
+    CallDirect {
+        fn_id: FnId,
+        recv: Box<TExpr>,
+        args: Vec<TExpr>,
+    },
+    /// `super(args)` constructor chain (only in constructors).
+    SuperCtor(ClassId, Vec<TExpr>),
+    /// Static field read/write: (class, static index).
+    StaticGet(ClassId, usize),
+    StaticSet(ClassId, usize, Box<TExpr>),
     /// Implicit conversion made explicit; `ty` is the target.
     Coerce(Coercion, Box<TExpr>),
     Array(Vec<Option<TExpr>>),

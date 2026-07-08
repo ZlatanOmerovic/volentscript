@@ -1,0 +1,6 @@
+red ball true true true
+circle 3 circle(r=3)
+true 3
+dark red ball(r=2)
+<red ball(r=2)>
+true true

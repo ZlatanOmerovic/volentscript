@@ -16,7 +16,8 @@ pub use lower::lower;
 
 use span::Span;
 
-/// A backend-level type. `Any` is the boxed dynamic value (`*`).
+/// A backend-level type. `Any` is the boxed dynamic value (`*`);
+/// `Object`/`Iface` are pointers to class instances.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(missing_docs)]
 pub enum Ty {
@@ -27,6 +28,10 @@ pub enum Ty {
     String,
     Any,
     Void,
+    /// Instance pointer; payload = class index into [`Program::classes`].
+    Object(u32),
+    /// Instance pointer typed by interface index.
+    Iface(u32),
 }
 
 /// Index of a function in [`Program::functions`].
@@ -41,8 +46,40 @@ pub struct LocalId(pub u32);
 /// the runtime's `main` shim calls).
 #[derive(Debug)]
 pub struct Program {
-    /// All functions.
+    /// All functions (script, user functions, methods, constructors —
+    /// including synthesized default constructors).
     pub functions: Vec<Function>,
+    /// Class layouts/vtables, index = the `Ty::Object` payload.
+    pub classes: Vec<Class>,
+    /// Number of interfaces (ids are dense; dispatch tables live on
+    /// classes).
+    pub iface_count: u32,
+}
+
+/// One lowered class: everything a backend needs to emit layout, RTTI, and
+/// dispatch tables (object model per avm2overview.pdf §4.1, mapped to
+/// native structs/vtables).
+#[derive(Debug)]
+pub struct Class {
+    /// Qualified name (for RTTI / default toString).
+    pub name: String,
+    /// Parent class index; `None` = root (Object).
+    pub parent: Option<u32>,
+    /// Full instance slot types, inherited first (slot i = struct field
+    /// i+1; field 0 is the descriptor pointer header).
+    pub slots: Vec<Ty>,
+    /// Full vtable: function per slot (overrides already substituted).
+    pub vtable: Vec<FnId>,
+    /// Constructor (always present — synthesized when the source had none;
+    /// it chains to the parent and runs field initializers).
+    pub ctor: FnId,
+    /// Implemented interfaces: (interface id, method table in interface
+    /// method order).
+    pub ifaces: Vec<(u32, Vec<FnId>)>,
+    /// `toString():String` override for RTTI display, if any.
+    pub to_string: Option<FnId>,
+    /// Static field storage types.
+    pub statics: Vec<Ty>,
 }
 
 /// One lowered function.
@@ -50,6 +87,9 @@ pub struct Program {
 pub struct Function {
     /// Symbol-friendly name (informational; codegen derives real symbols).
     pub name: String,
+    /// Instance methods/constructors receive `this` (class index) as an
+    /// implicit first parameter (before `locals[0]`).
+    pub this_class: Option<u32>,
     /// Return type.
     pub ret: Ty,
     /// All local slots; the first `param_count` are parameters.
@@ -185,6 +225,11 @@ pub enum Conv {
     ToAny,
     /// AVM2 `coerce_s`: null/undefined → null, else ToString.
     AnyToString,
+    /// AVM2 `coerce` to a class: null/undefined → null, matching object →
+    /// pointer, else TypeError (abort until P6 exceptions).
+    AnyToObject(u32),
+    /// Same, interface target.
+    AnyToIface(u32),
 }
 
 /// Binary operators (operand types already made uniform by sema).
@@ -250,6 +295,21 @@ pub enum ExprKind {
         is_inc: bool,
         is_prefix: bool,
     },
+    /// Increment/decrement of a static field.
+    StaticIncDec {
+        class: u32,
+        index: usize,
+        is_inc: bool,
+        is_prefix: bool,
+    },
+    /// Increment/decrement of an instance field.
+    FieldIncDec {
+        recv: Box<Expr>,
+        class: u32,
+        slot: usize,
+        is_inc: bool,
+        is_prefix: bool,
+    },
     Binary(BinOp, Box<Expr>, Box<Expr>),
     /// Short-circuit `&&`/`||` (value-preserving); `is_and`.
     Logical {
@@ -264,4 +324,37 @@ pub enum ExprKind {
     As(Box<Expr>, Ty),
     Conv(Conv, Box<Expr>),
     Comma(Box<Expr>, Box<Expr>),
+    /// `this` (implicit first parameter of methods).
+    This,
+    /// Allocate + default-init + run constructor.
+    New(u32, Vec<Expr>),
+    /// Field access: (receiver, class owning the slot, slot index).
+    FieldGet(Box<Expr>, u32, usize),
+    FieldSet(Box<Expr>, u32, usize, Box<Expr>),
+    /// Vtable dispatch (receiver's static class, vtable slot).
+    CallVirtual {
+        recv: Box<Expr>,
+        class: u32,
+        vslot: usize,
+        args: Vec<Expr>,
+    },
+    /// Interface-table dispatch. `ret` is the callee's declared return
+    /// type (the expression's own `ty` differs for setter calls, whose
+    /// value is the assigned operand).
+    CallIface {
+        recv: Box<Expr>,
+        iface: u32,
+        islot: usize,
+        ret: Ty,
+        args: Vec<Expr>,
+    },
+    /// Statically bound method call (`super.m`, constructor chains).
+    CallDirect {
+        fn_id: FnId,
+        recv: Box<Expr>,
+        args: Vec<Expr>,
+    },
+    /// Static field storage access.
+    StaticGet(u32, usize),
+    StaticSet(u32, usize, Box<Expr>),
 }

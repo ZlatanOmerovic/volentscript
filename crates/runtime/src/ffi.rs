@@ -551,6 +551,156 @@ pub unsafe extern "C" fn vs_any_cmp(a: *const VsAny, b: *const VsAny, op: u32) -
     })
 }
 
+// --- objects --------------------------------------------------------------------
+
+use crate::object::{self, VsClassDesc};
+
+/// Allocates a zeroed instance and stores its descriptor header.
+/// (Zero bytes = int/uint 0, false, null refs, `*` undefined — exactly the
+/// AS3 defaults except Number, which codegen sets to NaN after this call;
+/// SPECS §3.11.)
+///
+/// # Safety
+/// `desc` must be a static class descriptor; `size` its instance size.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_alloc_object(desc: *const VsClassDesc, size: u64) -> *mut u8 {
+    let layout = std::alloc::Layout::from_size_align(size as usize, 8).expect("layout");
+    // SAFETY: layout is non-zero (header word always present); allocation
+    // is intentionally leaked (P3+ memory model, see crate docs).
+    let p = unsafe { std::alloc::alloc_zeroed(layout) };
+    assert!(!p.is_null(), "out of memory");
+    // SAFETY: word 0 is the header (layout contract).
+    unsafe { *(p as *mut *const VsClassDesc) = desc };
+    p
+}
+
+/// `obj is Class` (SPECS §3.1: real runtime test against class identity).
+///
+/// # Safety
+/// `obj` null or live; `desc` static.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_obj_is_class(obj: *const u8, desc: *const VsClassDesc) -> u32 {
+    u32::from(object::is_class(obj, desc))
+}
+
+/// `obj is Interface`.
+///
+/// # Safety
+/// `obj` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_obj_is_iface(obj: *const u8, iface_id: u32) -> u32 {
+    u32::from(object::is_iface(obj, iface_id))
+}
+
+/// Interface dispatch: the method table for `iface_id`. Aborts on null
+/// receivers (TypeError semantics until P6) — a missing table cannot
+/// happen on sema-checked programs.
+///
+/// # Safety
+/// `obj` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_iface_table(obj: *const u8, iface_id: u32) -> *const *const u8 {
+    if obj.is_null() {
+        conv::type_error("null reference in interface method call");
+    }
+    object::iface_table(obj, iface_id)
+        .unwrap_or_else(|| conv::type_error("object does not implement the interface"))
+}
+
+/// Null-receiver guard for virtual calls/field access.
+///
+/// # Safety
+/// Always safe; diverges on null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_null_check(obj: *const u8) {
+    if obj.is_null() {
+        conv::type_error("null reference (property access on null object)");
+    }
+}
+
+/// ToString for a class instance (used by string concatenation).
+///
+/// # Safety
+/// `obj` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_object_to_string(obj: *const u8) -> *const VsString {
+    VsString::from_rust(&object::object_to_display(obj))
+}
+
+/// Boxed `is Class`.
+///
+/// # Safety
+/// `v` live; `desc` static.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_is_class(v: *const VsAny, desc: *const VsClassDesc) -> u32 {
+    // SAFETY: caller contract.
+    u32::from(object::any_is_class(unsafe { *v }, desc))
+}
+
+/// Boxed `is Interface`.
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_is_iface(v: *const VsAny, iface_id: u32) -> u32 {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    u32::from(v.tag() == Tag::Object && object::is_iface(v.as_object_ptr(), iface_id))
+}
+
+/// Boxed `as Class` → pointer or null.
+///
+/// # Safety
+/// `v` live; `desc` static.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_as_class(v: *const VsAny, desc: *const VsClassDesc) -> *const u8 {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    if object::any_is_class(v, desc) {
+        v.as_object_ptr()
+    } else {
+        std::ptr::null()
+    }
+}
+
+/// Boxed `as Interface` → pointer or null.
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_as_iface(v: *const VsAny, iface_id: u32) -> *const u8 {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    if v.tag() == Tag::Object && object::is_iface(v.as_object_ptr(), iface_id) {
+        v.as_object_ptr()
+    } else {
+        std::ptr::null()
+    }
+}
+
+/// AVM2 `coerce` to class (checked; aborts on mismatch until P6).
+///
+/// # Safety
+/// `v` live; `desc` static.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_coerce_class(
+    v: *const VsAny,
+    desc: *const VsClassDesc,
+) -> *const u8 {
+    // SAFETY: caller contract.
+    object::any_coerce_class(unsafe { *v }, desc)
+}
+
+/// AVM2 `coerce` to interface.
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_coerce_iface(v: *const VsAny, iface_id: u32) -> *const u8 {
+    // SAFETY: caller contract.
+    object::any_coerce_iface(unsafe { *v }, iface_id)
+}
+
 // --- builtins -----------------------------------------------------------------
 
 /// `trace(...args)`: ToString each argument, join with spaces, newline to
