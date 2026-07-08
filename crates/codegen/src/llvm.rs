@@ -451,9 +451,15 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             }
             fcx.emit_gc_root_registration();
         }
-        // GC safepoint at every function entry (loop headers get one too):
-        // collection may only run when no runtime frames are live.
-        fcx.emit_safepoint();
+        // GC safepoint at function entry — only when this function can
+        // create allocation debt itself: a body with direct allocation
+        // sites, or captured locals (their heap cells allocate at entry).
+        // Allocation-free functions skip it; any allocating callee keeps
+        // its own entry safepoint, so collection delay stays bounded
+        // (P22 safepoint elision; soundness note on expr_allocs).
+        if stmts_alloc(&mir_fn.body) || mir_fn.captured.iter().any(|&c| c) {
+            fcx.emit_safepoint();
+        }
         for stmt in &mir_fn.body {
             fcx.stmt(stmt);
         }
@@ -584,7 +590,9 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .build_conditional_branch(c, body_bb, end_bb)
                     .expect("br");
                 self.cx.builder.position_at_end(body_bb);
-                self.emit_safepoint();
+                if expr_allocs(cond) || stmt_allocs(body) {
+                    self.emit_safepoint();
+                }
                 self.frames.push(Frame {
                     label: label.clone(),
                     break_bb: end_bb,
@@ -605,7 +613,9 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .build_unconditional_branch(body_bb)
                     .expect("br");
                 self.cx.builder.position_at_end(body_bb);
-                self.emit_safepoint();
+                if expr_allocs(cond) || stmt_allocs(body) {
+                    self.emit_safepoint();
+                }
                 self.frames.push(Frame {
                     label: label.clone(),
                     break_bb: end_bb,
@@ -660,7 +670,12 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     }
                 }
                 self.cx.builder.position_at_end(body_bb);
-                self.emit_safepoint();
+                if cond.as_ref().is_some_and(expr_allocs)
+                    || update.as_ref().is_some_and(expr_allocs)
+                    || stmt_allocs(body)
+                {
+                    self.emit_safepoint();
+                }
                 self.frames.push(Frame {
                     label: label.clone(),
                     break_bb: end_bb,
@@ -6789,6 +6804,171 @@ fn store_wrapper_result<'ctx>(
 enum ArgKind {
     Num,
     Str,
+}
+
+/// Whether evaluating this expression can allocate a GC block directly
+/// (drives safepoint elision, P22). Calls to compiled functions do NOT
+/// count — an allocating callee keeps its own entry safepoint, so the
+/// debt-to-collection delay stays bounded inductively. Runtime natives
+/// and string/collection operations DO count: they allocate inside the
+/// runtime, which carries no safepoints of its own.
+fn expr_allocs(e: &mir::Expr) -> bool {
+    use mir::ExprKind as E;
+    match &e.kind {
+        // Pure leaves.
+        E::Int(_)
+        | E::UInt(_)
+        | E::Number(_)
+        | E::Bool(_)
+        | E::Null
+        | E::Undefined
+        | E::LocalGet(_)
+        | E::CaptureGet(_)
+        | E::StaticGet(..)
+        | E::This
+        | E::IncDec { .. }
+        | E::StaticIncDec { .. }
+        | E::CaptureIncDec { .. } => false,
+        // Allocating leaves / constructions (short-circuit true).
+        E::Str(_)
+        | E::ArrayLit(_)
+        | E::VectorLit(..)
+        | E::ObjectLit(_)
+        | E::RegExpLit(..)
+        | E::NewRegExp(_)
+        | E::NewDate(_)
+        | E::NewNamespace(_)
+        | E::NamespaceVal(_)
+        | E::New(..)
+        | E::Closure(_)
+        | E::FnValue(_)
+        | E::BuiltinValue(_)
+        | E::BoundMethod(..)
+        | E::CallBuiltin(..)
+        | E::CallStrMethod(..)
+        | E::CallNumMethod(..)
+        | E::CallArr(..)
+        | E::CallVec(..)
+        | E::CallNative(..)
+        | E::CallRegex(..)
+        | E::CallDate(..)
+        | E::CallSocket(..)
+        | E::NsGet(..)
+        | E::NsCall(..)
+        | E::NsUri(_)
+        | E::EnumKey(..)
+        | E::EnumValue(..)
+        | E::PropGet(..)
+        | E::PropSet(..)
+        | E::PropCall(..)
+        | E::AnyIndexGet(..)
+        | E::AnyIndexSet(..)
+        | E::HasProp(..)
+        | E::DeleteProp(..) => true,
+        // Compiled-code calls: the callee covers itself; scan arguments.
+        E::CallFn(_, args) => args.iter().any(expr_allocs),
+        E::CallVirtual { recv, args, .. }
+        | E::CallIface { recv, args, .. }
+        | E::CallDirect { recv, args, .. } => {
+            expr_allocs(recv) || args.iter().any(expr_allocs)
+        }
+        E::CallFnValue {
+            callee,
+            this_arg,
+            args,
+            ..
+        } => {
+            expr_allocs(callee)
+                || this_arg.as_deref().is_some_and(expr_allocs)
+                || args.iter().any(expr_allocs)
+        }
+        // String concatenation / boxed arithmetic build result values.
+        E::Binary(_, a, b) => {
+            e.ty == Ty::String
+                || a.ty == Ty::Any
+                || b.ty == Ty::Any
+                || expr_allocs(a)
+                || expr_allocs(b)
+        }
+        E::Conv(c, v) => {
+            matches!(c, Conv::ToString | Conv::AnyToString) || expr_allocs(v)
+        }
+        // Pure-ish wrappers: whatever the children do.
+        E::LocalSet(_, v)
+        | E::CaptureSet(_, v)
+        | E::StaticSet(_, _, v)
+        | E::Unary(_, v)
+        | E::Is(v, _)
+        | E::As(v, _)
+        | E::StrLen(v)
+        | E::SeqLen(v)
+        | E::EnumLen(v) => expr_allocs(v),
+        E::FieldIncDec { recv, .. } => expr_allocs(recv),
+        E::FieldGet(v, ..) => expr_allocs(v),
+        E::FieldSet(o, _, _, v)
+        | E::SeqSetLen(o, v)
+        | E::SeqGet(o, v)
+        | E::Comma(o, v) => expr_allocs(o) || expr_allocs(v),
+        E::Logical { lhs, rhs, .. } => expr_allocs(lhs) || expr_allocs(rhs),
+        E::Conditional(a, b, c) => expr_allocs(a) || expr_allocs(b) || expr_allocs(c),
+        E::SeqSet(a, b, c) => expr_allocs(a) || expr_allocs(b) || expr_allocs(c),
+    }
+}
+
+/// Whether any statement in the tree allocates directly (loop bodies
+/// included — the loop-level analysis calls this on its own body).
+fn stmts_alloc(stmts: &[mir::Stmt]) -> bool {
+    stmts.iter().any(stmt_allocs)
+}
+
+fn stmt_allocs(s: &mir::Stmt) -> bool {
+    use mir::Stmt as S;
+    match s {
+        S::Expr(e) | S::Assign(_, e) | S::Throw(e) => expr_allocs(e),
+        S::Block(b) => stmts_alloc(b),
+        S::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_allocs(cond)
+                || stmt_allocs(then_branch)
+                || else_branch.as_deref().is_some_and(stmt_allocs)
+        }
+        S::While { cond, body, .. } | S::DoWhile { cond, body, .. } => {
+            expr_allocs(cond) || stmt_allocs(body)
+        }
+        S::For {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
+            init.as_deref().is_some_and(stmt_allocs)
+                || cond.as_ref().is_some_and(expr_allocs)
+                || update.as_ref().is_some_and(expr_allocs)
+                || stmt_allocs(body)
+        }
+        S::Switch { scrutinee, cases } => {
+            expr_allocs(scrutinee)
+                || cases
+                    .iter()
+                    .any(|c| c.test.as_ref().is_some_and(expr_allocs) || stmts_alloc(&c.body))
+        }
+        S::Return { value } => value.as_ref().is_some_and(expr_allocs),
+        S::Try {
+            body,
+            catches,
+            finally,
+        } => {
+            // try-functions are optnone anyway; keep it conservative.
+            stmts_alloc(body)
+                || catches.iter().any(|c| stmts_alloc(&c.body))
+                || finally.as_deref().is_some_and(stmts_alloc)
+        }
+        S::Break { .. } | S::Continue { .. } | S::Empty => false,
+    }
 }
 
 /// Whether a statement tree contains a `try` (drives the optnone pin —

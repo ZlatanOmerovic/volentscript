@@ -29,8 +29,11 @@ for b in "${BENCHES[@]}"; do
 done
 
 echo "== timing =="
+# Cool the CPU between benchmarks so a heavy predecessor (e.g. binarytrees)
+# can't thermally skew the next one — otherwise the per-date history drifts.
 for b in "${BENCHES[@]}"; do
-  hyperfine --warmup 2 --runs 5 --export-json "results/$b.json" \
+  sleep 25
+  hyperfine --warmup 3 --runs 8 --export-json "results/$b.json" \
     --command-name volentscript "./bin/$b-vs" \
     --command-name c            "./bin/$b-c" \
     --command-name rust         "./bin/$b-rs" \

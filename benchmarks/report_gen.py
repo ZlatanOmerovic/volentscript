@@ -39,7 +39,7 @@ def fmt(ms): return f"{ms/1000:.2f} s" if ms >= 1000 else f"{ms:.1f} ms"
 # ---------------- REPORT.md ----------------
 md = []
 md.append("# VolentScript benchmarks\n")
-md.append(f"*{date} — {machine}. Method: [hyperfine](https://github.com/sharkdp/hyperfine), 2 warmup + 5 timed runs, mean wall time of the whole process (startup included — that is how CLI tools are used). Every implementation prints identical output, verified before timing; sources in this directory, reproduce with `./run.sh`.*\n")
+md.append(f"*{date} — {machine}. Method: [hyperfine](https://github.com/sharkdp/hyperfine), 3 warmup + 8 timed runs, mean wall time of the whole process (startup included — that is how CLI tools are used). Every implementation prints identical output, verified before timing; sources in this directory, reproduce with `./run.sh`.*\n")
 md.append("## Results (mean wall time; lower is better)\n")
 hdr = "| benchmark | " + " | ".join(LABEL[r] for r in RUNTIMES) + " |"
 md.append(hdr)
@@ -151,7 +151,7 @@ html = f"""<!doctype html>
   a {{ color: {ORANGE}; }}
 </style></head><body>
 <h1>Volent<span>Script</span> benchmarks</h1>
-<p class="meta">{date} &middot; {machine} &middot; hyperfine, 2 warmup + 5 timed runs, mean process wall time (startup included) &middot; identical outputs verified across all runtimes before timing &middot; <a href="https://github.com/ZlatanOmerovic/volentscript/tree/main/benchmarks">sources &amp; runner</a></p>
+<p class="meta">{date} &middot; {machine} &middot; hyperfine, 3 warmup + 8 timed runs, mean process wall time (startup included) &middot; identical outputs verified across all runtimes before timing &middot; <a href="https://github.com/ZlatanOmerovic/volentscript/tree/main/benchmarks">sources &amp; runner</a></p>
 {rows_html}
 <div class="notes">
   <h3>Reading the numbers honestly</h3>
