@@ -96,7 +96,8 @@ engines run.
 for r in RUNTIMES:
     md.append(f"- {LABEL[r]}: `{versions[r]}`")
 md.append("")
-open("REPORT.md", "w").write("\n".join(md))
+md_text = "\n".join(md)
+open("REPORT.md", "w").write(md_text)
 
 # ---------------- report.html ----------------
 ORANGE = "#E85C0F"; DARK = "#241B14"; CREAM = "#FFFDF9"; AMBER = "#FFAE3D"
@@ -166,4 +167,21 @@ html = f"""<!doctype html>
 <footer>VolentScript — ActionScript 3, revived. Native, ahead-of-time, and entirely of its own will.</footer>
 </body></html>"""
 open("report.html", "w").write(html)
-print("REPORT.md + report.html written")
+
+# Dated archive: every run is preserved under reports/<date>.* so the
+# language's evolution stays visible; merged raw JSON alongside.
+import os
+os.makedirs("reports", exist_ok=True)
+open(f"reports/{date}.md", "w").write(md_text)
+open(f"reports/{date}.html", "w").write(html)
+merged = {b: {r: {"mean_ms": data[b][r][0], "stddev_ms": data[b][r][1]} for r in RUNTIMES} for b in BENCHES}
+json.dump({"date": date, "machine": machine, "versions": versions, "results": merged},
+          open(f"reports/{date}.json", "w"), indent=1)
+history = sorted(f[:-5] for f in os.listdir("reports") if f.endswith(".html"))
+lines = ["# Benchmark history", "",
+         "One entry per run — open any date to see that day's full report.", ""]
+for d in reversed(history):
+    lines.append(f"- **{d}** — [report]({d}.html) · [markdown]({d}.md) · [raw]({d}.json)")
+lines.append("")
+open("reports/README.md", "w").write("\n".join(lines))
+print(f"REPORT.md + report.html written; archived as reports/{date}.*")

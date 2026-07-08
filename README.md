@@ -151,6 +151,9 @@ Go, Java, Node, Bun and Deno, with an honest reading of every gap and the
 optimization each one maps to. Highlights: within ~2x of C on tight numeric
 loops; 6-12x behind on allocation/string-heavy code (boxed Vector storage
 and UTF transcoding — both on the roadmap). Reproduce: `benchmarks/run.sh`.
+Every run is archived by date under
+[`benchmarks/reports/`](benchmarks/reports/README.md) so the language's
+performance evolution stays on the record.
 
 ## Examples
 
