@@ -1,0 +1,6 @@
+# LLVM pin (see README "Toolchain" and root Cargo.toml).
+# Cargo's [env] does NOT override a variable already set in the environment,
+# so CI and non-default hosts (Intel mac: /usr/local/opt/llvm) can export
+# their own LLVM_SYS_221_PREFIX.
+[env]
+LLVM_SYS_221_PREFIX = "/opt/homebrew/opt/llvm"

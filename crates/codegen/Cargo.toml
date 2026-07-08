@@ -1,0 +1,15 @@
+[package]
+name = "codegen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Backend trait and the LLVM (inkwell) backend"
+
+[dependencies]
+diagnostics.workspace = true
+mir.workspace = true
+inkwell.workspace = true
+
+[lints]
+workspace = true

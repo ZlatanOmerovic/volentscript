@@ -1,0 +1,3 @@
+# Default rustfmt style; pin the style edition so `rustfmt` invoked outside
+# cargo agrees with `cargo fmt`.
+style_edition = "2024"

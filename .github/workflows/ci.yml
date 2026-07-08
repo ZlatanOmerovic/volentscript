@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM 22
+        run: |
+          brew install llvm
+          PREFIX="$(brew --prefix llvm)"
+          "$PREFIX/bin/llvm-config" --version | grep -q '^22\.' \
+            || { echo "brew llvm is not major 22 — update the pin (Cargo.toml, .cargo/config.toml, this workflow) together"; exit 1; }
+          echo "LLVM_SYS_221_PREFIX=$PREFIX" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace

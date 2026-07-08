@@ -1,0 +1,11 @@
+[package]
+name = "e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "End-to-end golden tests: compile, run, compare stdout and exit code"
+publish = false
+
+[lints]
+workspace = true

@@ -1,0 +1,7 @@
+/target
+.DS_Store
+
+# Reference material is read-only *input*, not a code artifact (CLAUDE.md §5).
+# SOURCES.md stays tracked so the set is reproducible; see links.md.
+/docs/*
+!/docs/SOURCES.md

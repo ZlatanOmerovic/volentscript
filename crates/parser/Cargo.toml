@@ -1,0 +1,16 @@
+[package]
+name = "parser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Token stream to AST (recursive descent, ES4 grammar)"
+
+[dependencies]
+span.workspace = true
+diagnostics.workspace = true
+lexer.workspace = true
+ast.workspace = true
+
+[lints]
+workspace = true

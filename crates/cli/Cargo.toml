@@ -1,0 +1,22 @@
+# The language name is a placeholder (SPECS §12). It appears as a literal only
+# here (crate/binary name, help strings) and in the README — rename in those
+# places only.
+[package]
+name = "asr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AS3R compiler CLI"
+
+[[bin]]
+name = "asr"
+path = "src/main.rs"
+
+[dependencies]
+driver.workspace = true
+diagnostics.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

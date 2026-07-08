@@ -1,0 +1,18 @@
+[package]
+name = "driver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Compilation orchestration: parse, check, lower, codegen, link"
+
+[dependencies]
+span.workspace = true
+diagnostics.workspace = true
+parser.workspace = true
+sema.workspace = true
+mir.workspace = true
+codegen.workspace = true
+
+[lints]
+workspace = true

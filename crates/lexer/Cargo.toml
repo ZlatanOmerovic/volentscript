@@ -1,0 +1,14 @@
+[package]
+name = "lexer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Source text to token stream"
+
+[dependencies]
+span.workspace = true
+diagnostics.workspace = true
+
+[lints]
+workspace = true

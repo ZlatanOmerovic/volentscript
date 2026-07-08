@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "tests"]
+
+# Toolchain pins (see README "Toolchain"):
+#   LLVM major:  22  (brew `llvm`, currently 22.1.6)
+#   inkwell:     0.9.x, feature "llvm22-1" (=> llvm-sys 221)
+#   MSRV:        1.85 (inkwell minimum; edition 2024 floor)
+# The inkwell feature flag, LLVM_SYS_221_PREFIX, and the brew LLVM major must
+# all agree. Do not let `brew upgrade` drift the LLVM major without updating
+# all three together.
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# internal crates
+span = { path = "crates/span" }
+diagnostics = { path = "crates/diagnostics" }
+ast = { path = "crates/ast" }
+lexer = { path = "crates/lexer" }
+parser = { path = "crates/parser" }
+sema = { path = "crates/sema" }
+mir = { path = "crates/mir" }
+codegen = { path = "crates/codegen" }
+runtime = { path = "crates/runtime" }
+driver = { path = "crates/driver" }
+# external
+clap = { version = "4", features = ["derive"] }
+inkwell = { version = "0.9", features = ["llvm22-1"] }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.lints.rust]
+missing_docs = "warn"
