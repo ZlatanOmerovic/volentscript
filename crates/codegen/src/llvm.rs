@@ -2300,7 +2300,34 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .expect("call");
                 Val::UInt(n)
             }
-            ExprKind::SeqGet(recv, idx) => {
+            ExprKind::SeqGet(recv, idx, unchecked) => {
+                // P24: a preceding loop guard proved this index in range —
+                // emit a raw load, no bounds check, so the loop vectorizes.
+                if *unchecked
+                    && let Some((_kind, ety, _stride)) = self.unboxed_vec(recv)
+                {
+                    let (p, _) = self.seq_ptr(recv);
+                    let idx_f = self.num_arg(idx);
+                    let (_len, data) = self.vec_header(p);
+                    let i = self
+                        .cx
+                        .builder
+                        .build_float_to_unsigned_int(idx_f, cx.context.i64_type(), "vi")
+                        .expect("conv");
+                    let ep = unsafe {
+                        self.cx
+                            .builder
+                            .build_in_bounds_gep(ety, data, &[i], "vep")
+                            .expect("gep")
+                    };
+                    let val = self.cx.builder.build_load(ety, ep, "vel").expect("load");
+                    return match e.ty {
+                        Ty::Number => Val::Num(val.into_float_value()),
+                        Ty::Int => Val::Int(val.into_int_value()),
+                        Ty::UInt => Val::UInt(val.into_int_value()),
+                        _ => unreachable!("unboxed vector element type"),
+                    };
+                }
                 // P23 fast path: an unboxed numeric Vector inlines the read as
                 // a bounds-checked load, no runtime call and no boxing.
                 if let Some((_kind, ety, _stride)) = self.unboxed_vec(recv) {
@@ -2374,29 +2401,36 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     self.unbox_any_ptr(out, e.ty)
                 }
             }
-            ExprKind::SeqSet(recv, idx, v) => {
+            ExprKind::SeqSet(recv, idx, v, unchecked) => {
+                // P24: guard-proven in-range store — raw store, no bounds
+                // check, so the loop vectorizes.
+                if *unchecked
+                    && let Some((kind, ety, _stride)) = self.unboxed_vec(recv)
+                {
+                    let value = self.expr(v);
+                    let scalar = self.vec_scalar(value, kind);
+                    let (p, _) = self.seq_ptr(recv);
+                    let idx_f = self.num_arg(idx);
+                    let (_len, data) = self.vec_header(p);
+                    let i = self
+                        .cx
+                        .builder
+                        .build_float_to_unsigned_int(idx_f, cx.context.i64_type(), "vi")
+                        .expect("conv");
+                    let ep = unsafe {
+                        self.cx
+                            .builder
+                            .build_in_bounds_gep(ety, data, &[i], "vep")
+                            .expect("gep")
+                    };
+                    self.cx.builder.build_store(ep, scalar).expect("store");
+                    return value;
+                }
                 // P23 fast path: an unboxed numeric Vector inlines the in-range
                 // store; append (i == len) and out-of-range fall to the runtime.
                 if let Some((kind, ety, _stride)) = self.unboxed_vec(recv) {
                     let value = self.expr(v);
-                    // Coerce the operand to the element's storage type so the
-                    // store is type-exact (sema already coerced to the element
-                    // AS3 type; this just picks the matching LLVM scalar).
-                    let scalar: BasicValueEnum<'ctx> = if kind == 1 {
-                        self.numeric_of(value).expect("numeric").into()
-                    } else {
-                        match value {
-                            Val::Int(i) | Val::UInt(i) => i.into(),
-                            other => {
-                                let f = self.numeric_of(other).expect("numeric");
-                                let conv = if kind == 2 { Conv::ToInt } else { Conv::ToUInt };
-                                match self.convert_num_to_int(f, conv) {
-                                    Val::Int(i) | Val::UInt(i) => i.into(),
-                                    _ => unreachable!("int conversion"),
-                                }
-                            }
-                        }
-                    };
+                    let scalar = self.vec_scalar(value, kind);
                     let (p, _) = self.seq_ptr(recv);
                     let idx_f = self.num_arg(idx);
                     let (len, data) = self.vec_header(p);
@@ -4647,6 +4681,28 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             .expect("load")
             .into_pointer_value();
         (len, data)
+    }
+
+    /// Coerces a store operand to an unboxed Vector element's storage type
+    /// so the LLVM store is type-exact (sema already coerced to the element
+    /// AS3 type; this just selects the matching scalar — `kind`: 1=f64,
+    /// 2=i32, 3=u32).
+    fn vec_scalar(&mut self, value: Val<'ctx>, kind: u32) -> BasicValueEnum<'ctx> {
+        if kind == 1 {
+            self.numeric_of(value).expect("numeric").into()
+        } else {
+            match value {
+                Val::Int(i) | Val::UInt(i) => i.into(),
+                other => {
+                    let f = self.numeric_of(other).expect("numeric");
+                    let conv = if kind == 2 { Conv::ToInt } else { Conv::ToUInt };
+                    match self.convert_num_to_int(f, conv) {
+                        Val::Int(i) | Val::UInt(i) => i.into(),
+                        _ => unreachable!("int conversion"),
+                    }
+                }
+            }
+        }
     }
 
     /// `0.0 <= idx < len` as an `i1` (both bounds; `idx` is the raw f64 index).
@@ -7110,11 +7166,11 @@ fn expr_allocs(e: &mir::Expr) -> bool {
         E::FieldGet(v, ..) => expr_allocs(v),
         E::FieldSet(o, _, _, v)
         | E::SeqSetLen(o, v)
-        | E::SeqGet(o, v)
         | E::Comma(o, v) => expr_allocs(o) || expr_allocs(v),
+        E::SeqGet(o, v, _) => expr_allocs(o) || expr_allocs(v),
         E::Logical { lhs, rhs, .. } => expr_allocs(lhs) || expr_allocs(rhs),
         E::Conditional(a, b, c) => expr_allocs(a) || expr_allocs(b) || expr_allocs(c),
-        E::SeqSet(a, b, c) => expr_allocs(a) || expr_allocs(b) || expr_allocs(c),
+        E::SeqSet(a, b, c, _) => expr_allocs(a) || expr_allocs(b) || expr_allocs(c),
     }
 }
 

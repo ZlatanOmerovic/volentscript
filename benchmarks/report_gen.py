@@ -12,7 +12,7 @@ DESC = {
     "binarytrees": ("binary trees, depth 16 (CLBG shape)", "allocation churn, GC pressure"),
     "mandelbrot": ("mandelbrot 1500², 50 iters", "tight numeric loops"),
     "strings": ("split/join/case/search × 60k", "string operations, UTF handling"),
-    "spectralnorm": ("spectral norm, n=2500 (CLBG shape)", "unboxed Vector.<Number> element access (P23)"),
+    "spectralnorm": ("spectral norm, n=2500 (CLBG shape)", "unboxed Vector.<Number> access (P23) + bounds-check elimination (P24)"),
 }
 
 def sh(cmd): return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout.strip()
@@ -73,12 +73,16 @@ md.append("""
   safepoint is already elided (fib allocates nothing), so the remaining
   cost is the call ABI itself and conservative-GC codegen constraints, not
   the collector.
-- **Unboxed numeric vectors (spectralnorm)** — the P23 workload. Elements
-  of `Vector.<Number>` are now stored as raw `f64` and read/written inline
-  (no boxing, no runtime call): that alone is **2x faster** than the
-  previous runtime-call-on-boxed-storage path. We still trail C by ~3x here
-  because a bounds-check branch per element blocks LLVM autovectorization —
-  bounds-check elimination is the next lever, not more vector work.
+- **Unboxed numeric vectors (spectralnorm)** — `~1.5x C`, beating Bun and
+  Deno and level with Node. Two optimizations stack here: P23 stores `Vector.<Number>`
+  elements as raw `f64` read/written inline (2x over the old boxed
+  runtime-call path), and P24 (bounds-check elimination by loop versioning)
+  removes the per-element bounds branch from provably-in-range counted
+  loops — which is what finally lets LLVM autovectorize the inner products
+  (0 → 13 vector ops in the emitted code; ~1.1x on its own). Getting here
+  also meant threading the size as a parameter rather than a captured
+  top-level `const`, so the helpers stay inlinable — closure-call overhead
+  on module-level captures is the next gap (it also caps fib/nbody).
 - **Object float math (nbody)** — ~10x C. Note this uses `Vector.<Body>`
   (object elements), so P23's unboxing does not apply; the gap is
   per-`Body` field access across pointers plus `Math.sqrt`, neither
@@ -90,10 +94,10 @@ md.append("""
 - **Strings** — ~18x C. Every operation transcodes UTF-16 storage to UTF-8
   and back inside the runtime; that is the whole gap.
 
-**Remaining gaps map to planned optimizations, in impact order:**
-bounds-check elimination + autovectorization for numeric-vector loops,
-string ops that stay in UTF-16, and generational collection. None require
-language changes.
+**Remaining gaps map to planned optimizations, in impact order:** avoiding
+closure conversion for functions that only read module-level `const`s (caps
+fib, nbody, and any code using top-level constants), string ops that stay in
+UTF-16, and generational collection. None require language changes.
 
 **Fairness notes:** same algorithm and structure in every language,
 idiomatic-simple, no SIMD/threads/arena tricks anywhere. Java is timed as

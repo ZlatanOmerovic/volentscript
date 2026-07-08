@@ -188,6 +188,23 @@ vectors are also GC leaves (no element tracing). Reference-typed instantiations
 precisely. This is the value-typed/reference-typed boundary of §4.2 made
 concrete for `Vector`.
 
+**Bounds-check elimination (P24):** a MIR pass (`mir::bce`) removes the
+per-element bounds branch from counted loops `for (var i = C; i < B; i++)`
+where `i` indexes a plain-local unboxed-numeric `Vector` and every occurrence
+of that vector in the loop is a `v[i]` access or `v.length` read. It rewrites
+the loop to `if (B <= v.length && …) { <fast, unchecked> } else { <slow,
+checked> }`; the runtime guard makes the transform sound regardless of the
+analysis' precision. Removing the branch is what lets LLVM autovectorize the
+inner loop (e.g. spectralnorm's inner products).
+
+*Deferred (broader scope, not implemented — documented so it isn't
+re-discovered from scratch):* affine indices `v[i±k]` (the guard must cover
+both ends of the index range) and loops that legitimately grow `v` (the buffer
+can reallocate mid-loop, so a hoisted data pointer would dangle — those need
+per-iteration revalidation, not an entry-only guard). The v1 scope excludes
+both precisely because a wrong range proof there is memory-unsafety, not a
+wrong result.
+
 ### 4.4 Strings
 Keep AS3-observable string semantics (indexing, `length`, methods). Internal
 encoding may be UTF-8 with a UTF-16-compatible API surface **only if** all

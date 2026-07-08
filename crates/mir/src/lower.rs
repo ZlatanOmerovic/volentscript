@@ -97,7 +97,7 @@ pub fn lower(program: &sema::TProgram) -> Result<Program, Vec<Diagnostic>> {
         functions[0].body.push(stmt);
     }
     if lo.diagnostics.is_empty() {
-        Ok(Program {
+        let mut prog = Program {
             functions,
             classes,
             iface_count: u32::try_from(program.registry.ifaces.len()).unwrap_or(0),
@@ -135,7 +135,9 @@ pub fn lower(program: &sema::TProgram) -> Result<Program, Vec<Diagnostic>> {
                     .map(|&t| lo2.ty(t, span::Span::new(span::SourceId(0), 0, 0)))
                     .collect()
             },
-        })
+        };
+        crate::bce::run(&mut prog);
+        Ok(prog)
     } else {
         lo.diagnostics
             .sort_by_key(|d| d.span.map(|s| (s.start, s.end)));
@@ -677,7 +679,7 @@ impl Lowerer<'_> {
                 Box::new(self.expr(value)),
             ),
             E::Index(recv, idx) if matches!(recv.ty, sema::Ty::Array | sema::Ty::Vector(_)) => {
-                ExprKind::SeqGet(Box::new(self.expr(recv)), Box::new(self.expr(idx)))
+                ExprKind::SeqGet(Box::new(self.expr(recv)), Box::new(self.expr(idx)), false)
             }
             E::IndexSet(recv, idx, v)
                 if matches!(recv.ty, sema::Ty::Array | sema::Ty::Vector(_)) =>
@@ -686,6 +688,7 @@ impl Lowerer<'_> {
                     Box::new(self.expr(recv)),
                     Box::new(self.expr(idx)),
                     Box::new(self.expr(v)),
+                    false,
                 )
             }
             E::Index(recv, idx) => {

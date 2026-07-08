@@ -122,6 +122,14 @@ fn vectors_unboxed() {
     run_golden("vectors");
 }
 
+/// P24: bounds-check elimination via loop versioning — fast (unchecked) and
+/// slow (checked) paths must agree, and an out-of-range counted loop must
+/// still raise RangeError through the guarded slow path.
+#[test]
+fn bounds_check_elimination() {
+    run_golden("bce");
+}
+
 /// The Phase 7 milestone (SPECS §11): a real CLI tool — args, File I/O,
 /// dynamic objects, JSON round trip, Math, callbacks, exit codes.
 #[test]

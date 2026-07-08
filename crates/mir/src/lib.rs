@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+mod bce;
 mod lower;
 
 pub use lower::lower;
@@ -59,7 +60,7 @@ pub enum Ty {
 pub struct FnId(pub u32);
 
 /// Index of a local slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LocalId(pub u32);
 
 /// A lowered program. `functions[0]` is the script body (the entry point
@@ -157,7 +158,7 @@ pub struct Function {
 
 /// A lowered statement. Control flow stays structured — the backend builds
 /// basic blocks (labels drive labeled break/continue).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(missing_docs)]
 pub enum Stmt {
     Expr(Expr),
@@ -212,7 +213,7 @@ pub enum Stmt {
 
 /// One catch clause: matched by `is` against the binding's type
 /// (untyped = catch-all `*`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Catch {
     /// Local receiving the exception (its type is the match target).
     pub binding: LocalId,
@@ -221,7 +222,7 @@ pub struct Catch {
 }
 
 /// One `switch` clause (bodies fall through; `break` exits).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Case {
     /// `None` = `default:`.
     pub test: Option<Expr>,
@@ -230,7 +231,7 @@ pub struct Case {
 }
 
 /// A lowered, typed expression.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Expr {
     /// Result type.
     pub ty: Ty,
@@ -461,7 +462,7 @@ pub enum UnOp {
 }
 
 /// Lowered expression kinds.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(missing_docs)]
 pub enum ExprKind {
     Int(i32),
@@ -568,10 +569,14 @@ pub enum ExprKind {
     SeqLen(Box<Expr>),
     /// Array/Vector length write.
     SeqSetLen(Box<Expr>, Box<Expr>),
-    /// `seq[i]` read (index already ToNumber).
-    SeqGet(Box<Expr>, Box<Expr>),
-    /// `seq[i] = v` (value already element-coerced).
-    SeqSet(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// `seq[i]` read (index already ToNumber). The `bool` is the P24
+    /// bounds-check-elimination flag: when `true`, a preceding loop guard has
+    /// proven the index in range, so codegen emits an unchecked load. Only
+    /// ever set by the `bce` pass on unboxed numeric Vectors.
+    SeqGet(Box<Expr>, Box<Expr>, bool),
+    /// `seq[i] = v` (value already element-coerced). `bool` = BCE-unchecked
+    /// (see [`ExprKind::SeqGet`]).
+    SeqSet(Box<Expr>, Box<Expr>, Box<Expr>, bool),
     /// Captured-variable access (index into this function's `captures`).
     CaptureGet(usize),
     CaptureSet(usize, Box<Expr>),
