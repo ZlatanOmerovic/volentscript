@@ -164,6 +164,12 @@ pub(crate) struct Checker<'a> {
     pub(crate) fn_instantiations: HashMap<(usize, Vec<Ty>), FnId>,
     /// The top-level `main` function, if declared (SPECS §7 entry).
     pub(crate) entry_main: Option<FnId>,
+    /// P25: module-level (`<script>`, fn 0) `const` bindings whose
+    /// initializer folds to a compile-time literal. References are inlined
+    /// to the literal instead of captured, so functions that only read
+    /// module consts are not closure-converted (SPECS §3.7). Keyed by the
+    /// fn-0 local slot. Value is the declared type + folded constant.
+    pub(crate) module_consts: HashMap<LocalId, (Ty, ConstVal)>,
 }
 
 impl<'a> Checker<'a> {
@@ -319,6 +325,14 @@ impl<'a> Checker<'a> {
         // ECMA-262 3rd ed. §10.1.3).
         let mut nested: Vec<&'a ast::FunctionDecl> = Vec::new();
         self.hoist(fn_index, stmts, &mut nested);
+
+        // P25: fold module-level `const` initializers now — before any nested
+        // function body is checked below — so references to them inline to
+        // literals instead of capturing (which would closure-convert the
+        // reader; SPECS §3.7).
+        if id == SCRIPT_FN {
+            self.fold_module_consts(stmts);
+        }
 
         // Register nested function signatures before checking any body so
         // mutual references resolve.
@@ -1296,6 +1310,188 @@ impl<'a> Checker<'a> {
             src = CapSrc::ParentCapture(slot);
         }
         Some(slot)
+    }
+
+    /// P25: folds every module-level `const` with a compile-time initializer
+    /// (in declaration order, so later consts can reference earlier ones) and
+    /// records the literal so [`Checker::ident`] inlines references to it.
+    fn fold_module_consts(&mut self, stmts: &'a [ast::Stmt]) {
+        let mut names: HashMap<String, ConstVal> = HashMap::new();
+        for s in stmts {
+            let ast::StmtKind::VarDecl(decl) = &s.kind else {
+                continue;
+            };
+            if !decl.is_const {
+                continue;
+            }
+            for b in &decl.bindings {
+                let Some(init) = &b.init else { continue };
+                let Some(cv) = fold_ast_const(init, &names) else {
+                    continue;
+                };
+                let Some(Symbol::Local { id, .. }) = self.lookup_current_fn(&b.name) else {
+                    continue;
+                };
+                let ty = self.functions[SCRIPT_FN.0 as usize].locals[id.0 as usize].ty;
+                // Only record if it yields a literal of the declared type.
+                if const_to_texpr(cv.clone(), ty, b.span).is_some() {
+                    self.module_consts.insert(id, (ty, cv.clone()));
+                }
+                names.insert(b.name.clone(), cv);
+            }
+        }
+    }
+}
+
+/// A compile-time constant value (P25 module-const folding).
+#[derive(Clone)]
+pub(crate) enum ConstVal {
+    Int(i32),
+    UInt(u32),
+    Num(f64),
+    Str(String),
+    Bool(bool),
+}
+
+impl ConstVal {
+    fn as_f64(&self) -> f64 {
+        match self {
+            ConstVal::Int(i) => f64::from(*i),
+            ConstVal::UInt(u) => f64::from(*u),
+            ConstVal::Num(n) => *n,
+            ConstVal::Bool(b) => f64::from(*b),
+            ConstVal::Str(_) => f64::NAN,
+        }
+    }
+    fn as_i32(&self) -> i32 {
+        to_int32(self.as_f64())
+    }
+    fn as_u32(&self) -> u32 {
+        to_int32(self.as_f64()) as u32
+    }
+}
+
+/// ES-262 §9.5 ToInt32 (enough for folding finite constant operands).
+fn to_int32(n: f64) -> i32 {
+    if !n.is_finite() || n == 0.0 {
+        return 0;
+    }
+    let m = n.trunc().rem_euclid(4_294_967_296.0);
+    (if m >= 2_147_483_648.0 {
+        m - 4_294_967_296.0
+    } else {
+        m
+    }) as i64 as i32
+}
+
+fn truthy_const(v: &ConstVal) -> bool {
+    match v {
+        ConstVal::Int(i) => *i != 0,
+        ConstVal::UInt(u) => *u != 0,
+        ConstVal::Num(n) => *n != 0.0 && !n.is_nan(),
+        ConstVal::Str(s) => !s.is_empty(),
+        ConstVal::Bool(b) => *b,
+    }
+}
+
+/// Folds an AST expression to a constant, resolving identifiers against the
+/// already-folded module consts (`names`). Conservative: unsupported nodes,
+/// division/modulo by zero, and number→string return `None`, leaving the
+/// binding un-inlined (still correct, just via a capture).
+fn fold_ast_const(e: &ast::Expr, names: &HashMap<String, ConstVal>) -> Option<ConstVal> {
+    use ast::BinaryOp as B;
+    use ast::ExprKind as E;
+    use ast::UnaryOp as U;
+    match &e.kind {
+        E::Int(v) => Some(ConstVal::Int(*v)),
+        E::UInt(v) => Some(ConstVal::UInt(*v)),
+        E::Number(v) => Some(ConstVal::Num(*v)),
+        E::Str(s) => Some(ConstVal::Str(s.clone())),
+        E::Bool(b) => Some(ConstVal::Bool(*b)),
+        E::Ident(name) => names.get(name).cloned(),
+        E::Unary(op, inner) => {
+            let v = fold_ast_const(inner, names)?;
+            match op {
+                U::Minus => match v {
+                    ConstVal::Int(i) => Some(ConstVal::Int(i.wrapping_neg())),
+                    ConstVal::UInt(u) => Some(ConstVal::Num(-f64::from(u))),
+                    _ => Some(ConstVal::Num(-v.as_f64())),
+                },
+                U::Plus => Some(ConstVal::Num(v.as_f64())),
+                U::BitNot => Some(ConstVal::Int(!v.as_i32())),
+                U::Not => Some(ConstVal::Bool(!truthy_const(&v))),
+                _ => None,
+            }
+        }
+        E::Binary(op, a, b) => {
+            let (va, vb) = (fold_ast_const(a, names)?, fold_ast_const(b, names)?);
+            let is_str = matches!(va, ConstVal::Str(_)) || matches!(vb, ConstVal::Str(_));
+            let is_num = matches!(va, ConstVal::Num(_)) || matches!(vb, ConstVal::Num(_));
+            match op {
+                B::Add if is_str => {
+                    Some(ConstVal::Str(const_to_string(&va)? + &const_to_string(&vb)?))
+                }
+                B::Div => Some(ConstVal::Num(va.as_f64() / vb.as_f64())), // AS3 `/` → Number
+                B::Add | B::Sub | B::Mul | B::Rem if is_num => {
+                    let (x, y) = (va.as_f64(), vb.as_f64());
+                    Some(ConstVal::Num(match op {
+                        B::Add => x + y,
+                        B::Sub => x - y,
+                        B::Mul => x * y,
+                        _ => x % y,
+                    }))
+                }
+                B::Add | B::Sub | B::Mul | B::Rem => {
+                    let (x, y) = (va.as_i32(), vb.as_i32());
+                    Some(ConstVal::Int(match op {
+                        B::Add => x.wrapping_add(y),
+                        B::Sub => x.wrapping_sub(y),
+                        B::Mul => x.wrapping_mul(y),
+                        B::Rem if y != 0 => x.wrapping_rem(y),
+                        _ => return None,
+                    }))
+                }
+                B::BitAnd => Some(ConstVal::Int(va.as_i32() & vb.as_i32())),
+                B::BitOr => Some(ConstVal::Int(va.as_i32() | vb.as_i32())),
+                B::BitXor => Some(ConstVal::Int(va.as_i32() ^ vb.as_i32())),
+                B::Shl => Some(ConstVal::Int(va.as_i32().wrapping_shl(vb.as_i32() as u32 & 31))),
+                B::Shr => Some(ConstVal::Int(va.as_i32().wrapping_shr(vb.as_i32() as u32 & 31))),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Builds a literal `TExpr` of type `ty` from a folded constant, coercing the
+/// value to `ty`. Returns `None` if `ty` is not a scalar the checker types
+/// identifiers as (so the binding stays un-inlined rather than mistyped).
+pub(crate) fn const_to_texpr(cv: ConstVal, ty: Ty, span: Span) -> Option<TExpr> {
+    let kind = match ty {
+        Ty::Int => TExprKind::Int(cv.as_i32()),
+        Ty::UInt => TExprKind::UInt(cv.as_u32()),
+        Ty::Number => TExprKind::Number(cv.as_f64()),
+        Ty::Boolean => TExprKind::Bool(truthy_const(&cv)),
+        Ty::String => TExprKind::Str(match cv {
+            ConstVal::Str(s) => s,
+            _ => return None, // number→string not folded (see const_to_string)
+        }),
+        _ => return None,
+    };
+    Some(TExpr { ty, span, kind })
+}
+
+/// ToString for constant folding. `Number` returns `None` — the full ES-262
+/// §9.8 number-to-string algorithm lives in the runtime, so rather than
+/// duplicate it we simply decline to fold string forms of numbers (they stay
+/// as a runtime coercion). Integers/booleans/strings format trivially.
+fn const_to_string(v: &ConstVal) -> Option<String> {
+    match v {
+        ConstVal::Int(i) => Some(i.to_string()),
+        ConstVal::UInt(u) => Some(u.to_string()),
+        ConstVal::Str(s) => Some(s.clone()),
+        ConstVal::Bool(b) => Some(b.to_string()),
+        ConstVal::Num(_) => None,
     }
 }
 

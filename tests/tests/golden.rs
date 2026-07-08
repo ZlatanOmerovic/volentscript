@@ -130,6 +130,14 @@ fn bounds_check_elimination() {
     run_golden("bce");
 }
 
+/// P25: module-level `const`s (including folded const-expressions and string
+/// consts) inline into functions instead of closure-converting them, while a
+/// mutable top-level `var` still captures and works.
+#[test]
+fn module_const_inlining() {
+    run_golden("modconst");
+}
+
 /// The Phase 7 milestone (SPECS §11): a real CLI tool — args, File I/O,
 /// dynamic objects, JSON round trip, Math, callbacks, exit codes.
 #[test]

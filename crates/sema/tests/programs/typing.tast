@@ -55,7 +55,7 @@ fn #0 <script> : void
     [int] LocalSet %0
       [int] Logical LogAnd
         [int] LocalGet %0
-        [int] LocalGet %10
+        [int] Int 100
   ExprStmt
     [int] LocalSet %0
       [int] Coerce ToInt
@@ -99,7 +99,7 @@ fn #0 <script> : void
           [Number] Coerce ToNumber
             [int] LocalGet %0
           [Number] Coerce ToNumber
-            [int] LocalGet %10
+            [int] Int 100
       body:
         Block
           ExprStmt

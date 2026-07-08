@@ -173,6 +173,15 @@ impl<'a> Checker<'a> {
     fn ident(&mut self, name: &str, span: Span) -> TExpr {
         match self.lookup(name) {
             Some(Symbol::Local { id, fn_depth }) => {
+                // P25: a module-level (fn 0) `const` folded to a literal is
+                // inlined here — no `capture_slot`, so the reader is never
+                // closure-converted for it.
+                if fn_depth == 0
+                    && let Some((ty, cv)) = self.module_consts.get(&id).cloned()
+                    && let Some(lit) = super::const_to_texpr(cv, ty, span)
+                {
+                    return lit;
+                }
                 let (ty, _) = self.local_info(id, fn_depth);
                 match self.capture_slot(id, fn_depth) {
                     None => mk(ty, span, TExprKind::LocalGet(id)),

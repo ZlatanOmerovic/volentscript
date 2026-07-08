@@ -115,6 +115,26 @@ First-class functions, nested functions, closures capturing lexical environment.
 **Method closures bind `this` correctly** — extracting `obj.method` yields a
 closure permanently bound to `obj`. No `this`-loss footgun.
 
+**Module-const inlining (P25):** a function that references a top-level
+variable captures it, which closure-converts the function — its calls then go
+through an indirect, un-inlinable dispatch. To keep the idiomatic pattern
+(module-level `const`s used inside functions) fast, a top-level `const` whose
+initializer folds to a compile-time literal (int/uint/Number/Boolean/String
+literals and arithmetic/bitwise/string-concat over other such consts) is
+**inlined at every reference** instead of captured. The reader stays a plain
+top-level function and inlines normally. Folding runs before any function body
+is checked, so ordering is not an issue; non-foldable consts and any read that
+can't be typed exactly fall back to capture (correct, just unoptimized).
+
+*Deferred — module-level global storage:* mutable top-level `var`s (and
+non-foldable `const`s) still capture, so functions that read/write them
+closure-convert. Giving top-level `var`/`const` real static storage
+(referenced by a global load/store, not a capture cell) would remove that for
+all module state, not just foldable consts. It is a larger, separate change
+because a global holding a GC pointer (String/Array/object) must be registered
+as a **GC root** scanned every collection — const-inlining sidesteps that
+entirely (immediates and interned strings). Bundle it with that GC-root work.
+
 ### 3.8 Control flow & statements
 `if/else`, `for`, `for..in` (keys), `for each..in` (values), `while`,
 `do..while`, `switch/case/default` (with fall-through), `break`/`continue` (incl.

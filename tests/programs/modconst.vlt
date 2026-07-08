@@ -1,0 +1,35 @@
+// P25: module-level `const`s referenced inside functions inline to literals
+// (no closure conversion), including const-expression folding and string
+// consts. A mutable top-level `var` must still capture and work as before.
+
+const N:int = 5;
+const K:Number = 2.5;
+const SCALE:Number = K * 2.0;      // folded: 5.0
+const MASK:int = (1 << 4) | 1;     // folded: 17
+const GREET:String = "hi:";
+
+var counter:int = 0;               // mutable — still captured, not inlined
+
+function bump():void {
+    counter++;                     // writes the captured var
+}
+
+function label(i:int):String {
+    return GREET + i;              // const string inlined
+}
+
+function area(r:Number):Number {
+    return SCALE * r * r;         // const inlined
+}
+
+function masked(x:int):int {
+    return x & MASK;              // const int inlined
+}
+
+for (var i:int = 0; i < N; i++) {  // N inlined as loop bound
+    bump();
+}
+trace(counter);                    // 5
+trace(label(N));                   // hi:5
+trace(area(2.0).toFixed(2));       // 20.00
+trace(masked(255));                // 255 & 17 = 17

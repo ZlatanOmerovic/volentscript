@@ -1,44 +1,42 @@
 // Spectral norm (benchmarks-game shape): dominated by Vector.<Number>
-// element reads/writes in the O(n^2) matrix-vector products. This is the
-// workload P23 (unboxed numeric Vectors) + P24 (bounds-check elimination)
-// target — every v[j] is a direct f64 load with no boxing, no runtime call,
-// and no per-element bounds branch inside the counted loop.
-//
-// `n` is threaded as a parameter (not a captured top-level const) so the
-// helpers stay plain top-level functions and `evalA` inlines — otherwise
-// closure-call overhead would dominate and hide the vector-access cost.
+// element reads/writes in the O(n^2) matrix-vector products (P23 unboxed
+// storage + P24 bounds-check elimination make each v[j] a direct, unchecked
+// f64 load). The dimension is an idiomatic module-level `const` referenced
+// directly in the helpers — P25 inlines it, so the helpers stay plain
+// top-level functions (no closure conversion) and `evalA` inlines.
+
+const N:int = 2500;
 
 function evalA(i:int, j:int):Number {
     var ij:int = i + j;
     return 1.0 / ((ij * (ij + 1)) / 2 + i + 1);
 }
 
-function multiplyAv(n:int, v:Vector.<Number>, av:Vector.<Number>):void {
-    for (var i:int = 0; i < n; i++) {
+function multiplyAv(v:Vector.<Number>, av:Vector.<Number>):void {
+    for (var i:int = 0; i < N; i++) {
         var sum:Number = 0.0;
-        for (var j:int = 0; j < n; j++) {
+        for (var j:int = 0; j < N; j++) {
             sum += evalA(i, j) * v[j];
         }
         av[i] = sum;
     }
 }
 
-function multiplyAtv(n:int, v:Vector.<Number>, atv:Vector.<Number>):void {
-    for (var i:int = 0; i < n; i++) {
+function multiplyAtv(v:Vector.<Number>, atv:Vector.<Number>):void {
+    for (var i:int = 0; i < N; i++) {
         var sum:Number = 0.0;
-        for (var j:int = 0; j < n; j++) {
+        for (var j:int = 0; j < N; j++) {
             sum += evalA(j, i) * v[j];
         }
         atv[i] = sum;
     }
 }
 
-function multiplyAtAv(n:int, v:Vector.<Number>, atav:Vector.<Number>, tmp:Vector.<Number>):void {
-    multiplyAv(n, v, tmp);
-    multiplyAtv(n, tmp, atav);
+function multiplyAtAv(v:Vector.<Number>, atav:Vector.<Number>, tmp:Vector.<Number>):void {
+    multiplyAv(v, tmp);
+    multiplyAtv(tmp, atav);
 }
 
-var N:int = 2500;
 var u:Vector.<Number> = new <Number>[];
 var v:Vector.<Number> = new <Number>[];
 var tmp:Vector.<Number> = new <Number>[];
@@ -49,8 +47,8 @@ for (var k:int = 0; k < N; k++) {
 }
 
 for (var iter:int = 0; iter < 10; iter++) {
-    multiplyAtAv(N, u, v, tmp);
-    multiplyAtAv(N, v, u, tmp);
+    multiplyAtAv(u, v, tmp);
+    multiplyAtAv(v, u, tmp);
 }
 
 var vBv:Number = 0.0;

@@ -79,10 +79,11 @@ md.append("""
   runtime-call path), and P24 (bounds-check elimination by loop versioning)
   removes the per-element bounds branch from provably-in-range counted
   loops — which is what finally lets LLVM autovectorize the inner products
-  (0 → 13 vector ops in the emitted code; ~1.1x on its own). Getting here
-  also meant threading the size as a parameter rather than a captured
-  top-level `const`, so the helpers stay inlinable — closure-call overhead
-  on module-level captures is the next gap (it also caps fib/nbody).
+  (0 → 13 vector ops in the emitted code; ~1.1x on its own). P25 then lets
+  the dimension be an idiomatic module-level `const` referenced directly in
+  the helpers: it inlines to a literal, so the helpers are not
+  closure-converted and `evalA` inlines — no parameter-threading workaround
+  needed.
 - **Object float math (nbody)** — ~10x C. Note this uses `Vector.<Body>`
   (object elements), so P23's unboxing does not apply; the gap is
   per-`Body` field access across pointers plus `Math.sqrt`, neither
@@ -94,10 +95,13 @@ md.append("""
 - **Strings** — ~18x C. Every operation transcodes UTF-16 storage to UTF-8
   and back inside the runtime; that is the whole gap.
 
-**Remaining gaps map to planned optimizations, in impact order:** avoiding
-closure conversion for functions that only read module-level `const`s (caps
-fib, nbody, and any code using top-level constants), string ops that stay in
-UTF-16, and generational collection. None require language changes.
+**Remaining gaps map to planned optimizations, in impact order:** string ops
+that stay in UTF-16 instead of transcoding (strings), module-level global
+storage so mutable top-level `var`s stop closure-converting their readers
+(P25 already did this for `const`s), and generational collection
+(binarytrees). fib's ~6x is the call ABI itself and nbody's ~10x is per-field
+pointer chasing plus `Math.sqrt`, neither of which is a collector or closure
+issue. None require language changes.
 
 **Fairness notes:** same algorithm and structure in every language,
 idiomatic-simple, no SIMD/threads/arena tricks anywhere. Java is timed as
