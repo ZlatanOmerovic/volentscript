@@ -12,3 +12,10 @@
 !/tests/programs/*.vlt
 !/tests/programs/*.out
 !/tests/programs/*.txt
+
+# Example build outputs (any extensionless file next to a .vlt source)
+/examples/*/main
+/examples/*/server
+/examples/*/client
+/examples/*/smtpd
+/examples/*/send

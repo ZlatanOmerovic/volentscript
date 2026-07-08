@@ -1,0 +1,62 @@
+// logstats — access-log analyzer.
+// Shows: RegExp capture groups, dynamic objects as maps, for..in,
+// Array sorting with a comparator closure, JSON report output.
+//
+//   volentscript run main.vlt sample.log
+
+var args:Array = System.args();
+var path:String = args.length > 0 ? "" + args[0] : "sample.log";
+var text:String? = File.read(path);
+if (text == null) {
+    trace("cannot read " + path);
+    System.exit(1);
+}
+
+// ip - - [time] "METHOD /path HTTP/x" status bytes
+var re:RegExp = new RegExp("^(\\S+) \\S+ \\S+ \\[[^\\]]+\\] \"(\\w+) (\\S+)[^\"]*\" (\\d+) (\\d+)", "");
+
+var byStatus:Object = {};
+var byPath:Object = {};
+var totalBytes:Number = 0;
+var parsed:int = 0;
+var skipped:int = 0;
+
+var lines:Array = text.split("\n");
+for (var i:int = 0; i < lines.length; i++) {
+    var line:String = "" + lines[i];
+    if (line == "") {
+        continue;
+    }
+    var m:Array? = re.exec(line);
+    if (m == null) {
+        skipped++;
+        continue;
+    }
+    parsed++;
+    var status:String = "" + m[4];
+    var reqPath:String = "" + m[3];
+    byStatus[status] = (byStatus[status] ? byStatus[status] : 0) + 1;
+    byPath[reqPath] = (byPath[reqPath] ? byPath[reqPath] : 0) + 1;
+    totalBytes += parseFloat("" + m[5]);
+}
+
+trace("parsed " + parsed + " lines (" + skipped + " skipped), " + totalBytes + " bytes served");
+trace("status codes:");
+for (var s:String in byStatus) {
+    trace("  " + s + ": " + byStatus[s]);
+}
+
+// Top paths, sorted by hits descending (comparator closure).
+var paths:Array = [];
+for (var p:String in byPath) {
+    paths.push({ path: p, hits: byPath[p] });
+}
+paths.sort(function(a:*, b:*):Number { return b["hits"] - a["hits"]; });
+trace("top paths:");
+for (var j:int = 0; j < paths.length; j++) {
+    trace("  " + paths[j]["hits"] + "x " + paths[j]["path"]);
+}
+
+var report:Object = { file: path, parsed: parsed, skipped: skipped, bytes: totalBytes, top: paths };
+File.write("report.json", JSON.stringify(report));
+trace("wrote report.json");

@@ -1,0 +1,30 @@
+// chat server — 1:1 turn-based terminal chat (talk-style).
+// Strict alternation makes blocking sockets correct: the client speaks
+// first, then you, then the client... `/quit` from either side ends it.
+//
+//   volentscript run server.vlt 7000        # then chat from the keyboard
+
+var args:Array = System.args();
+var port:int = args.length > 0 ? int(parseInt("" + args[0], 10)) : 7000;
+var server:ServerSocket = ServerSocket.bind(port);
+trace("chat on port " + server.localPort + " — waiting for a peer");
+var peer:Socket = server.accept();
+trace("peer connected. they type first.");
+
+while (true) {
+    var theirs:String? = peer.readLine();
+    if (theirs == null || theirs == "/quit") {
+        trace("peer left.");
+        break;
+    }
+    trace("[peer] " + theirs);
+    var mine:String? = System.readLine();
+    if (mine == null || mine == "/quit") {
+        peer.write("/quit\n");
+        break;
+    }
+    peer.write(mine + "\n");
+}
+peer.close();
+server.close();
+trace("chat over");

@@ -1,0 +1,75 @@
+// httpd — a static-file web server.
+// Shows: ServerSocket/accept loop, HTTP/1.0 request parsing over
+// readLine, File IO, path sanitizing, content types.
+//
+//   volentscript build main.vlt -o httpd
+//   ./httpd 8080 ./public
+//
+// Connections are served sequentially (the v1 runtime is
+// single-threaded) — plenty for demos and local tooling.
+// Pass a third argument N to exit after N requests (used by tests).
+
+function contentType(path:String):String {
+    if (path.search(/\.html?$/) >= 0) { return "text/html"; }
+    if (path.search(/\.css$/) >= 0)   { return "text/css"; }
+    if (path.search(/\.js$/) >= 0)    { return "text/javascript"; }
+    if (path.search(/\.json$/) >= 0)  { return "application/json"; }
+    if (path.search(/\.svg$/) >= 0)   { return "image/svg+xml"; }
+    return "text/plain";
+}
+
+function respond(client:Socket, status:String, type:String, body:String):void {
+    client.write("HTTP/1.0 " + status + "\r\n"
+        + "Content-Type: " + type + "\r\n"
+        + "Content-Length: " + body.length + "\r\n"
+        + "Connection: close\r\n\r\n"
+        + body);
+}
+
+var args:Array = System.args();
+var port:int = args.length > 0 ? int(parseInt("" + args[0], 10)) : 8080;
+var root:String = args.length > 1 ? "" + args[1] : ".";
+var budget:int = args.length > 2 ? int(parseInt("" + args[2], 10)) : -1;
+
+var server:ServerSocket = ServerSocket.bind(port);
+trace("serving " + root + " on http://127.0.0.1:" + server.localPort);
+
+var served:int = 0;
+while (budget < 0 || served < budget) {
+    var client:Socket = server.accept();
+    var request:String? = client.readLine();
+    // Drain headers (blank line ends them).
+    var header:String? = client.readLine();
+    while (header != null && header != "") {
+        header = client.readLine();
+    }
+    if (request == null) {
+        client.close();
+        continue;
+    }
+    var m:Array? = /^GET (\S+)/.exec(request);
+    if (m == null) {
+        respond(client, "405 Method Not Allowed", "text/plain", "GET only\n");
+    } else {
+        var path:String = "" + m[1];
+        if (path.indexOf("..") >= 0) {
+            respond(client, "403 Forbidden", "text/plain", "no traversal\n");
+        } else {
+            if (path == "/") {
+                path = "/index.html";
+            }
+            var file:String = root + path;
+            var body:String? = File.read(file);
+            if (body == null) {
+                respond(client, "404 Not Found", "text/plain", "not found: " + path + "\n");
+            } else {
+                respond(client, "200 OK", contentType(file), body);
+            }
+        }
+    }
+    client.close();
+    served++;
+    trace("served " + served + ": " + (request == null ? "?" : request));
+}
+server.close();
+trace("httpd done");

@@ -1,0 +1,25 @@
+// chat client — connects to server.vlt; you type first.
+//
+//   volentscript run client.vlt 7000
+
+var args:Array = System.args();
+var port:int = args.length > 0 ? int(parseInt("" + args[0], 10)) : 7000;
+var peer:Socket = Socket.connect("127.0.0.1", port);
+trace("connected. you type first.");
+
+while (true) {
+    var mine:String? = System.readLine();
+    if (mine == null || mine == "/quit") {
+        peer.write("/quit\n");
+        break;
+    }
+    peer.write(mine + "\n");
+    var theirs:String? = peer.readLine();
+    if (theirs == null || theirs == "/quit") {
+        trace("peer left.");
+        break;
+    }
+    trace("[peer] " + theirs);
+}
+peer.close();
+trace("chat over");

@@ -4,22 +4,22 @@ error[E0312]: possibly-null value assigned to non-nullable variable `String` —
  1 | var bad:String = null;                    // E0312 null literal
    |                  ^^^^
 error[E0312]: possibly-null value assigned to non-nullable parameter `String` — declare it `String?` or narrow with a null check (SPECS §4.1)
-  --> nulls.vlt:4:7
-   |
- 4 | needs(maybe);                             // E0312 unnarrowed argument
-   |       ^^^^^
-error[E0313]: `String` value may be null here — narrow with a null check first (SPECS §4.1)
   --> nulls.vlt:5:7
    |
- 5 | trace(maybe.length);                      // E0313 unnarrowed deref
+ 5 | needs(maybe);                             // E0312 unnarrowed argument
+   |       ^^^^^
+error[E0313]: `String` value may be null here — narrow with a null check first (SPECS §4.1)
+  --> nulls.vlt:6:7
+   |
+ 6 | trace(maybe.length);                      // E0313 unnarrowed deref
    |       ^^^^^^^^^^^^
 error[E0312]: possibly-null value assigned to non-nullable field `String` — declare it `String?` or narrow with a null check (SPECS §4.1)
-   --> nulls.vlt:15:1
+   --> nulls.vlt:16:1
     |
- 15 | h.name = h.tag;                           // E0312 nullable into non-nullable field
+ 16 | h.name = h.tag;                           // E0312 nullable into non-nullable field
     | ^^^^^^^^^^^^^^
 error[E0312]: possibly-null value assigned to non-nullable variable `String` — declare it `String?` or narrow with a null check (SPECS §4.1)
-   --> nulls.vlt:19:18
+   --> nulls.vlt:20:18
     |
- 19 | var got:String = giveOrNot(true);         // E0312 nullable return
+ 20 | var got:String = giveOrNot(true);         // E0312 nullable return
     |                  ^^^^^^^^^^^^^^^

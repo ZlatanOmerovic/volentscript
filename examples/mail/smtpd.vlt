@@ -1,0 +1,68 @@
+// smtpd — a miniature SMTP receiver (RFC 5321 flavor).
+// Shows: a real line-oriented wire protocol — HELO/EHLO, MAIL FROM,
+// RCPT TO, DATA terminated by ".", QUIT — with state tracking and
+// messages filed to disk.
+//
+//   volentscript build smtpd.vlt -o smtpd
+//   ./smtpd 2525 ./mail 1        # port, maildir, sessions to accept
+//
+// Sessions are sequential; pair with send.vlt or `nc`.
+
+var args:Array = System.args();
+var port:int = args.length > 0 ? int(parseInt("" + args[0], 10)) : 2525;
+var maildir:String = args.length > 1 ? "" + args[1] : "mail";
+var sessions:int = args.length > 2 ? int(parseInt("" + args[2], 10)) : 1;
+
+File.mkdir(maildir);
+var server:ServerSocket = ServerSocket.bind(port);
+trace("smtpd on port " + server.localPort);
+
+var delivered:int = 0;
+for (var s:int = 0; s < sessions; s++) {
+    var c:Socket = server.accept();
+    c.write("220 volent.local smtpd ready\r\n");
+    var from:String = "";
+    var rcpt:Array = [];
+    var line:String? = c.readLine();
+    while (line != null) {
+        var upper:String = line.toUpperCase();
+        if (upper.indexOf("HELO") == 0 || upper.indexOf("EHLO") == 0) {
+            var who:String = line.length > 5 ? line.substring(5, line.length) : "you";
+            c.write("250 volent.local greets " + who + "\r\n");
+        } else if (upper.indexOf("MAIL FROM:") == 0) {
+            from = line.substring(10, line.length);
+            c.write("250 OK\r\n");
+        } else if (upper.indexOf("RCPT TO:") == 0) {
+            rcpt.push(line.substring(8, line.length));
+            c.write("250 OK\r\n");
+        } else if (upper == "DATA") {
+            if (from == "" || rcpt.length == 0) {
+                c.write("503 need MAIL FROM and RCPT TO first\r\n");
+            } else {
+                c.write("354 end data with <CRLF>.<CRLF>\r\n");
+                var body:String = "From: " + from + "\nTo: " + rcpt + "\n\n";
+                var d:String? = c.readLine();
+                while (d != null && d != ".") {
+                    body += d + "\n";
+                    d = c.readLine();
+                }
+                delivered++;
+                var file:String = maildir + "/" + delivered + ".eml";
+                File.write(file, body);
+                c.write("250 OK: queued as " + delivered + "\r\n");
+                trace("delivered " + file + " (" + from + " -> " + rcpt + ")");
+                from = "";
+                rcpt = [];
+            }
+        } else if (upper == "QUIT") {
+            c.write("221 bye\r\n");
+            break;
+        } else {
+            c.write("500 unrecognized: " + line + "\r\n");
+        }
+        line = c.readLine();
+    }
+    c.close();
+}
+server.close();
+trace("smtpd done, " + delivered + " delivered");

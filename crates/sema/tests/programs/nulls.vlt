@@ -1,5 +1,6 @@
 var bad:String = null;                    // E0312 null literal
-var maybe:String? = "x";
+function riddle():String? { return "x"; }
+var maybe:String? = riddle();             // truly unknown (no literal fact)
 function needs(s:String):String { return s; }
 needs(maybe);                             // E0312 unnarrowed argument
 trace(maybe.length);                      // E0313 unnarrowed deref

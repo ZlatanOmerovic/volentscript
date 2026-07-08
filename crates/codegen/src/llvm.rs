@@ -2156,9 +2156,9 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 let out = self.entry_alloca(cx.any_ty, "enumout");
                 let f = cx.runtime_fn(
                     if is_key {
-                        "vs_enum_key"
+                        "vs_enum_key2"
                     } else {
-                        "vs_enum_value"
+                        "vs_enum_value2"
                     },
                     None,
                     &[

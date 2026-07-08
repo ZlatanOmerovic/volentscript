@@ -409,9 +409,13 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // Check the body (closure materializations run first).
+        // Check the body (closure materializations run first). The base
+        // narrowing frame receives facts proven by early-exit branches
+        // (`if (x == null) exit/return/throw` — SPECS §4.1).
+        self.narrowed.push(Default::default());
         let mut body: Vec<TStmt> = closure_inits;
         body.extend(stmts.iter().map(|s| self.stmt(s)));
+        self.narrowed.pop();
 
         // Missing-return analysis (ASC's "function does not return a value"):
         // a non-void, non-`*` return type requires every path to return.
@@ -1311,6 +1315,19 @@ fn completes_normally(stmts: &[TStmt]) -> bool {
 fn stmt_completes(stmt: &TStmt) -> bool {
     match &stmt.kind {
         TStmtKind::Return { .. } | TStmtKind::Throw { .. } => false,
+        // Control never flows past a jump to the following statement, so
+        // `if (x == null) continue;` proves x afterwards (SPECS §4.1).
+        TStmtKind::Break { .. } | TStmtKind::Continue { .. } => false,
+        // System.exit never returns (SPECS §6) — an `if (bad) exit`
+        // branch proves its condition's negation afterwards, like return.
+        TStmtKind::Expr(e)
+            if matches!(
+                &e.kind,
+                TExprKind::CallNative(crate::builtins::NativeFn::SystemExit, _)
+            ) =>
+        {
+            false
+        }
         TStmtKind::Block(b) => completes_normally(b),
         TStmtKind::If {
             then_branch,

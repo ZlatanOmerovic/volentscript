@@ -29,6 +29,13 @@ impl<'a> Checker<'a> {
 
     /// Conservative "could this expression be null" (SPECS §4.1).
     pub(crate) fn expr_nullable(&self, e: &TExpr) -> bool {
+        self.expr_nullable_under(e, &[])
+    }
+
+    /// Like [`Self::expr_nullable`] with extra locals proven non-null in
+    /// this context (branch-local facts a conditional's condition proves —
+    /// the scope stack no longer holds them when callers query).
+    fn expr_nullable_under(&self, e: &TExpr, proven: &[LocalId]) -> bool {
         // The null literal itself (typed `Null`) is definitely null.
         if e.ty == Ty::Null {
             return true;
@@ -74,9 +81,11 @@ impl<'a> Checker<'a> {
             TExprKind::LocalGet(id) => {
                 let fn_index = *self.fn_stack.last().expect("fn");
                 let local = &self.functions[fn_index].locals[id.0 as usize];
-                local.nullable && !self.narrowed.iter().any(|set| set.contains(id))
+                local.nullable
+                    && !self.narrowed.iter().any(|set| set.contains(id))
+                    && !proven.contains(id)
             }
-            TExprKind::LocalSet(_, v) => self.expr_nullable(v),
+            TExprKind::LocalSet(_, v) => self.expr_nullable_under(v, proven),
             TExprKind::FieldGet(_, class, slot) => self
                 .registry
                 .field_by_slot(*class, *slot)
@@ -93,14 +102,23 @@ impl<'a> Checker<'a> {
             TExprKind::CallIface { iface, islot, .. } => {
                 self.registry.ifaces[iface.0 as usize].methods[*islot].sig.ret_nullable
             }
-            TExprKind::Conditional(_, a, b) => self.expr_nullable(a) || self.expr_nullable(b),
+            // Each branch keeps the facts the condition proves for it
+            // (`x == null ? fallback : x` — the else side has x non-null).
+            TExprKind::Conditional(c, a, b) => {
+                let (when_true, when_false) = Self::narrowing_of(c);
+                let mut pt: Vec<LocalId> = proven.to_vec();
+                pt.extend(when_true);
+                let mut pf: Vec<LocalId> = proven.to_vec();
+                pf.extend(when_false);
+                self.expr_nullable_under(a, &pt) || self.expr_nullable_under(b, &pf)
+            }
             TExprKind::Logical(op, a, b) => {
                 // `a && b`: result is a-falsy or b; `a || b`: a-truthy or b.
                 // Truthy values are non-null, so `||` is null only via b.
                 if matches!(op, ast::BinaryOp::LogOr) {
-                    self.expr_nullable(b)
+                    self.expr_nullable_under(b, proven)
                 } else {
-                    self.expr_nullable(a) || self.expr_nullable(b)
+                    self.expr_nullable_under(a, proven) || self.expr_nullable_under(b, proven)
                 }
             }
             // Natives: only File.read / System.getenv return null.
@@ -111,8 +129,8 @@ impl<'a> Checker<'a> {
                     | crate::builtins::NativeFn::FileList
                     | crate::builtins::NativeFn::SystemReadLine
             ),
-            TExprKind::Coerce(_, v) => self.expr_nullable(v),
-            TExprKind::Comma(_, b) => self.expr_nullable(b),
+            TExprKind::Coerce(_, v) => self.expr_nullable_under(v, proven),
+            TExprKind::Comma(_, b) => self.expr_nullable_under(b, proven),
             // Anything coming out of `*` or unknown sources: assume
             // possibly null.
             _ => true,

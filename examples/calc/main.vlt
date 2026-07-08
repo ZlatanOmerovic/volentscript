@@ -1,0 +1,126 @@
+// calc — an arithmetic REPL, with the parser written in VolentScript.
+// Shows: classes, recursion, exceptions as error handling, stdin loop.
+//
+//   volentscript run main.vlt
+//   > 2 + 3 * (4 - 1)
+//   11
+//   > quit
+//
+// Grammar: expr := term (('+'|'-') term)*
+//          term := unary (('*'|'/'|'%') unary)*
+//          unary := '-' unary | primary
+//          primary := number | '(' expr ')'
+
+class Parser {
+    private var src:String;
+    private var pos:int;
+
+    public function Parser(src:String) {
+        this.src = src;
+        this.pos = 0;
+    }
+
+    private function peek():String {
+        while (pos < src.length && src.charAt(pos) == " ") {
+            pos++;
+        }
+        return pos < src.length ? src.charAt(pos) : "";
+    }
+
+    private function take():String {
+        var c:String = peek();
+        pos++;
+        return c;
+    }
+
+    public function parse():Number {
+        var v:Number = expr();
+        if (peek() != "") {
+            throw new SyntaxError("unexpected `" + peek() + "` at " + pos);
+        }
+        return v;
+    }
+
+    private function expr():Number {
+        var v:Number = term();
+        var c:String = peek();
+        while (c == "+" || c == "-") {
+            take();
+            v = c == "+" ? v + term() : v - term();
+            c = peek();
+        }
+        return v;
+    }
+
+    private function term():Number {
+        var v:Number = unary();
+        var c:String = peek();
+        while (c == "*" || c == "/" || c == "%") {
+            take();
+            var rhs:Number = unary();
+            if (c == "*") {
+                v *= rhs;
+            } else if (c == "/") {
+                if (rhs == 0) {
+                    throw new RangeError("division by zero");
+                }
+                v /= rhs;
+            } else {
+                v %= rhs;
+            }
+            c = peek();
+        }
+        return v;
+    }
+
+    private function unary():Number {
+        if (peek() == "-") {
+            take();
+            return -unary();
+        }
+        return primary();
+    }
+
+    private function primary():Number {
+        if (peek() == "(") {
+            take();
+            var v:Number = expr();
+            if (take() != ")") {
+                throw new SyntaxError("expected `)`");
+            }
+            return v;
+        }
+        var start:int = pos;
+        while (pos < src.length && isDigit(src.charAt(pos))) {
+            pos++;
+        }
+        if (pos < src.length && src.charAt(pos) == ".") {
+            pos++;
+            while (pos < src.length && isDigit(src.charAt(pos))) {
+                pos++;
+            }
+        }
+        if (pos == start) {
+            throw new SyntaxError("expected a number at " + pos);
+        }
+        return parseFloat(src.substring(start, pos));
+    }
+
+    private function isDigit(c:String):Boolean {
+        return c >= "0" && c <= "9";
+    }
+}
+
+trace("calc — expressions with + - * / % ( ); `quit` exits");
+var line:String? = System.readLine();
+while (line != null && line != "quit") {
+    if (line != "") {
+        try {
+            trace(new Parser(line).parse());
+        } catch (e:Error) {
+            trace(e.name + ": " + e.message);
+        }
+    }
+    line = System.readLine();
+}
+trace("bye");

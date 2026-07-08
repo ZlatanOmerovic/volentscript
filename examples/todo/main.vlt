@@ -1,0 +1,89 @@
+// todo — a JSON-backed task manager.
+// Shows: JSON round-tripping, File IO, args subcommands, Date stamps,
+// dynamic objects, Array iteration.
+//
+//   volentscript build main.vlt -o todo
+//   ./todo add "write examples"
+//   ./todo list
+//   ./todo done 1
+//   ./todo rm 1
+//
+// Store: ./todo.json (or $TODO_FILE).
+
+function storePath():String {
+    var env:String? = System.getenv("TODO_FILE");
+    return env == null ? "todo.json" : env;
+}
+
+function load():Array {
+    var text:String? = File.read(storePath());
+    if (text == null) {
+        return [];
+    }
+    var parsed:* = JSON.parse(text);
+    var items:Array? = parsed as Array;
+    return items == null ? [] : items;
+}
+
+function save(items:Array):void {
+    if (!File.write(storePath(), JSON.stringify(items))) {
+        trace("cannot write " + storePath());
+        System.exit(1);
+    }
+}
+
+function show(items:Array):void {
+    if (items.length == 0) {
+        trace("nothing to do.");
+        return;
+    }
+    for (var i:int = 0; i < items.length; i++) {
+        var item:* = items[i];
+        var mark:String = item["done"] ? "x" : " ";
+        trace((i + 1) + ". [" + mark + "] " + item["title"]);
+    }
+}
+
+var args:Array = System.args();
+var command:String = args.length > 0 ? "" + args[0] : "list";
+var items:Array = load();
+
+switch (command) {
+    case "add":
+        if (args.length < 2) {
+            trace("usage: todo add <title>");
+            System.exit(2);
+        }
+        var title:String = "" + args[1];
+        items.push({ title: title, done: false, created: Date.now() });
+        save(items);
+        trace("added: " + title);
+        break;
+    case "done":
+    case "rm":
+        if (args.length < 2) {
+            trace("usage: todo " + command + " <number>");
+            System.exit(2);
+        }
+        var index:int = int(parseInt("" + args[1], 10)) - 1;
+        if (index < 0 || index >= items.length) {
+            trace("no task " + (index + 1));
+            System.exit(1);
+        }
+        if (command == "done") {
+            var t:* = items[index];
+            t["done"] = true;
+            trace("done: " + t["title"]);
+        } else {
+            var removed:Array = items.splice(index, 1);
+            trace("removed: " + removed[0]["title"]);
+        }
+        save(items);
+        break;
+    case "list":
+        show(items);
+        break;
+    default:
+        trace("usage: todo [add <title> | list | done <n> | rm <n>]");
+        System.exit(2);
+}

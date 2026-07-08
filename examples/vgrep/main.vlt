@@ -1,0 +1,65 @@
+// vgrep — grep, the VolentScript way.
+// Shows: RegExp, recursive directory walking, stdin fallback, exit codes.
+//
+//   volentscript build main.vlt -o vgrep
+//   ./vgrep 'fn \w+' src            # search a tree
+//   cat notes.txt | ./vgrep TODO    # filter stdin
+//
+// Exit code: 0 = matched, 1 = no match, 2 = usage error.
+
+function grepText(label:String, text:String, re:RegExp):int {
+    var hits:int = 0;
+    var lines:Array = text.split("\n");
+    for (var i:int = 0; i < lines.length; i++) {
+        var line:String = "" + lines[i];
+        if (re.test(line)) {
+            trace(label + ":" + (i + 1) + ": " + line);
+            hits++;
+        }
+    }
+    return hits;
+}
+
+function grepPath(path:String, re:RegExp):int {
+    if (File.isDirectory(path)) {
+        var hits:int = 0;
+        var entries:Array? = File.list(path);
+        if (entries == null) {
+            return 0;
+        }
+        for (var i:int = 0; i < entries.length; i++) {
+            hits += grepPath(path + "/" + entries[i], re);
+        }
+        return hits;
+    }
+    var text:String? = File.read(path);
+    return text == null ? 0 : grepText(path, text, re);
+}
+
+var args:Array = System.args();
+if (args.length < 1) {
+    trace("usage: vgrep <pattern> [path ...]   (stdin when no path)");
+    System.exit(2);
+}
+
+var re:RegExp = new RegExp("" + args[0], "");
+var matched:int = 0;
+
+if (args.length == 1) {
+    var n:int = 0;
+    var line:String? = System.readLine();
+    while (line != null) {
+        n++;
+        if (re.test(line)) {
+            trace(n + ": " + line);
+            matched++;
+        }
+        line = System.readLine();
+    }
+} else {
+    for (var i:int = 1; i < args.length; i++) {
+        matched += grepPath("" + args[i], re);
+    }
+}
+
+System.exit(matched > 0 ? 0 : 1);

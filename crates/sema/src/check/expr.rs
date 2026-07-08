@@ -330,7 +330,19 @@ impl<'a> Checker<'a> {
             self.warn("`instanceof` is deprecated; use `is`", span);
         }
         let lhs = self.expr(l);
-        let rhs = self.expr(r);
+        // Short-circuit narrowing (SPECS §4.1): the right side of `a && b`
+        // only runs when `a` is true; of `a || b` when `a` is false —
+        // `x == null || x.length` is the idiomatic guard.
+        let rhs = if matches!(op, LogAnd | LogOr) {
+            let (when_true, when_false) = Self::narrowing_of(&lhs);
+            let facts = if op == LogAnd { when_true } else { when_false };
+            self.narrowed.push(facts.into_iter().collect());
+            let rhs = self.expr(r);
+            self.narrowed.pop();
+            rhs
+        } else {
+            self.expr(r)
+        };
         self.binary_typed(op, lhs, rhs, span)
     }
 
@@ -638,6 +650,11 @@ impl<'a> Checker<'a> {
                 if matches!(object.ty, Ty::Array | Ty::Vector(_)) {
                     return self.seq_index_write(object, index, value_checked, span);
                 }
+                let object = if self.is_dynamic_class(object.ty) {
+                    self.coerce_to_any(object)
+                } else {
+                    object
+                };
                 if object.ty != Ty::Any && object.ty != Ty::Error {
                     self.error(
                         ErrorCode::UNKNOWN_PROPERTY,
@@ -1123,6 +1140,13 @@ impl<'a> Checker<'a> {
         if matches!(object.ty, Ty::Array | Ty::Vector(_)) {
             return self.seq_index_read(object, index, span);
         }
+        // `dynamic` class instances accept bracket access (SPECS §3.2:
+        // expando lookup, like AS3 Object).
+        let object = if self.is_dynamic_class(object.ty) {
+            self.coerce_to_any(object)
+        } else {
+            object
+        };
         if object.ty != Ty::Any && object.ty != Ty::Error {
             self.error(
                 ErrorCode::UNKNOWN_PROPERTY,
@@ -1198,6 +1222,11 @@ impl<'a> Checker<'a> {
             span,
             TExprKind::RegExp(pat.to_string(), flags.to_string()),
         )
+    }
+
+    /// Whether `ty` is a `dynamic` class (bracket access allowed).
+    fn is_dynamic_class(&self, ty: Ty) -> bool {
+        matches!(ty, Ty::Class(c) if self.registry.classes[c.0 as usize].is_dynamic)
     }
 
     pub(crate) fn coerce_to_any(&mut self, e: TExpr) -> TExpr {

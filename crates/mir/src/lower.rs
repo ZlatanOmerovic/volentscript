@@ -622,6 +622,16 @@ impl Lowerer<'_> {
             E::LocalGet(id) => ExprKind::LocalGet(LocalId(id.0)),
             E::LocalSet(id, v) => ExprKind::LocalSet(LocalId(id.0), Box::new(self.expr(v))),
             E::CallFn(id, args) => {
+                // A capturing function's machine signature carries a hidden
+                // environment parameter; direct calls don't build one yet.
+                // Same v1 limitation as taking such a function's reference.
+                if !self.program.functions[id.0 as usize].captures.is_empty() {
+                    return self.gated_expr(
+                        span,
+                        ty,
+                        "calling a capturing function by name — assign it to a Function                          value first, or pass state via parameters/returns",
+                    );
+                }
                 let mut lowered: Vec<Expr> = args.iter().map(|a| self.expr(a)).collect();
                 // Fill omitted defaulted arguments at the callsite (AVM2
                 // fills from the method's option list; same effect).

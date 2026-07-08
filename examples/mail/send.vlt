@@ -1,0 +1,41 @@
+// send — SMTP client for smtpd.vlt.
+// Shows: the client side of a wire protocol — send a command, check the
+// reply code, bail on errors.
+//
+//   ./send 2525 alice@volent.local bob@volent.local "hello there"
+
+function expect(s:Socket, code:String):String {
+    var reply:String? = s.readLine();
+    if (reply == null || reply.indexOf(code) != 0) {
+        trace("unexpected reply: " + (reply == null ? "<eof>" : reply));
+        System.exit(1);
+    }
+    return reply;
+}
+
+var args:Array = System.args();
+if (args.length < 4) {
+    trace("usage: send <port> <from> <to> <message>");
+    System.exit(2);
+}
+var port:int = int(parseInt("" + args[0], 10));
+var from:String = "" + args[1];
+var to:String = "" + args[2];
+var message:String = "" + args[3];
+
+var s:Socket = Socket.connect("127.0.0.1", port);
+trace("< " + expect(s, "220"));
+s.write("EHLO client.local\r\n");
+trace("< " + expect(s, "250"));
+s.write("MAIL FROM:<" + from + ">\r\n");
+expect(s, "250");
+s.write("RCPT TO:<" + to + ">\r\n");
+expect(s, "250");
+s.write("DATA\r\n");
+expect(s, "354");
+s.write("Subject: hi\r\n" + message + "\r\n.\r\n");
+trace("< " + expect(s, "250"));
+s.write("QUIT\r\n");
+expect(s, "221");
+s.close();
+trace("sent");
