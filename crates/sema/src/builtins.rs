@@ -141,6 +141,7 @@ pub fn type_name(name: &str) -> Option<Ty> {
         "String" => Ty::String,
         "Function" => Ty::Function,
         "RegExp" => Ty::RegExp,
+        "Date" => Ty::Date,
         _ => return None,
     })
 }
@@ -182,6 +183,7 @@ pub enum NativeFn {
     JsonStringify,
     JsonParse,
     DateNow,
+    DateUTC,
 }
 
 /// One native static method.
@@ -369,11 +371,19 @@ pub fn native_methods(class: &str) -> Option<&'static [NativeMethod]> {
             sig: nsig(&[Ty::String], 1, false, Ty::Any),
         },
     ];
-    static DATE: &[NativeMethod] = &[NativeMethod {
-        name: "now",
-        func: DateNow,
-        sig: nsig(&[], 0, false, N),
-    }];
+    static DATE: &[NativeMethod] = &[
+        NativeMethod {
+            name: "now",
+            func: DateNow,
+            sig: nsig(&[], 0, false, N),
+        },
+        // §15.9.4.3: year+month required, day/h/min/s/ms optional.
+        NativeMethod {
+            name: "UTC",
+            func: DateUTC,
+            sig: nsig(&[N, N, N, N, N, N, N], 2, false, N),
+        },
+    ];
     Some(match class {
         "Math" => MATH,
         "System" => SYSTEM,
@@ -492,6 +502,20 @@ pub fn member(receiver: Ty, name: &str) -> Option<Member> {
         (Ty::RegExp, "multiline") => Property(Ty::Boolean),
         // Read-only in v1 (the runtime advances it on global exec).
         (Ty::RegExp, "lastIndex") => Property(Ty::Int),
+
+        // Date (ES3 §15.9.5, avmplus core/Date.as AS3 surface). Component
+        // setters and locale forms are backlog; setTime is the mutator.
+        (
+            Ty::Date,
+            "getTime" | "valueOf" | "getFullYear" | "getMonth" | "getDate" | "getDay" | "getHours"
+            | "getMinutes" | "getSeconds" | "getMilliseconds" | "getUTCFullYear" | "getUTCMonth"
+            | "getUTCDate" | "getUTCDay" | "getUTCHours" | "getUTCMinutes" | "getUTCSeconds"
+            | "getUTCMilliseconds" | "getTimezoneOffset",
+        ) => Method(sig(&[], 0, Ty::Number)),
+        (Ty::Date, "setTime") => Method(sig(&[Ty::Number], 1, Ty::Number)),
+        (Ty::Date, "toString" | "toDateString" | "toTimeString" | "toUTCString") => {
+            Method(sig(&[], 0, Ty::String))
+        }
         // String.as:182,194
         (Ty::String, "toLowerCase") => Method(sig(&[], 0, Ty::String)),
         (Ty::String, "toUpperCase") => Method(sig(&[], 0, Ty::String)),

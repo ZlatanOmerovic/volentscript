@@ -45,6 +45,8 @@ pub enum Ty {
     Vector(u32),
     /// RegExp pointer (ES3 §15.10; engine-backed runtime object).
     RegExp,
+    /// Date pointer (ES3 §15.9; one time value).
+    Date,
 }
 
 /// Index of a function in [`Program::functions`].
@@ -266,6 +268,21 @@ pub enum RegexOp {
     Replace,
 }
 
+/// Date instance operations, funneled through the runtime's indexed
+/// accessor/formatter like avmplus (core/Date.cpp getDateProperty /
+/// Date::toString).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum DateFn {
+    /// Indexed getter: 0 time, 1-8 local components, 9-16 UTC, 17 tz.
+    Get(u32),
+    /// setTime(ms) → clipped value.
+    SetTime,
+    /// Indexed string form: 0 toString, 1 toDateString, 2 toTimeString,
+    /// 6 toUTCString (avmplus numbering).
+    Format(u32),
+}
+
 /// String instance methods with runtime implementations (SPECS §6, P3 set;
 /// signatures per avmplus core/String.as).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,6 +380,8 @@ pub enum Conv {
     AnyToVector(u32),
     /// Checked coercion to RegExp.
     AnyToRegExp,
+    /// Checked coercion to Date.
+    AnyToDate,
 }
 
 /// Binary operators (operand types already made uniform by sema).
@@ -559,4 +578,8 @@ pub enum ExprKind {
     NewRegExp(Vec<Expr>),
     /// RegExp/String regex operation; operands per [`RegexOp`] docs.
     CallRegex(RegexOp, Vec<Expr>),
+    /// `new Date(...)`: 0-7 Number components (§15.9.3).
+    NewDate(Vec<Expr>),
+    /// Date instance operation; receiver is operand 0.
+    CallDate(DateFn, Vec<Expr>),
 }

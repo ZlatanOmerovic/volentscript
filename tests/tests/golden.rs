@@ -223,3 +223,11 @@ fn gc_churn() {
 fn regex() {
     run_golden("regex");
 }
+
+/// The Phase 11 milestone (SPECS §6): Date instances — constructors,
+/// UTC/local getters, setTime, avmplus string forms. All assertions are
+/// timezone-independent.
+#[test]
+fn date() {
+    run_golden("date");
+}

@@ -27,6 +27,7 @@ fn tag_from(raw: u32) -> Tag {
         9 => Tag::Vector,
         10 => Tag::Function,
         11 => Tag::RegExp,
+        12 => Tag::Date,
         _ => Tag::Undefined,
     }
 }
@@ -2432,5 +2433,115 @@ pub unsafe extern "C" fn vs_any_as_regexp(v: *const VsAny) -> *const VsRegExp {
         v.data as *const VsRegExp
     } else {
         std::ptr::null()
+    }
+}
+
+// --- Date (ES3 §15.9; SPECS §6) -----------------------------------------------
+
+use crate::date::{self, VsDate};
+
+/// Live date or TypeError.
+///
+/// # Safety
+/// `d` null or a live VsDate.
+unsafe fn date_ref<'x>(d: *const VsDate) -> &'x VsDate {
+    if d.is_null() {
+        exc::throw_error(exc::ErrorKind::Type, "null Date");
+    }
+    // SAFETY: caller contract.
+    unsafe { &*d }
+}
+
+/// `new Date(...)`: `argc` numeric components at `parts` (0 = now,
+/// 1 = epoch millis, 2..=7 = local civil components; §15.9.3).
+///
+/// # Safety
+/// `parts` points to `argc` f64s.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_date_new(argc: u32, parts: *const f64) -> *const VsDate {
+    // SAFETY: caller contract.
+    let parts = unsafe { std::slice::from_raw_parts(parts, argc as usize) };
+    date::alloc(match parts.len() {
+        0 => date::now_ms(),
+        1 => parts[0],
+        _ => date::from_components(parts),
+    })
+}
+
+/// `Date.UTC(...)` (§15.9.4.3): components in UTC → epoch millis.
+///
+/// # Safety
+/// `parts` points to `argc` f64s (argc >= 2 checked by sema).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_date_utc(argc: u32, parts: *const f64) -> f64 {
+    // SAFETY: caller contract.
+    let parts = unsafe { std::slice::from_raw_parts(parts, argc as usize) };
+    date::utc_from_parts(parts)
+}
+
+/// Indexed getter (date.rs `get` docs for the index map).
+///
+/// # Safety
+/// `d` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_date_get(d: *const VsDate, index: u32) -> f64 {
+    // SAFETY: caller contract.
+    date::get(unsafe { date_ref(d) }, index)
+}
+
+/// `setTime(ms)` → the clipped stored value.
+///
+/// # Safety
+/// `d` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_date_set_time(d: *const VsDate, value: f64) -> f64 {
+    // SAFETY: caller contract.
+    date::set_time(unsafe { date_ref(d) }, value)
+}
+
+/// Indexed string form (avmplus numbering: 0 toString, 1 toDateString,
+/// 2 toTimeString, 6 toUTCString).
+///
+/// # Safety
+/// `d` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_date_to_string(d: *const VsDate, index: u32) -> *const VsString {
+    if d.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: caller contract.
+    date::to_string(unsafe { &*d }, index)
+}
+
+/// `v as Date` (null on mismatch).
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_as_date(v: *const VsAny) -> *const VsDate {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    if v.tag() == Tag::Date {
+        v.data as *const VsDate
+    } else {
+        std::ptr::null()
+    }
+}
+
+/// Checked coerce of a boxed value to Date (TypeError on mismatch).
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_to_date(v: *const VsAny) -> *const VsDate {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    match v.tag() {
+        Tag::Null | Tag::Undefined => std::ptr::null(),
+        Tag::Date => v.data as *const VsDate,
+        _ => exc::throw_error(
+            exc::ErrorKind::Type,
+            &format!("cannot convert {} to Date", conv::any_to_display(v)),
+        ),
     }
 }

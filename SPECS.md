@@ -238,7 +238,8 @@ Phase tags: **P3** = needed for first runnable binary, **P4** = classes/OOP,
 - **`Vector.<T>`** (P5): typed, dense, same method surface as `Array` where
   meaningful.
 - **`Math`** (P7): full static surface.
-- **`Date`** (P7: `Date.now()`; instances are backlog), **`RegExp`** (P10:
+- **`Date`** (P11: instances with UTC/local getters, setTime, Date.UTC;
+  Date.parse/string ctor + component setters are backlog), **`RegExp`** (P10:
   `fancy-regex`-backed; lastIndex is read-only and `split(RegExp)` is
   backlog), **`JSON`** (P7).
 - **`Error`** hierarchy (P6): `Error`, `TypeError`, `RangeError`,

@@ -218,6 +218,7 @@ impl Lowerer<'_> {
             sema::Ty::Vector(inst) => Ty::Vector(inst),
             sema::Ty::Function => Ty::Function,
             sema::Ty::RegExp => Ty::RegExp,
+            sema::Ty::Date => Ty::Date,
             sema::Ty::Error => {
                 // Sema fails the build before lowering on real errors.
                 unreachable!("error type survived sema")
@@ -563,6 +564,7 @@ impl Lowerer<'_> {
             E::Str(v) => ExprKind::Str(v.clone()),
             E::RegExp(pat, flags) => ExprKind::RegExpLit(pat.clone(), flags.clone()),
             E::NewRegExp(args) => ExprKind::NewRegExp(args.iter().map(|a| self.expr(a)).collect()),
+            E::NewDate(args) => ExprKind::NewDate(args.iter().map(|a| self.expr(a)).collect()),
             E::Bool(v) => ExprKind::Bool(*v),
             E::Null => ExprKind::Null,
             E::Undefined => ExprKind::Undefined,
@@ -710,6 +712,7 @@ impl Lowerer<'_> {
                         sema::Ty::Array => Conv::AnyToArray,
                         sema::Ty::Vector(i) => Conv::AnyToVector(i),
                         sema::Ty::RegExp => Conv::AnyToRegExp,
+                        sema::Ty::Date => Conv::AnyToDate,
                         _ => {
                             return self.gated_expr(
                                 span,
@@ -1350,6 +1353,43 @@ impl Lowerer<'_> {
                     kind: ExprKind::CallRegex(op, operands),
                 }
             }
+            sema::Ty::Date => {
+                // Index maps per runtime date.rs (avmplus getDateProperty
+                // ordering).
+                let f = match name {
+                    "getTime" | "valueOf" => DateFn::Get(0),
+                    "getFullYear" => DateFn::Get(1),
+                    "getMonth" => DateFn::Get(2),
+                    "getDate" => DateFn::Get(3),
+                    "getDay" => DateFn::Get(4),
+                    "getHours" => DateFn::Get(5),
+                    "getMinutes" => DateFn::Get(6),
+                    "getSeconds" => DateFn::Get(7),
+                    "getMilliseconds" => DateFn::Get(8),
+                    "getUTCFullYear" => DateFn::Get(9),
+                    "getUTCMonth" => DateFn::Get(10),
+                    "getUTCDate" => DateFn::Get(11),
+                    "getUTCDay" => DateFn::Get(12),
+                    "getUTCHours" => DateFn::Get(13),
+                    "getUTCMinutes" => DateFn::Get(14),
+                    "getUTCSeconds" => DateFn::Get(15),
+                    "getUTCMilliseconds" => DateFn::Get(16),
+                    "getTimezoneOffset" => DateFn::Get(17),
+                    "setTime" => DateFn::SetTime,
+                    "toString" => DateFn::Format(0),
+                    "toDateString" => DateFn::Format(1),
+                    "toTimeString" => DateFn::Format(2),
+                    "toUTCString" => DateFn::Format(6),
+                    other => unreachable!("sema admitted Date.{other}()"),
+                };
+                let mut operands = vec![self.expr(receiver)];
+                operands.append(&mut lowered);
+                Expr {
+                    ty,
+                    span,
+                    kind: ExprKind::CallDate(f, operands),
+                }
+            }
             sema::Ty::Int | sema::Ty::UInt | sema::Ty::Number | sema::Ty::Boolean => {
                 if name == "valueOf" {
                     return self.expr(receiver);
@@ -1435,6 +1475,7 @@ fn coerce_any_to(e: Expr, ty: Ty, span: Span) -> Expr {
         Ty::Array => Conv::AnyToArray,
         Ty::Vector(i) => Conv::AnyToVector(i),
         Ty::RegExp => Conv::AnyToRegExp,
+        Ty::Date => Conv::AnyToDate,
         Ty::Function | Ty::Void => return e,
     };
     Expr {

@@ -39,6 +39,8 @@ pub enum Ty {
     Null,
     /// ES3 §15.10 RegExp: reference type, engine-backed (SPECS §6).
     RegExp,
+    /// ES3 §15.9 Date: reference type wrapping one time value (SPECS §6).
+    Date,
     /// The AS3 `Function` type: callable, signature unchecked
     /// (AS3's `Function` class carries no signature).
     Function,
@@ -67,6 +69,7 @@ impl Ty {
                 | Ty::Array
                 | Ty::Vector(_)
                 | Ty::RegExp
+                | Ty::Date
         )
     }
 }
@@ -89,6 +92,7 @@ impl fmt::Display for Ty {
             Ty::Null => "null",
             Ty::Function => "Function",
             Ty::RegExp => "RegExp",
+            Ty::Date => "Date",
             Ty::Error => "<error>",
         })
     }

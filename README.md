@@ -98,5 +98,12 @@ catchable SyntaxError on bad patterns, and GC-integrated regex objects.
 Indices are UTF-16 units per the spec. `VS_DUMP_IR=1` dumps the LLVM
 module (debugging aid).
 
-Remaining (backlog): Date instances, runtime namespaces, optimization
-passes, Linux cross-compile hardening. Phase plan: SPECS §11.
+P11 added Date instances (ES3 §15.9): `new Date()` / `(millis)` /
+`(y, m, d, h, min, s, ms)`, all local + UTC getters, `getTimezoneOffset`,
+`setTime`, `Date.UTC`, and the avmplus AS3 string forms
+(`toString`/`toDateString`/`toTimeString`/`toUTCString`). Local time via
+chrono/the platform tz database (macOS links CoreFoundation). Backlog:
+`Date.parse`/string constructor, component setters, locale forms.
+
+Remaining (backlog): runtime namespaces, optimization passes, Linux
+cross-compile hardening. Phase plan: SPECS §11.

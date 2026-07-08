@@ -18,6 +18,7 @@
 mod any;
 mod closure;
 mod conv;
+mod date;
 mod exc;
 pub(crate) mod ffi;
 mod gc;

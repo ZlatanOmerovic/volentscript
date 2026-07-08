@@ -64,7 +64,7 @@ impl<'a> Checker<'a> {
                 (recv.ty == Ty::RegExp && name == "exec")
                     || (recv.ty == Ty::String && name == "match")
             }
-            TExprKind::RegExp(..) | TExprKind::NewRegExp(_) => false,
+            TExprKind::RegExp(..) | TExprKind::NewRegExp(_) | TExprKind::NewDate(_) => false,
             TExprKind::LocalGet(id) => {
                 let fn_index = *self.fn_stack.last().expect("fn");
                 let local = &self.functions[fn_index].locals[id.0 as usize];

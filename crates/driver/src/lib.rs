@@ -175,11 +175,18 @@ pub fn build(opts: &BuildOptions) -> Result<PathBuf, Errors> {
         .map_err(|e| Errors::message(format!("cannot write `{}`: {e}", obj_path.display())))?;
 
     let runtime_lib = find_runtime_lib(opts)?;
-    let link = Command::new("cc")
+    let mut link_cmd = Command::new("cc");
+    link_cmd
         .arg(&obj_path)
         .arg(&runtime_lib)
         .arg("-o")
-        .arg(&output)
+        .arg(&output);
+    // The runtime's timezone lookup (chrono → iana-time-zone) uses
+    // CoreFoundation on macOS.
+    if cfg!(target_os = "macos") {
+        link_cmd.args(["-framework", "CoreFoundation"]);
+    }
+    let link = link_cmd
         .output()
         .map_err(|e| Errors::message(format!("cannot run linker `cc`: {e}")))?;
     let _ = std::fs::remove_file(&obj_path);

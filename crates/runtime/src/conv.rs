@@ -72,7 +72,7 @@ pub fn any_truthy(v: VsAny) -> bool {
             let f = f64::from_bits(v.data);
             f != 0.0 && !f.is_nan()
         }
-        Tag::RegExp => v.data != 0,
+        Tag::RegExp | Tag::Date => v.data != 0,
         Tag::String => {
             // SAFETY: String-tagged payloads always hold a live VsString.
             unsafe { crate::string::deref(v.as_string_ptr()) }.is_some_and(|s| s.len > 0)
@@ -141,6 +141,16 @@ pub fn any_to_display(v: VsAny) -> String {
             // SAFETY: RegExp-tagged payloads hold live VsRegExps.
             crate::regexp::to_display(unsafe { &*(v.data as *const crate::regexp::VsRegExp) })
         }
+        Tag::Date => {
+            // SAFETY: Date-tagged payloads hold live VsDates; to_string
+            // returns a live runtime string.
+            unsafe {
+                let s = crate::date::to_string(&*(v.data as *const crate::date::VsDate), 0);
+                crate::string::deref(s)
+                    .map(|s| s.to_rust())
+                    .unwrap_or_default()
+            }
+        }
     }
 }
 
@@ -153,7 +163,7 @@ pub fn any_typeof(v: VsAny) -> &'static str {
         Tag::Boolean => "boolean",
         Tag::Int | Tag::UInt | Tag::Number => "number",
         Tag::String => "string",
-        Tag::Object | Tag::Array | Tag::Vector | Tag::RegExp => "object",
+        Tag::Object | Tag::Array | Tag::Vector | Tag::RegExp | Tag::Date => "object",
         Tag::Function => "function",
     }
 }
@@ -174,6 +184,7 @@ pub fn any_is(v: VsAny, target: Tag) -> bool {
         Tag::String => v.tag() == Tag::String,
         Tag::Function => v.tag() == Tag::Function,
         Tag::RegExp => v.tag() == Tag::RegExp,
+        Tag::Date => v.tag() == Tag::Date,
         Tag::Null | Tag::Undefined | Tag::Object | Tag::Array | Tag::Vector => false,
     }
 }

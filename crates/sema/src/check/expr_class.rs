@@ -611,6 +611,41 @@ impl<'a> Checker<'a> {
                 };
             }
         }
+        // `new Date(...)` (§15.9.3): 0-7 Number components. String
+        // parsing (`new Date("...")`) is backlog.
+        if let ExprKind::Ident(name) = &callee.kind {
+            if name == "Date" && !self.is_shadowed(name) {
+                if args.len() > 7 {
+                    self.error(
+                        ErrorCode::WRONG_ARG_COUNT,
+                        "Date takes at most 7 arguments (year, month, date, hours, minutes, seconds, ms)",
+                        span,
+                    );
+                }
+                let checked: Vec<TExpr> = args
+                    .iter()
+                    .take(7)
+                    .map(|a| {
+                        let e = self.expr(a);
+                        let sp = e.span;
+                        if e.ty == Ty::String {
+                            self.error(
+                                ErrorCode::NOT_IMPLEMENTED,
+                                "Date string parsing — use new Date(millis) or components (backlog)",
+                                sp,
+                            );
+                            return self.error_expr(sp);
+                        }
+                        self.coerce(e, Ty::Number, sp)
+                    })
+                    .collect();
+                return TExpr {
+                    ty: Ty::Date,
+                    span,
+                    kind: TExprKind::NewDate(checked),
+                };
+            }
+        }
         // `new Array(...)` — literal-equivalent.
         if let ExprKind::Ident(name) = &callee.kind {
             if name == "Array" && !self.is_shadowed(name) {

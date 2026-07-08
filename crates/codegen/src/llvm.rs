@@ -37,6 +37,7 @@ mod tag {
     pub const VECTOR: u32 = 9;
     pub const FUNCTION: u32 = 10;
     pub const REGEXP: u32 = 11;
+    pub const DATE: u32 = 12;
 }
 
 /// LLVM implementor of [`Backend`].
@@ -181,6 +182,8 @@ enum Val<'ctx> {
     Fun(PointerValue<'ctx>),
     /// RegExp pointer (possibly null).
     Reg(PointerValue<'ctx>),
+    /// Date pointer (possibly null).
+    Dat(PointerValue<'ctx>),
     /// Pointer to an entry-block alloca holding a `{i32, i64}` box.
     Any(PointerValue<'ctx>),
     Void,
@@ -202,7 +205,8 @@ impl<'ctx> Cx<'ctx> {
             | Ty::Array
             | Ty::Vector(_)
             | Ty::Function
-            | Ty::RegExp => self.ptr().into(),
+            | Ty::RegExp
+            | Ty::Date => self.ptr().into(),
             Ty::Any => self.any_ty.into(),
             Ty::Void => unreachable!("void has no storage"),
         }
@@ -365,7 +369,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     | Ty::Array
                     | Ty::Vector(_)
                     | Ty::Function
-                    | Ty::RegExp => cx.ptr().const_null().into(),
+                    | Ty::RegExp
+                    | Ty::Date => cx.ptr().const_null().into(),
                     Ty::Any => cx.any_ty.const_zero().into(), // tag 0 = undefined
                     Ty::Void => unreachable!(),
                 };
@@ -423,7 +428,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             | Ty::Array
             | Ty::Vector(_)
             | Ty::Function
-            | Ty::RegExp => b
+            | Ty::RegExp
+            | Ty::Date => b
                 .build_return(Some(&self.cx.ptr().const_null()))
                 .expect("ret"),
             Ty::Any => b
@@ -907,7 +913,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     | Ty::Array
                     | Ty::Vector(_)
                     | Ty::Function
-                    | Ty::RegExp => 1,
+                    | Ty::RegExp
+                    | Ty::Date => 1,
                     Ty::Int | Ty::UInt | Ty::Number | Ty::Boolean | Ty::Void => continue,
                 };
                 let g = cx.classes[ci].statics[si];
@@ -1003,6 +1010,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             Ty::Vector(_) => Val::VecP(cx.ptr().const_null()),
             Ty::Function => Val::Fun(cx.ptr().const_null()),
             Ty::RegExp => Val::Reg(cx.ptr().const_null()),
+            Ty::Date => Val::Dat(cx.ptr().const_null()),
             Ty::Any => {
                 let slot = self.entry_alloca(cx.any_ty, "undef");
                 self.cx
@@ -1199,6 +1207,31 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 )
             }
             ExprKind::CallRegex(op, operands) => self.call_regex(*op, operands),
+            ExprKind::NewDate(args) => {
+                let arr = self.stage_f64_args(args, "dateparts");
+                let i32t = cx.context.i32_type();
+                let f = cx.runtime_fn(
+                    "vs_date_new",
+                    Some(cx.ptr().into()),
+                    &[i32t.into(), cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(
+                        f,
+                        &[i32t.const_int(args.len() as u64, false).into(), arr.into()],
+                        "date",
+                    )
+                    .expect("call");
+                Val::Dat(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            ExprKind::CallDate(f, operands) => self.call_date(*f, operands),
             ExprKind::Str(s) => {
                 let global = self
                     .cx
@@ -1452,6 +1485,22 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                         .build_call(f, &[p.into(), rtti.into()], "as_c")
                         .expect("call");
                     return Val::Obj(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("value")
+                            .into_pointer_value(),
+                    );
+                }
+                if *target == Ty::Date {
+                    let p = self.as_any_ptr(v);
+                    let f =
+                        cx.runtime_fn("vs_any_as_date", Some(cx.ptr().into()), &[cx.ptr().into()]);
+                    let call = self
+                        .cx
+                        .builder
+                        .build_call(f, &[p.into()], "as_d")
+                        .expect("call");
+                    return Val::Dat(
                         call.try_as_basic_value()
                             .basic()
                             .expect("value")
@@ -2198,12 +2247,14 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 | Ty::Array
                 | Ty::Vector(_)
                 | Ty::Function
-                | Ty::RegExp,
+                | Ty::RegExp
+                | Ty::Date,
                 Val::Str(p),
             ) => p.into(),
-            (Ty::String, Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) | Val::Reg(p)) => {
-                p.into()
-            }
+            (
+                Ty::String,
+                Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) | Val::Reg(p) | Val::Dat(p),
+            ) => p.into(),
             _ => self.materialize(v),
         }
     }
@@ -2509,13 +2560,15 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 | Ty::Vector(_)
                 | Ty::Function
                 | Ty::RegExp
+                | Ty::Date
         ) {
             if let Val::Str(p)
             | Val::Obj(p)
             | Val::Arr(p)
             | Val::VecP(p)
             | Val::Fun(p)
-            | Val::Reg(p) = v
+            | Val::Reg(p)
+            | Val::Dat(p) = v
             {
                 self.cx.builder.build_store(slot, p).expect("store");
                 return;
@@ -2541,9 +2594,13 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
         match v {
             Val::Int(v) | Val::UInt(v) | Val::Bool(v) => v.into(),
             Val::Num(v) => v.into(),
-            Val::Str(p) | Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) | Val::Reg(p) => {
-                p.into()
-            }
+            Val::Str(p)
+            | Val::Obj(p)
+            | Val::Arr(p)
+            | Val::VecP(p)
+            | Val::Fun(p)
+            | Val::Reg(p)
+            | Val::Dat(p) => p.into(),
             Val::Any(p) => self
                 .cx
                 .builder
@@ -2565,6 +2622,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             Ty::Vector(_) => Val::VecP(v.into_pointer_value()),
             Ty::Function => Val::Fun(v.into_pointer_value()),
             Ty::RegExp => Val::Reg(v.into_pointer_value()),
+            Ty::Date => Val::Dat(v.into_pointer_value()),
             Ty::Any => {
                 let slot = self.entry_alloca(self.cx.any_ty, "anyv");
                 self.cx.builder.build_store(slot, v).expect("store");
@@ -2766,6 +2824,23 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                         .into_pointer_value(),
                 )
             }
+            Conv::AnyToDate => {
+                let Val::Any(p) = v else {
+                    unreachable!("AnyToDate operand")
+                };
+                let f = cx.runtime_fn("vs_any_to_date", Some(cx.ptr().into()), &[cx.ptr().into()]);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "coerce_d")
+                    .expect("call");
+                Val::Dat(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
             Conv::AnyToIface(iface) => {
                 let Val::Any(p) = v else {
                     unreachable!("AnyToIface operand")
@@ -2874,6 +2949,18 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     &[cx.ptr().into()],
                 );
                 self.cx.builder.build_call(rf, &[p.into()], "re2s")
+            }
+            Val::Dat(p) => {
+                let rf = cx.runtime_fn(
+                    "vs_date_to_string",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.context.i32_type().into()],
+                );
+                self.cx.builder.build_call(
+                    rf,
+                    &[p.into(), cx.context.i32_type().const_zero().into()],
+                    "d2s",
+                )
             }
             Val::Fun(_) => {
                 let lit = self
@@ -3015,12 +3102,13 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .expect("cast");
                 (t, bits)
             }
-            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) | Val::Reg(p) => {
+            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) | Val::Reg(p) | Val::Dat(p) => {
                 let full_tag = match v {
                     Val::Obj(_) => tag::OBJECT,
                     Val::Arr(_) => tag::ARRAY,
                     Val::Fun(_) => tag::FUNCTION,
                     Val::Reg(_) => tag::REGEXP,
+                    Val::Dat(_) => tag::DATE,
                     _ => tag::VECTOR,
                 };
                 // null pointers box as the null value.
@@ -3089,11 +3177,12 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     "tob",
                 )
                 .expect("cmp"),
-            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) | Val::Reg(p) => self
-                .cx
-                .builder
-                .build_is_not_null(p, "objtrue")
-                .expect("isnull"),
+            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) | Val::Reg(p) | Val::Dat(p) => {
+                self.cx
+                    .builder
+                    .build_is_not_null(p, "objtrue")
+                    .expect("isnull")
+            }
             Val::Str(_) | Val::Any(_) => {
                 let p = match v {
                     Val::Any(p) => p,
@@ -4124,6 +4213,20 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                         .into_pointer_value(),
                 )
             }
+            Ty::Date => {
+                let f = cx.runtime_fn("vs_any_to_date", Some(cx.ptr().into()), &[cx.ptr().into()]);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "dv")
+                    .expect("call");
+                Val::Dat(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
             Ty::RegExp => {
                 let f = cx.runtime_fn(
                     "vs_any_to_regexp",
@@ -4343,6 +4446,111 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                         .basic()
                         .expect("value")
                         .into_int_value(),
+                )
+            }
+        }
+    }
+
+    /// Stages Number args into an f64 stack array; returns its address.
+    fn stage_f64_args(&mut self, args: &[mir::Expr], name: &str) -> PointerValue<'ctx> {
+        let cx = self.cx;
+        let f64t = cx.context.f64_type();
+        let i32t = cx.context.i32_type();
+        let arr_ty = f64t.array_type((args.len() as u32).max(1));
+        let arr = self.entry_alloca(arr_ty, name);
+        for (i, a) in args.iter().enumerate() {
+            let v = match self.expr(a) {
+                Val::Num(x) => x,
+                _ => unreachable!("Number argument"),
+            };
+            let slot = unsafe {
+                self.cx.builder.build_in_bounds_gep(
+                    arr_ty,
+                    arr,
+                    &[i32t.const_zero(), i32t.const_int(i as u64, false)],
+                    "part",
+                )
+            }
+            .expect("gep");
+            self.cx.builder.build_store(slot, v).expect("store");
+        }
+        arr
+    }
+
+    /// Date instance ops (mir::DateFn; runtime date.rs).
+    fn call_date(&mut self, f: mir::DateFn, operands: &[mir::Expr]) -> Val<'ctx> {
+        let cx = self.cx;
+        let i32t = cx.context.i32_type();
+        let f64t = cx.context.f64_type();
+        let recv = match self.expr(&operands[0]) {
+            Val::Dat(p) => p,
+            _ => unreachable!("Date receiver"),
+        };
+        match f {
+            mir::DateFn::Get(index) => {
+                let rf = cx.runtime_fn(
+                    "vs_date_get",
+                    Some(f64t.into()),
+                    &[cx.ptr().into(), i32t.into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(
+                        rf,
+                        &[recv.into(), i32t.const_int(u64::from(index), false).into()],
+                        "dget",
+                    )
+                    .expect("call");
+                Val::Num(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_float_value(),
+                )
+            }
+            mir::DateFn::SetTime => {
+                let v = match self.expr(&operands[1]) {
+                    Val::Num(x) => x,
+                    _ => unreachable!("setTime arg"),
+                };
+                let rf = cx.runtime_fn(
+                    "vs_date_set_time",
+                    Some(f64t.into()),
+                    &[cx.ptr().into(), f64t.into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(rf, &[recv.into(), v.into()], "dset")
+                    .expect("call");
+                Val::Num(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_float_value(),
+                )
+            }
+            mir::DateFn::Format(index) => {
+                let rf = cx.runtime_fn(
+                    "vs_date_to_string",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), i32t.into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(
+                        rf,
+                        &[recv.into(), i32t.const_int(u64::from(index), false).into()],
+                        "dstr",
+                    )
+                    .expect("call");
+                Val::Str(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
                 )
             }
         }
@@ -5329,6 +5537,31 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 self.cx.builder.position_at_end(dead);
                 Val::Void
             }
+            N::DateUTC => {
+                let arr = self.stage_f64_args(args, "utcparts");
+                let i32t = cx.context.i32_type();
+                let f64t = cx.context.f64_type();
+                let f = cx.runtime_fn(
+                    "vs_date_utc",
+                    Some(f64t.into()),
+                    &[i32t.into(), cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(
+                        f,
+                        &[i32t.const_int(args.len() as u64, false).into(), arr.into()],
+                        "utc",
+                    )
+                    .expect("call");
+                Val::Num(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_float_value(),
+                )
+            }
             N::SystemGc => {
                 let f = cx.runtime_fn("vs_gc_collect", None, &[]);
                 self.cx.builder.build_call(f, &[], "").expect("call");
@@ -5786,6 +6019,7 @@ fn ty_tag(ty: Ty) -> u32 {
         Ty::Boolean => tag::BOOLEAN,
         Ty::String => tag::STRING,
         Ty::RegExp => tag::REGEXP,
+        Ty::Date => tag::DATE,
         // Class/interface/sequence targets dispatch through dedicated
         // runtime calls, never through core tags.
         Ty::Any

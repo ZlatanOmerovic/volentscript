@@ -214,6 +214,14 @@ impl Dumper {
             TExprKind::Number(v) => self.line(format!("{header}Number {v}")),
             TExprKind::Str(v) => self.line(format!("{header}Str {v:?}")),
             TExprKind::RegExp(pat, flags) => self.line(format!("{header}RegExp /{pat}/{flags}")),
+            TExprKind::NewDate(args) => {
+                self.line(format!("{header}NewDate"));
+                self.indented(|d| {
+                    for a in args {
+                        d.expr(a);
+                    }
+                });
+            }
             TExprKind::NewRegExp(args) => {
                 self.line(format!("{header}NewRegExp"));
                 self.indented(|d| {

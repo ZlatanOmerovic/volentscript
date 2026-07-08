@@ -274,6 +274,9 @@ pub enum TExprKind {
     RegExp(String, String),
     /// `new RegExp(pattern, flags)` (§15.10.4).
     NewRegExp(Vec<TExpr>),
+    /// `new Date(...)` (§15.9.3): 0 args = now, 1 = millis, 2-7 = local
+    /// civil components (all Numbers).
+    NewDate(Vec<TExpr>),
     /// `this` inside an instance member.
     This,
     /// `new C(args)` — allocate, init fields, run constructor.
