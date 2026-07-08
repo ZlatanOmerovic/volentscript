@@ -346,9 +346,29 @@ binary. Responsibilities:
     conservative-scan predecessor query. Strictly **non-moving** (a
     conservatively-scanned maybe-pointer can't be rewritten). Measured: clean
     A/B `binarytrees` 1530→415 ms (3.68×), `strings` 142→80 ms (1.77×),
-    alloc-light benches flat. Part B (non-moving generational nursery +
-    write barrier + remembered set) deferred until Part A is measured in the
-    field.
+    alloc-light benches flat.
+  - **P27 Part B (non-moving generational nursery) — implemented, measured a
+    regression, NOT shipped.** A sticky-mark-bit generational collector
+    (gen bit + in-place promotion + minor/major split + write barrier) is
+    correct (proven by `tests/programs/gcgen.vlt`) but a net loss: a
+    non-moving nursery still marks survivors and walks young arenas, so it
+    pays the barrier/promotion/two-phase costs without the copying-nursery
+    benefit that makes generational fast in a JIT (binarytrees builds trees
+    wholly live during construction → minors promote everything, free
+    nothing). Clean A/B: Part A beats it (binarytrees 1.20×, strings 1.11×).
+    Preserved on branch `p27b-generational`; revisit only with precise stack
+    maps + a copying nursery.
+  - **P28 (parallel marking):** the stop-the-world mark phase is drained by
+    up to N worker threads (default `min(cores-1, 4)`, `VS_GC_THREADS`
+    override) over a shared worklist with atomic mark bits and idle-count
+    termination detection; scoped-per-collection (`std::thread::scope`), no
+    new deps. Safe because the mutator is paused (heap static) and only the
+    unique mark-winner traces a block (so `!Sync` side storage is never
+    shared). Sweep stays single-threaded. Measured: clean isolated A/B
+    `binarytrees` 390→356 ms (1.09×); other rows flat (small live sets stay
+    below the parallel threshold, or are alloc-light). Marking is
+    memory-bandwidth bound and the single-mutex worklist caps scaling (8
+    threads slower than 4) — a work-stealing deque is the future lever.
 - **Runtime type support:** `is`, `as`, `instanceof`, `typeof`, class-of.
 - **Coercion helpers:** the numeric/string coercion rules from §3.3.
 - **Builtins:** implementations backing the §6 stdlib, bound to `.vlt`

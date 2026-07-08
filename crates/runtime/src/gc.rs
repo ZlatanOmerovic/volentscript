@@ -38,6 +38,8 @@
 use std::alloc::Layout;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
 
 use crate::any::{Tag, VsAny};
 
@@ -121,14 +123,6 @@ enum Region {
     Arena(usize),
     /// A single large block; its size lives in the inline header.
     Large,
-}
-
-/// Reads the inline header of a block given its payload address.
-///
-/// SAFETY: `payload` must be the payload of a live block allocated here, so
-/// `payload - HEADER` points at its `Hdr`.
-unsafe fn hdr<'a>(payload: usize) -> &'a mut Hdr {
-    unsafe { &mut *((payload - HEADER) as *mut Hdr) }
 }
 
 struct Heap {
@@ -296,33 +290,6 @@ impl Heap {
         base + HEADER
     }
 
-    /// Payload start of the block containing `addr` (interior pointers
-    /// allowed), if it is live and not already marked.
-    fn find_block(&self, addr: usize) -> Option<usize> {
-        if addr < self.lo || addr >= self.hi {
-            return None;
-        }
-        let (&base, region) = self.regions.range(..=addr).next_back()?;
-        match region {
-            Region::Arena(idx) => {
-                let a = &self.arenas[*idx];
-                if addr >= base + a.used {
-                    return None;
-                }
-                let hs = base + ((addr - base) / a.stride) * a.stride;
-                // SAFETY: `hs` is a block start within the bumped region.
-                let h = unsafe { &*(hs as *const Hdr) };
-                (h.live != 0 && h.marked == 0).then_some(hs + HEADER)
-            }
-            Region::Large => {
-                // SAFETY: `base` is a live large block start.
-                let h = unsafe { &*(base as *const Hdr) };
-                let end = base + HEADER + h.size as usize;
-                (addr < end && h.live != 0 && h.marked == 0).then_some(base + HEADER)
-            }
-        }
-    }
-
     /// Recomputes the pre-filter bounds after a sweep (large frees can
     /// shrink them; arenas persist).
     fn recompute_bounds(&mut self) {
@@ -450,75 +417,43 @@ pub fn collect() {
 
     HEAP.with(|h| {
         let mut h = h.borrow_mut();
-        let mut work: Vec<usize> = Vec::new();
 
-        // Roots: machine stack (this frame's locals sit below every live
-        // compiled frame), spilled registers, globals, in-flight exception.
-        let sp = regs.as_ptr() as usize;
-        let base = h.stack_base;
-        if base > sp {
-            scan_words(&h, sp, (base - sp) / 8, &mut work);
-        }
-        scan_words(&h, regs.as_ptr() as usize, 256 / 8, &mut work);
-        let roots = h.roots.clone();
-        for (addr, words) in roots {
-            scan_words(&h, addr, words, &mut work);
-        }
-        mark_any(&h, &crate::exc::current_peek(), &mut work);
-
-        // Mark: trace until the worklist drains. `payload` is a block's
-        // payload address; its header sits `HEADER` bytes before it.
-        while let Some(payload) = work.pop() {
-            // SAFETY: worklist entries are payloads returned by find_block.
-            let (kind, size) = unsafe {
-                let b = hdr(payload);
-                if b.marked != 0 {
-                    continue;
-                }
-                b.marked = 1;
-                (Kind::from_u8(b.kind), b.size as usize)
+        // ---- Mark ----
+        // The mutator thread scans the roots it owns (its stack, the spilled
+        // registers, the registered globals, the in-flight exception) into
+        // the initial worklist, then the graph is traced — in parallel across
+        // GC worker threads when the live set is large enough to pay for them.
+        // The heap is static during a stop-the-world collection, so the only
+        // shared mutation is the `marked` bit, which every worker touches
+        // atomically. Sweep below runs single-threaded after the join.
+        let nthreads = if h.live >= PARALLEL_MIN {
+            gc_threads()
+        } else {
+            1
+        };
+        {
+            let ctx = MarkCtx {
+                lo: h.lo,
+                hi: h.hi,
+                regions: &h.regions,
+                arenas: &h.arenas,
             };
-            match kind {
-                Kind::Raw => scan_words(&h, payload, size / 8, &mut work),
-                Kind::String => {}
-                Kind::Array => {
-                    // SAFETY: block layout fixed by seq::new_array.
-                    let a = unsafe { &*(payload as *const crate::seq::VsArray) };
-                    for v in a.data.borrow().iter() {
-                        mark_any(&h, v, &mut work);
-                    }
-                }
-                Kind::Vector => {
-                    // SAFETY: block layout fixed by seq::new_vector.
-                    let v = unsafe { &*(payload as *const crate::seq::VsVector) };
-                    // Numeric (unboxed) vectors are GC leaves — no references
-                    // to trace. Only boxed vectors carry `VsAny` elements.
-                    if v.kind == crate::seq::VEC_BOXED {
-                        // SAFETY: `data` holds `len` initialized `VsAny`s.
-                        let elems = unsafe {
-                            std::slice::from_raw_parts(v.data as *const VsAny, v.len as usize)
-                        };
-                        for e in elems {
-                            mark_any(&h, e, &mut work);
-                        }
-                    }
-                }
-                Kind::PropMap => {
-                    // SAFETY: block layout fixed by object::expando.
-                    let m = unsafe { &*(payload as *const crate::object::PropMap) };
-                    for (_, v) in m.iter() {
-                        mark_any(&h, v, &mut work);
-                    }
-                }
-                Kind::RegExp => {
-                    // SAFETY: block layout fixed by regexp::new.
-                    let r = unsafe { &*(payload as *const crate::regexp::VsRegExp) };
-                    if let Some(start) = h.find_block(r.source as usize) {
-                        work.push(start);
-                    }
-                }
-                // Sockets hold no GC references.
-                Kind::Socket => {}
+            let mut work: Vec<usize> = Vec::new();
+            let sp = regs.as_ptr() as usize;
+            let base = h.stack_base;
+            if base > sp {
+                scan_range(&ctx, sp, (base - sp) / 8, &mut work);
+            }
+            scan_range(&ctx, regs.as_ptr() as usize, 256 / 8, &mut work);
+            for &(addr, words) in &h.roots {
+                scan_range(&ctx, addr, words, &mut work);
+            }
+            mark_any(&ctx, &crate::exc::current_peek(), &mut work);
+
+            if nthreads >= 2 {
+                parallel_mark(ctx, work, nthreads);
+            } else {
+                serial_mark(ctx, work);
             }
         }
 
@@ -621,29 +556,272 @@ pub fn collect() {
     });
 }
 
-/// Conservatively scans `words` machine words at `addr`: any word that
-/// points into a block queues that block (interior pointers count).
-fn scan_words(h: &Heap, addr: usize, words: usize, work: &mut Vec<usize>) {
+/// Collect (minor threshold): only parallelize marking above this live-set
+/// size — small heaps mark faster serially than the thread hand-off costs.
+const PARALLEL_MIN: usize = 1 << 20;
+/// Blocks a worker grabs from the shared worklist per lock acquisition.
+const MARK_BATCH: usize = 64;
+
+/// Read-only view of the heap needed to resolve a candidate word to the
+/// block that contains it. Shareable across mark worker threads: the heap is
+/// static during a stop-the-world collection, so `regions`/`arenas` and the
+/// per-block `live`/`size`/`kind` fields are all immutable for the duration.
+/// The one field that changes — the `marked` bit — is touched only through
+/// [`marked_atomic`], so there is no data race.
+#[derive(Clone, Copy)]
+struct MarkCtx<'a> {
+    lo: usize,
+    hi: usize,
+    regions: &'a BTreeMap<usize, Region>,
+    arenas: &'a [Arena],
+}
+
+impl MarkCtx<'_> {
+    /// Payload start of the block containing `addr` (interior pointers
+    /// allowed), if it is live and not already claimed. The `marked` check is
+    /// a racy hint: a stale `0` only costs a duplicate push (deduped at
+    /// [`claim`]); `marked` only ever goes 0→1 while marking, so a `1` is
+    /// authoritative.
+    fn find_block(&self, addr: usize) -> Option<usize> {
+        if addr < self.lo || addr >= self.hi {
+            return None;
+        }
+        let (&base, region) = self.regions.range(..=addr).next_back()?;
+        let payload = match region {
+            Region::Arena(idx) => {
+                let a = &self.arenas[*idx];
+                if addr >= base + a.used {
+                    return None;
+                }
+                let hs = base + ((addr - base) / a.stride) * a.stride;
+                // SAFETY: `hs` is a block start; `live`/`size` are immutable
+                // while marking.
+                let h = unsafe { &*(hs as *const Hdr) };
+                if h.live == 0 {
+                    return None;
+                }
+                hs + HEADER
+            }
+            Region::Large => {
+                // SAFETY: `base` is a live large block start.
+                let h = unsafe { &*(base as *const Hdr) };
+                if addr >= base + HEADER + h.size as usize || h.live == 0 {
+                    return None;
+                }
+                base + HEADER
+            }
+        };
+        // SAFETY: `payload` is a live block.
+        if unsafe { marked_atomic(payload) }.load(Ordering::Relaxed) != 0 {
+            return None;
+        }
+        Some(payload)
+    }
+}
+
+/// The `marked` byte of a block (offset 5 in `Hdr`) as an atomic.
+///
+/// SAFETY: `payload` is a live block payload; while marking, every access to
+/// this byte goes through this atomic, so the aliasing is sound.
+unsafe fn marked_atomic<'a>(payload: usize) -> &'a AtomicU8 {
+    unsafe { &*((payload - HEADER + 5) as *const AtomicU8) }
+}
+
+/// Claims a block for tracing: true for the single worker that flips the
+/// mark bit 0→1. Relaxed is sufficient — the worklist mutex provides the
+/// happens-before for the block payloads a claimer then reads/pushes.
+fn claim(payload: usize) -> bool {
+    // SAFETY: `payload` is a live block.
+    unsafe { marked_atomic(payload) }.swap(1, Ordering::Relaxed) == 0
+}
+
+/// Conservatively scans `words` machine words at `addr`, queueing every block
+/// a word points into (interior pointers count).
+fn scan_range(ctx: &MarkCtx, addr: usize, words: usize, out: &mut Vec<usize>) {
     for i in 0..words {
-        // SAFETY: callers pass ranges they own (stack span, register
-        // spill buffer, registered globals, or a live block's payload).
+        // SAFETY: callers pass ranges they own (stack span, register spill
+        // buffer, registered globals, or a live block's payload).
         let w = unsafe { *((addr + i * 8) as *const usize) };
-        if let Some(start) = h.find_block(w) {
-            work.push(start);
+        if let Some(p) = ctx.find_block(w) {
+            out.push(p);
         }
     }
 }
 
 /// Queues the referent of a boxed value, if it is a GC reference.
-fn mark_any(h: &Heap, v: &VsAny, work: &mut Vec<usize>) {
+fn mark_any(ctx: &MarkCtx, v: &VsAny, out: &mut Vec<usize>) {
     match v.tag() {
         Tag::String | Tag::Object | Tag::Array | Tag::Vector | Tag::Function => {
-            if let Some(start) = h.find_block(v.data as usize) {
-                work.push(start);
+            if let Some(p) = ctx.find_block(v.data as usize) {
+                out.push(p);
             }
         }
         _ => {}
     }
+}
+
+/// Queues the GC references held by a claimed block, following its precise
+/// layout. Only the unique claimer of a block runs this, so its `!Sync` side
+/// storage (Array/Vector/PropMap) is never read by two workers at once, and
+/// the paused mutator holds no borrows of it.
+fn trace_children(ctx: MarkCtx, payload: usize, out: &mut Vec<usize>) {
+    // SAFETY: `payload` is a claimed live block.
+    let (kind, size) = unsafe {
+        let b = &*((payload - HEADER) as *const Hdr);
+        (Kind::from_u8(b.kind), b.size as usize)
+    };
+    match kind {
+        Kind::Raw => scan_range(&ctx, payload, size / 8, out),
+        Kind::String => {}
+        Kind::Array => {
+            // SAFETY: block layout fixed by seq::new_array.
+            let a = unsafe { &*(payload as *const crate::seq::VsArray) };
+            for v in a.data.borrow().iter() {
+                mark_any(&ctx, v, out);
+            }
+        }
+        Kind::Vector => {
+            // SAFETY: block layout fixed by seq::new_vector.
+            let v = unsafe { &*(payload as *const crate::seq::VsVector) };
+            // Numeric (unboxed) vectors are GC leaves — no references to
+            // trace. Only boxed vectors carry `VsAny` elements.
+            if v.kind == crate::seq::VEC_BOXED {
+                // SAFETY: `data` holds `len` initialized `VsAny`s.
+                let elems =
+                    unsafe { std::slice::from_raw_parts(v.data as *const VsAny, v.len as usize) };
+                for e in elems {
+                    mark_any(&ctx, e, out);
+                }
+            }
+        }
+        Kind::PropMap => {
+            // SAFETY: block layout fixed by object::expando.
+            let m = unsafe { &*(payload as *const crate::object::PropMap) };
+            for (_, v) in m.iter() {
+                mark_any(&ctx, v, out);
+            }
+        }
+        Kind::RegExp => {
+            // SAFETY: block layout fixed by regexp::new.
+            let r = unsafe { &*(payload as *const crate::regexp::VsRegExp) };
+            if let Some(p) = ctx.find_block(r.source as usize) {
+                out.push(p);
+            }
+        }
+        // Sockets hold no GC references.
+        Kind::Socket => {}
+    }
+}
+
+/// Serial mark: drain the worklist on the mutator thread.
+fn serial_mark(ctx: MarkCtx, mut work: Vec<usize>) {
+    while let Some(p) = work.pop() {
+        if claim(p) {
+            trace_children(ctx, p, &mut work);
+        }
+    }
+}
+
+/// Shared worklist for parallel marking.
+struct SharedInner {
+    work: Vec<usize>,
+    /// Workers currently blocked with nothing to do. When this reaches
+    /// `nthreads` the graph is fully traced.
+    idle: usize,
+    done: bool,
+}
+
+struct Shared {
+    m: Mutex<SharedInner>,
+    cv: Condvar,
+    nthreads: usize,
+}
+
+/// One parallel mark worker: grab a batch, trace it (accumulating new grey
+/// blocks locally), deposit them, repeat. Terminates when every worker is
+/// simultaneously idle with an empty worklist.
+fn mark_worker(ctx: MarkCtx, shared: &Shared) {
+    let mut produced: Vec<usize> = Vec::new();
+    loop {
+        let batch = {
+            let mut g = shared.m.lock().expect("gc worklist");
+            if !produced.is_empty() {
+                g.work.append(&mut produced);
+                shared.cv.notify_all();
+            }
+            loop {
+                let n = g.work.len();
+                if n > 0 {
+                    let start = n.saturating_sub(MARK_BATCH);
+                    break g.work.split_off(start);
+                }
+                g.idle += 1;
+                if g.idle == shared.nthreads {
+                    // Last worker to fall idle: the graph is drained.
+                    g.done = true;
+                    shared.cv.notify_all();
+                    return;
+                }
+                loop {
+                    g = shared.cv.wait(g).expect("gc worklist");
+                    if g.done {
+                        return;
+                    }
+                    if !g.work.is_empty() {
+                        break;
+                    }
+                }
+                g.idle -= 1;
+            }
+        };
+        for p in batch {
+            if claim(p) {
+                trace_children(ctx, p, &mut produced);
+            }
+        }
+    }
+}
+
+/// Parallel mark: `nthreads` workers (the mutator being one) drain the graph
+/// from `roots`. Scoped threads borrow `ctx`/`shared` and join before return.
+fn parallel_mark(ctx: MarkCtx, roots: Vec<usize>, nthreads: usize) {
+    let shared = Shared {
+        m: Mutex::new(SharedInner {
+            work: roots,
+            idle: 0,
+            done: false,
+        }),
+        cv: Condvar::new(),
+        nthreads,
+    };
+    std::thread::scope(|s| {
+        for _ in 1..nthreads {
+            s.spawn(|| mark_worker(ctx, &shared));
+        }
+        // The mutator thread participates as the final worker.
+        mark_worker(ctx, &shared);
+    });
+}
+
+/// Number of threads to use for parallel marking (cached). `VS_GC_THREADS`
+/// overrides; 0/1 forces the serial path. Default is one per core minus the
+/// coordinator, capped.
+fn gc_threads() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        if let Ok(s) = std::env::var("VS_GC_THREADS")
+            && let Ok(n) = s.parse::<usize>()
+        {
+            return n.max(1);
+        }
+        // Marking is memory-bandwidth bound and shares a single worklist
+        // mutex, so it stops scaling early — measured sweet spot is ~4, with
+        // 8 slower than 4 on a 10-core M-series. Cap accordingly; the
+        // `VS_GC_THREADS` override lifts the cap for experiments.
+        std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(1).clamp(1, 4))
+            .unwrap_or(1)
+    })
 }
 
 /// Runs a dead block's kind destructor for its out-of-heap side storage
