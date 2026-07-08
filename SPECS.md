@@ -337,6 +337,18 @@ binary. Responsibilities:
     pooling. It is a module boundary rather than a `GcAllocator` trait;
     swapping collectors means swapping the module (revisit if a second
     collector lands).
+  - **P27 Part A (allocation fast path):** small blocks are bump-allocated
+    from per-size-class **arenas** and carry a 16-byte inline header
+    (kind/size/mark/live), so allocation no longer inserts into a per-object
+    `BTreeMap` and sweep walks arenas cache-linearly instead of iterating a
+    map of every block. Only arenas and large blocks live in the interior-
+    pointer registry (`regions`, ~tens of entries), shrinking the
+    conservative-scan predecessor query. Strictly **non-moving** (a
+    conservatively-scanned maybe-pointer can't be rewritten). Measured: clean
+    A/B `binarytrees` 1530→415 ms (3.68×), `strings` 142→80 ms (1.77×),
+    alloc-light benches flat. Part B (non-moving generational nursery +
+    write barrier + remembered set) deferred until Part A is measured in the
+    field.
 - **Runtime type support:** `is`, `as`, `instanceof`, `typeof`, class-of.
 - **Coercion helpers:** the numeric/string coercion rules from §3.3.
 - **Builtins:** implementations backing the §6 stdlib, bound to `.vlt`
