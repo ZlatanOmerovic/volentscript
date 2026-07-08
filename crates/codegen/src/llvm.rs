@@ -66,10 +66,16 @@ impl Backend for LlvmBackend {
         // the emitted object (miscompiles at O1+).
         module.set_data_layout(&machine.get_target_data().get_data_layout());
 
+        let windows = machine
+            .get_triple()
+            .as_str()
+            .to_string_lossy()
+            .contains("windows");
         let mut cx = Cx {
             context: &context,
             module,
             builder: context.create_builder(),
+            windows,
             any_ty: context.struct_type(
                 &[context.i32_type().into(), context.i64_type().into()],
                 false,
@@ -167,6 +173,8 @@ struct Cx<'ctx> {
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     any_ty: StructType<'ctx>,
+    /// Windows target: the setjmp ABI differs (see emit_try).
+    windows: bool,
     /// Per-class artifacts (RTTI globals, layouts, statics); index = class.
     classes: Vec<ClassArt<'ctx>>,
     /// Boxed-ABI wrappers for functions used as values (lazy, memoized).
@@ -747,8 +755,11 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
         // Generous jmp_buf storage (macOS arm64 needs 192 bytes).
         let buf_ty = cx.context.i8_type().array_type(512);
         let buf = self.entry_alloca(buf_ty, "jmpbuf");
+        // On Windows the runtime ships its own non-unwinding pair
+        // (winjmp.rs) — msvcrt longjmp would SEH-unwind through frames
+        // that carry no unwind tables.
         let setjmp = cx.runtime_fn(
-            "_setjmp",
+            if cx.windows { "vs_setjmp" } else { "_setjmp" },
             Some(cx.context.i32_type().into()),
             &[cx.ptr().into()],
         );

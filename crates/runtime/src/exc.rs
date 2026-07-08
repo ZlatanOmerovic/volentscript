@@ -54,9 +54,18 @@ thread_local! {
     };
 }
 
+#[cfg(not(windows))]
 unsafe extern "C" {
     /// libc longjmp without signal-mask restore (matches `_setjmp`).
     #[link_name = "_longjmp"]
+    fn c_longjmp(buf: *mut u8, val: i32) -> !;
+}
+
+#[cfg(windows)]
+unsafe extern "C" {
+    /// The runtime's own Win64 longjmp (winjmp.rs) — msvcrt's would SEH-
+    /// unwind, and zig's mingw import set lacks `_setjmp` anyway.
+    #[link_name = "vs_longjmp"]
     fn c_longjmp(buf: *mut u8, val: i32) -> !;
 }
 

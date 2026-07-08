@@ -117,12 +117,17 @@ Grab a release tarball from the GitHub releases page (compiler binary +
 runtime staticlib + examples), or build from source (above). CI runs the
 full test matrix on every push; releases are cut from tags.
 
-| Host platform | Status |
+| Platform | Status |
 |---|---|
-| macOS arm64 | supported — CI + release artifact |
-| Linux x86-64 | supported — CI + release artifact |
-| Linux (as a *target*) | `--target x86_64/aarch64-unknown-linux-gnu` from macOS via zig |
-| Windows | not yet — needs a porting phase (setjmp ABI, linker driver) |
+| macOS arm64 host | supported — CI + release artifact |
+| Linux x86-64 host | supported — CI + release artifact |
+| Linux target | `--target x86_64/aarch64-unknown-linux-gnu` (zig-linked) |
+| Windows target | `--target x86_64-pc-windows-gnu` (zig-linked `.exe`; golden corpus executed on Windows in CI) |
+| Windows host | future — compiler-on-Windows needs an LLVM-22-on-Windows story |
+
+Windows exception support is real, not emulated: the runtime ships its own
+non-unwinding Win64 `setjmp`/`longjmp` pair (`winjmp.rs`) because msvcrt's
+`longjmp` SEH-unwinds through frames that carry no unwind tables.
 
 ## Usage
 

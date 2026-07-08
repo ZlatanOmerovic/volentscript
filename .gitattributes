@@ -1,0 +1,4 @@
+# Golden outputs and sources are byte-exact fixtures — never CRLF-translate.
+*.out -text
+*.vlt -text
+*.txt -text

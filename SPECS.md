@@ -407,7 +407,12 @@ FULL SEND.
 - **P7 — Stdlib breadth.** `Math`, `Date`, `String`/`Array` full surface, `JSON`,
   `RegExp`, CLI I/O (args, files, stdout). Milestone: a real CLI tool builds.
 - **P8+ — Advanced.** Custom runtime namespaces (P12/P16 ✓), optimization
-  passes (P13 ✓), Linux cross-compile hardening (P14 ✓), sockets (P15 ✓),
+  passes (P13 ✓), Linux cross-compile hardening (P14 ✓), Windows
+  cross-target (P20 ✓: `x86_64-pc-windows-gnu` via zig; the runtime
+  carries its own non-unwinding Win64 setjmp/longjmp because msvcrt's
+  longjmp SEH-unwinds and zig's mingw import set lacks `_setjmp`; golden
+  corpus executed on a Windows runner in CI; compiler-hosted-on-Windows
+  remains future), sockets (P15 ✓),
   optional E4X/XML (out, §5), second backend (Cranelift) behind the
   `Backend` trait — **DECISION (P17): deferred post-v1.** The v1 exception
   scheme compiles `_setjmp` (returns_twice) into user code; Cranelift does

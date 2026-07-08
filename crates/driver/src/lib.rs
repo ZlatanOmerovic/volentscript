@@ -179,10 +179,20 @@ pub fn build(opts: &BuildOptions) -> Result<PathBuf, Errors> {
         )
         .map_err(|d| Errors::new(d, &sources))?;
 
-    let output = opts.output.clone().unwrap_or_else(|| {
+    let mut output = opts.output.clone().unwrap_or_else(|| {
         let stem = opts.input.file_stem().unwrap_or_default();
         opts.input.with_file_name(stem)
     });
+    // Windows executables want the suffix (and mingw's linker appends it
+    // anyway — keep our path in sync with the file it writes).
+    if opts
+        .target
+        .as_deref()
+        .is_some_and(|t| t.contains("windows"))
+        && output.extension().is_none()
+    {
+        output.set_extension("exe");
+    }
     let obj_path = output.with_extension("o");
     std::fs::write(&obj_path, &object.bytes)
         .map_err(|e| Errors::message(format!("cannot write `{}`: {e}", obj_path.display())))?;
@@ -193,9 +203,26 @@ pub fn build(opts: &BuildOptions) -> Result<PathBuf, Errors> {
         // (CLAUDE.md §3 hardening path).
         Some(zt) => {
             let mut c = Command::new("zig");
-            // -lunwind: the Rust runtime staticlib carries unwind
-            // references (_Unwind_Resume); zig bundles LLVM libunwind.
-            c.args(["cc", "-target", &zt, "-lunwind"]);
+            c.args(["cc", "-target", &zt]);
+            if zt.contains("linux") {
+                // -lunwind: the Rust runtime staticlib carries unwind
+                // references (_Unwind_Resume); zig bundles LLVM libunwind.
+                c.arg("-lunwind");
+            }
+            if zt.contains("windows") {
+                // Import libraries Rust's std expects on windows-gnu
+                // (Winsock, profile dirs, crypto RNG, NT internals) plus
+                // zig's bundled unwinder for the staticlib's unwind refs.
+                c.args([
+                    "-lws2_32",
+                    "-luserenv",
+                    "-lbcrypt",
+                    "-lntdll",
+                    "-ladvapi32",
+                    "-lole32",
+                    "-lunwind",
+                ]);
+            }
             c
         }
         None => Command::new("cc"),
@@ -262,8 +289,9 @@ fn zig_target(target: Option<&str>) -> Result<Option<String>, Errors> {
     match t {
         "x86_64-unknown-linux-gnu" => Ok(Some("x86_64-linux-gnu".to_string())),
         "aarch64-unknown-linux-gnu" => Ok(Some("aarch64-linux-gnu".to_string())),
+        "x86_64-pc-windows-gnu" => Ok(Some("x86_64-windows-gnu".to_string())),
         other => Err(Errors::message(format!(
-            "unsupported target `{other}` — supported: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu"
+            "unsupported target `{other}` — supported: x86_64-unknown-linux-gnu,              aarch64-unknown-linux-gnu, x86_64-pc-windows-gnu"
         ))),
     }
 }

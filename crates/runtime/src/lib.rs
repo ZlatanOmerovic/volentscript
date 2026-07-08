@@ -29,6 +29,7 @@ mod regexp;
 mod seq;
 mod socket;
 mod string;
+mod winjmp;
 
 pub use any::{Tag, VsAny};
 pub use string::VsString;

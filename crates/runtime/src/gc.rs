@@ -238,11 +238,19 @@ pub fn collect() {
     // Spill callee-saved registers onto the stack so the stack scan sees
     // them (the classic conservative-GC trick; MMgc does the same).
     let mut regs = std::mem::MaybeUninit::<[u8; 256]>::uninit();
+    #[cfg(not(windows))]
     unsafe extern "C" {
         fn setjmp(buf: *mut u8) -> i32;
     }
+    #[cfg(windows)]
+    unsafe extern "C" {
+        /// The runtime's own Win64 register spill (winjmp.rs).
+        #[link_name = "vs_setjmp"]
+        fn setjmp(buf: *mut u8) -> i32;
+    }
     // SAFETY: buffer is large enough for any platform jmp_buf we target
-    // (macOS arm64: 192 bytes; x86-64: 148). We never longjmp to it.
+    // (macOS arm64: 192 bytes; x86-64 SysV: 148; Win64: 256). We never
+    // longjmp to it.
     unsafe { setjmp(regs.as_mut_ptr() as *mut u8) };
 
     HEAP.with(|h| {

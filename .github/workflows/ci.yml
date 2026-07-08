@@ -72,15 +72,74 @@ jobs:
         run: cargo test --workspace
 
   cross-runtime:
-    name: runtime cross-compiles (Linux targets from macOS)
+    name: runtime cross-compiles (Linux + Windows targets from macOS)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Rust toolchain + Linux targets
+      - name: mingw (dlltool for windows-gnu raw-dylib libs)
+        run: brew install mingw-w64
+      - name: Rust toolchain + cross targets
         run: |
           rustup toolchain install 1.88 --profile minimal && rustup default 1.88
-          rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+          rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-gnu
       - name: Cross-build the runtime staticlib
         run: |
           cargo build -p runtime --target x86_64-unknown-linux-gnu --release
           cargo build -p runtime --target aarch64-unknown-linux-gnu --release
+          cargo build -p runtime --target x86_64-pc-windows-gnu --release
+
+  windows-target:
+    name: cross-build golden corpus for Windows (from macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (LLVM, zig, mingw, Rust + windows target)
+        run: |
+          brew install llvm zig mingw-w64
+          echo "LLVM_SYS_221_PREFIX=$(brew --prefix llvm)" >> "$GITHUB_ENV"
+          rustup toolchain install 1.88 --profile minimal && rustup default 1.88
+          rustup target add x86_64-pc-windows-gnu
+      - name: Build compiler + Windows runtime
+        run: |
+          cargo build --workspace
+          cargo build -p runtime --target x86_64-pc-windows-gnu --release
+      - name: Cross-build the corpus
+        run: |
+          mkdir -p winpkg
+          for t in hello fib numbers strings control any oop generics closures                    regex date namespaces nsvalues gcchurn fileio; do
+            ./target/debug/volentscript build "tests/programs/$t.vlt"               --target x86_64-pc-windows-gnu --output "winpkg/$t"
+            cp "tests/programs/$t.out" winpkg/
+          done
+          ./target/debug/volentscript build tests/showcase.vlt             --target x86_64-pc-windows-gnu --output winpkg/showcase
+          awk '/EXPECTED STDOUT/{f=1;next} f&&!s{if($0==""){s=1};next} s&&/^---/{exit} s{print}'             tests/showcase.vlt > winpkg/showcase.out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-corpus
+          path: winpkg/
+
+  windows-exec:
+    name: execute golden corpus on Windows
+    needs: windows-target
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-corpus
+          path: winpkg
+      - name: Run every golden and diff
+        run: |
+          cd winpkg
+          fail=0
+          for exe in *.exe; do
+            name="${exe%.exe}"
+            ./"$exe" > "$name.actual" || { echo "::error::$name exited non-zero"; fail=1; }
+            if ! diff -u "$name.out" "$name.actual"; then
+              echo "::error::$name output mismatch"; fail=1
+            else
+              echo "$name: match"
+            fi
+          done
+          exit $fail
