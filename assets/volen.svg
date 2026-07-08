@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 140 110" role="img" aria-label="Volen, a cheerful orange fire salamander with dark spots">
+  <!-- tail -->
+  <path d="M82 68 C 102 66, 112 50, 104 34 C 100 26, 92 24, 86 27"
+        fill="none" stroke="#E85C0F" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="100" cy="57" r="2.6" fill="#241B14"/>
+  <circle cx="105" cy="43" r="2.2" fill="#241B14"/>
+  <!-- back leg -->
+  <rect x="66" y="72" width="9" height="17" rx="4.5" fill="#C94F0A" transform="rotate(-14 70 80)"/>
+  <!-- body -->
+  <ellipse cx="56" cy="66" rx="26" ry="17" fill="#E85C0F"/>
+  <ellipse cx="50" cy="74" rx="17" ry="8.5" fill="#FFAE3D" opacity="0.9"/>
+  <!-- spots -->
+  <circle cx="55" cy="54" r="4" fill="#241B14"/>
+  <circle cx="69" cy="62" r="3.2" fill="#241B14"/>
+  <circle cx="44" cy="57" r="2.6" fill="#241B14"/>
+  <!-- front leg -->
+  <rect x="31" y="71" width="9" height="17" rx="4.5" fill="#C94F0A" transform="rotate(12 35 79)"/>
+  <!-- head -->
+  <circle cx="28" cy="50" r="17" fill="#E85C0F"/>
+  <circle cx="15" cy="56" r="7.5" fill="#E85C0F"/>
+  <circle cx="34" cy="41" r="2.8" fill="#241B14"/>
+  <!-- face -->
+  <circle cx="24" cy="44" r="6" fill="#FFFDF9"/>
+  <circle cx="22.8" cy="45" r="3" fill="#241B14"/>
+  <circle cx="21.8" cy="43.4" r="1" fill="#FFFDF9"/>
+  <circle cx="12" cy="54" r="0.9" fill="#241B14"/>
+  <path d="M12 61 Q 18 65.5 25 62.5" fill="none" stroke="#241B14" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="34" cy="57" r="3" fill="#FFAE3D" opacity="0.85"/>
+</svg>

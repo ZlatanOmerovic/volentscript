@@ -5,8 +5,10 @@
 # SOURCES.md stays tracked so the set is reproducible; see links.md.
 /docs/*
 !/docs/SOURCES.md
+
+# Compiled test binaries never land in git; sources + goldens do.
 /tests/showcase
 /tests/programs/*
-!/tests/programs/*.as
+!/tests/programs/*.vlt
 !/tests/programs/*.out
 !/tests/programs/*.txt

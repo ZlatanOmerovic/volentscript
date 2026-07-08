@@ -1,8 +1,18 @@
-# VolentScript
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-lockup-terminal.svg">
+    <img src="assets/logo-lockup.svg" alt="VolentScript" width="420">
+  </picture>
+</p>
 
-A native, ahead-of-time-compiled revival of ActionScript 3 / ECMAScript 4,
-decoupled from Flash. You write `.vlt` source; the `volentscript` compiler
-produces a native executable. Written in Rust; LLVM backend via `inkwell`.
+<p align="center"><b>ActionScript 3, revived.</b> Native, ahead-of-time, and entirely of its own will.</p>
+
+---
+
+A statically-typed, garbage-collected, ahead-of-time-compiled revival of
+ActionScript 3 / ECMAScript 4, decoupled from Flash. You write `.vlt`
+source; the `volentscript` compiler produces a native executable — no VM,
+no interpreter. Written in Rust; LLVM backend via `inkwell`.
 
 - **`SPECS.md`** — the language definition (what to build).
 - **`CLAUDE.md`** — process and phase gates (how it gets built).
@@ -123,3 +133,11 @@ capped by `tests/showcase.vlt`, the whole-language golden test. Opt-in
 extras: `cross_linux` (needs zig + docker). Known deviations from AS3/ES4
 are documented per phase in the git history and SPECS.
 
+## License
+
+MIT or Apache-2.0, at your option (`LICENSE-MIT` / `LICENSE-APACHE`).
+
+<p align="center">
+  <img src="assets/volen.svg" alt="Volen, the VolentScript fire salamander" width="160"><br>
+  <sub>Volen, the fire salamander — regrows anything you throw at him.</sub>
+</p>

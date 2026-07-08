@@ -427,4 +427,6 @@ The language is **VolentScript**, the CLI tool `volentscript`, the source
 extension `.vlt` (renamed from the AS3-era `.as` after v1 completion). The
 name appears as a literal only in the `cli` crate, the README, and this
 header; the runtime ABI keeps its historical `vs_` symbol prefix (which
-still reads as VolentScript).
+still reads as VolentScript). Brand assets (pen-nib V mark, lockups,
+favicon, OG image, and Volen the fire-salamander mascot) live in
+`assets/`, sourced from the website project; primary color `#E85C0F`.
