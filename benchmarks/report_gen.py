@@ -95,8 +95,14 @@ md.append("""
   iterating and removing a map entry for every live block. Clean A/B on this
   binary was 3.68x. It is now within 2x of C and the native compilers on a
   workload that used to be our worst row; the generational JIT collectors
-  still win it outright (a non-moving generational nursery — P27 Part B — is
-  the next lever, deferred pending field data on Part A).
+  still win it outright. P28 then parallelized the stop-the-world **mark**
+  phase across up to 4 GC threads (atomic mark bits, shared worklist), worth
+  a further ~9% on this row in isolation; it is memory-bandwidth bound and
+  the single-mutex worklist caps scaling, so a work-stealing deque is the
+  next lever. (A non-moving generational nursery — P27 Part B — was built and
+  measured a regression on this workload, so it was shelved, not shipped:
+  a non-moving nursery pays generational's costs without the copying-nursery
+  benefit that makes it fast in a JIT.)
 - **Strings** — ~8.6x C, down from ~13x, and now ahead of Java. Two phases
   stack: P26 made split/replace/case/join operate on UTF-16 code units
   directly instead of transcoding to UTF-8 and back, and P27 Part A cut the
@@ -187,7 +193,7 @@ html = f"""<!doctype html>
     <li><b>Tight numeric loops</b> (mandelbrot): within ~2x of C, at JS-JIT level — LLVM -O2 works when code stays in registers.</li>
     <li><b>Call-heavy code</b> (fib): ~6x C — a GC safepoint check per call, plus conservative-GC codegen constraints.</li>
     <li><b>Object float math</b> (nbody): ~10x C — <code>Vector.&lt;T&gt;</code> element reads are runtime calls on boxed storage; safepoints block loop hoisting.</li>
-    <li><b>Allocation churn</b> (binarytrees): ~1.8x C, down from ~8x — P27 bump arenas replaced the per-object registry (3.68x on this binary). Generational JIT collectors still win it outright.</li>
+    <li><b>Allocation churn</b> (binarytrees): ~1.8x C, down from ~8x — P27 bump arenas replaced the per-object registry (3.68x on this binary); P28 parallelized the mark phase (~9% more, bandwidth-bound). Generational JIT collectors still win it outright.</li>
     <li><b>Strings</b>: ~8.6x C, down from ~13x and now ahead of Java — UTF-16-native ops (P26) plus the P27 allocation fast path; the churn from ~12 short-lived strings per iteration is the remaining gap.</li>
   </ul>
   <p style="margin-top:10px">Remaining gaps map to planned optimizations: a non-moving generational nursery for allocation churn, and module-level global storage so mutable top-level <code>var</code>s stop closure-converting their readers. None require language changes. Same idiomatic-simple algorithm in every language; Java timed as a process like everything else (its binarytrees throughput still wins). TypeScript is not a separate row — it erases to the same JS.</p>
