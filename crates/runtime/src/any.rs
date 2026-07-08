@@ -1,0 +1,115 @@
+//! The boxed dynamic value: what a `*`-typed slot holds.
+
+use crate::string::VsString;
+
+/// Runtime type tag of a boxed value. Layout is ABI: codegen emits these
+/// numbers — append only.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum Tag {
+    Undefined = 0,
+    Null = 1,
+    Boolean = 2,
+    Int = 3,
+    UInt = 4,
+    Number = 5,
+    String = 6,
+}
+
+/// A boxed dynamic value (`*`). 16 bytes, passed/returned by value.
+/// `data` holds: Boolean 0/1, Int sext, UInt zext, Number f64 bits,
+/// String pointer bits; unused otherwise.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VsAny {
+    /// Type tag.
+    pub tag: u32,
+    /// Payload bits.
+    pub data: u64,
+}
+
+impl VsAny {
+    /// The `undefined` value.
+    pub const UNDEFINED: VsAny = VsAny {
+        tag: Tag::Undefined as u32,
+        data: 0,
+    };
+    /// The `null` value.
+    pub const NULL: VsAny = VsAny {
+        tag: Tag::Null as u32,
+        data: 0,
+    };
+
+    /// Boxes a Number.
+    pub fn number(v: f64) -> VsAny {
+        VsAny {
+            tag: Tag::Number as u32,
+            data: v.to_bits(),
+        }
+    }
+
+    /// Boxes an int.
+    pub fn int(v: i32) -> VsAny {
+        VsAny {
+            tag: Tag::Int as u32,
+            data: v as i64 as u64,
+        }
+    }
+
+    /// Boxes a uint.
+    pub fn uint(v: u32) -> VsAny {
+        VsAny {
+            tag: Tag::UInt as u32,
+            data: u64::from(v),
+        }
+    }
+
+    /// Boxes a Boolean.
+    pub fn boolean(v: bool) -> VsAny {
+        VsAny {
+            tag: Tag::Boolean as u32,
+            data: u64::from(v),
+        }
+    }
+
+    /// Boxes a String pointer (null pointer boxes as `null`).
+    pub fn string(ptr: *const VsString) -> VsAny {
+        if ptr.is_null() {
+            VsAny::NULL
+        } else {
+            VsAny {
+                tag: Tag::String as u32,
+                data: ptr as usize as u64,
+            }
+        }
+    }
+
+    /// The tag, decoded.
+    pub fn tag(&self) -> Tag {
+        match self.tag {
+            1 => Tag::Null,
+            2 => Tag::Boolean,
+            3 => Tag::Int,
+            4 => Tag::UInt,
+            5 => Tag::Number,
+            6 => Tag::String,
+            _ => Tag::Undefined,
+        }
+    }
+
+    /// String payload (only when `tag == String`).
+    pub fn as_string_ptr(&self) -> *const VsString {
+        self.data as usize as *const VsString
+    }
+
+    /// Numeric payload interpreted per tag; `None` for non-numeric tags.
+    pub fn numeric(&self) -> Option<f64> {
+        match self.tag() {
+            Tag::Int => Some(self.data as i64 as i32 as f64),
+            Tag::UInt => Some((self.data as u32) as f64),
+            Tag::Number => Some(f64::from_bits(self.data)),
+            _ => None,
+        }
+    }
+}

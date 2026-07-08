@@ -1,0 +1,11 @@
+var i:int = 7;
+var n:Number = i / 2;
+trace(n);
+trace(1 + 2 * 3, 10 % 3, 2147483647 + 1);
+trace(-5 >>> 1, 5 << 2, ~0, 7 & 3, 1 | 4, 5 ^ 1);
+var big:Number = parseFloat("2.5e3");
+trace(big, parseInt("ff", 16), parseInt("0x10"));
+trace(isNaN(parseFloat("nope")), isFinite(1 / 0));
+trace((255).toString(16), (3.14159).toFixed(2));
+var u:uint = 4294967295;
+trace(u, u + 1);

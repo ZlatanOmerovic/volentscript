@@ -62,8 +62,15 @@ and `runtime`.
 
 ## Status
 
-Phases 0–2 done: scaffold + CI (P0); lexer + parser with AST snapshots and
-caret diagnostics (P1); semantic analysis — resolution, nominal type
-checking, coercion insertion, typed AST (P2). `vigorscript parse` dumps the
-AST, `vigorscript check [--dump]` type-checks; `build`/`run` report
-`error[E0001]` until codegen lands in Phase 3. Phase plan: SPECS §11.
+Phases 0–3 done: scaffold + CI (P0); lexer + parser (P1); semantic analysis
+with typed AST and coercion insertion (P2); **native compilation** (P3) —
+MIR lowering, LLVM codegen, Rust runtime static lib (UTF-16 strings, boxed
+`*`, ES3 §9 conversions, trace/parseInt/parseFloat/isNaN/isFinite, String &
+Number methods), system-linker link step, macOS ad-hoc codesign.
+
+`vigorscript run file.as` compiles and executes a real arm64/x86-64 binary.
+Core subset works end to end: functions (defaults, recursion), all numeric
+semantics, strings + methods, control flow incl. labeled jumps and switch
+fall-through, `is`/`as`/`typeof`, dynamic `*` values. Later-phase constructs
+(classes, closures, exceptions, for..in, Array/Object literals) fail with
+phase-gated `error[E0001]` diagnostics. Phase plan: SPECS §11.

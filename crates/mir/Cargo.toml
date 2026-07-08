@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Backend-agnostic mid-level IR"
+description = "Backend-agnostic mid-level IR and lowering from the typed AST"
 
 [dependencies]
 span.workspace = true
+diagnostics.workspace = true
+ast.workspace = true
+sema.workspace = true
 
 [lints]
 workspace = true

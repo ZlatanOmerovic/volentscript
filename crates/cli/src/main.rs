@@ -27,11 +27,17 @@ enum Command {
         /// Output executable path
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Path to libruntime.a (default: next to this executable)
+        #[arg(long)]
+        runtime_lib: Option<PathBuf>,
     },
     /// Compile and immediately run a .as file
     Run {
         /// Entry .as source file
         input: PathBuf,
+        /// Path to libruntime.a (default: next to this executable)
+        #[arg(long)]
+        runtime_lib: Option<PathBuf>,
     },
     /// Parse a .as file and print its AST (compiler development aid)
     Parse {
@@ -50,9 +56,13 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let (input, output) = match cli.command {
-        Command::Build { input, output } => (input, output),
-        Command::Run { input } => (input, None),
+    let (input, output, runtime_lib, and_run) = match cli.command {
+        Command::Build {
+            input,
+            output,
+            runtime_lib,
+        } => (input, output, runtime_lib, false),
+        Command::Run { input, runtime_lib } => (input, None, runtime_lib, true),
         Command::Parse { input } => {
             return match driver::parse_dump(&input) {
                 Ok(dump) => {
@@ -79,12 +89,24 @@ fn main() -> ExitCode {
             };
         }
     };
-    match driver::build(&driver::BuildOptions { input, output }) {
-        Ok(exe) => {
-            println!("built {}", exe.display());
-            ExitCode::SUCCESS
+    let opts = driver::BuildOptions {
+        input,
+        output,
+        runtime_lib,
+    };
+    if and_run {
+        match driver::run(&opts) {
+            Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
+            Err(errors) => report(errors),
         }
-        Err(errors) => report(errors),
+    } else {
+        match driver::build(&opts) {
+            Ok(exe) => {
+                println!("built {}", exe.display());
+                ExitCode::SUCCESS
+            }
+            Err(errors) => report(errors),
+        }
     }
 }
 

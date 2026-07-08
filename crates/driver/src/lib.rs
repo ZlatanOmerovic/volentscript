@@ -1,23 +1,24 @@
 //! Driver: orchestrates parse → check → lower → codegen → link (SPECS §8).
-//!
-//! Also owns platform link details when they land in P3: invoking the system
-//! linker with the runtime static lib, and ad-hoc `codesign` of Apple Silicon
-//! outputs (CLAUDE.md §3).
 
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
+use codegen::Backend as _;
 use diagnostics::Diagnostic;
 use span::{SourceId, SourceMap};
 
 /// Options for one `build` invocation.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct BuildOptions {
     /// The `.as` entry file.
     pub input: PathBuf,
-    /// Output executable path; `None` = derive from input.
+    /// Output executable path; `None` = input filename without extension.
     pub output: Option<PathBuf>,
+    /// Path to the runtime static library; `None` = `libruntime.a` next to
+    /// the compiler executable (where a workspace build puts it).
+    pub runtime_lib: Option<PathBuf>,
 }
 
 /// Compilation failure: diagnostics already rendered against the source map
@@ -34,23 +35,20 @@ impl Errors {
             rendered: diags.iter().map(|d| d.render_full(sources)).collect(),
         }
     }
+
+    fn message(msg: impl Into<String>) -> Self {
+        Errors {
+            rendered: vec![format!("error: {}", msg.into())],
+        }
+    }
 }
 
 fn load(input: &Path) -> Result<(SourceMap, SourceId), Errors> {
-    let text = std::fs::read_to_string(input).map_err(|e| Errors {
-        rendered: vec![format!("error: cannot read `{}`: {e}", input.display())],
-    })?;
+    let text = std::fs::read_to_string(input)
+        .map_err(|e| Errors::message(format!("cannot read `{}`: {e}", input.display())))?;
     let mut sources = SourceMap::new();
     let file = sources.add(input.display().to_string(), text);
     Ok((sources, file))
-}
-
-/// Parses one file and returns its AST dump (the CLI `parse` subcommand,
-/// the P1 milestone surface).
-pub fn parse_dump(input: &Path) -> Result<String, Errors> {
-    let (sources, file) = load(input)?;
-    let program = parser::parse(&sources, file).map_err(|d| Errors::new(d, &sources))?;
-    Ok(ast::dump(&program))
 }
 
 /// Result of `check`: warnings (rendered) plus the typed-AST dump.
@@ -81,6 +79,14 @@ fn check_program(
     }
 }
 
+/// Parses one file and returns its AST dump (the CLI `parse` subcommand,
+/// the P1 milestone surface).
+pub fn parse_dump(input: &Path) -> Result<String, Errors> {
+    let (sources, file) = load(input)?;
+    let program = parser::parse(&sources, file).map_err(|d| Errors::new(d, &sources))?;
+    Ok(ast::dump(&program))
+}
+
 /// Parses and type-checks one file (`check` subcommand — the P2 milestone
 /// surface).
 pub fn check(input: &Path) -> Result<CheckReport, Errors> {
@@ -92,21 +98,104 @@ pub fn check(input: &Path) -> Result<CheckReport, Errors> {
     })
 }
 
-/// Compiles one program to a native executable.
-///
-/// P2: parses and type-checks for real, then reports that code generation
-/// is Phase 3.
+/// Compiles one program to a native executable: parse → check → lower →
+/// LLVM codegen → link against the runtime static lib → ad-hoc codesign
+/// (macOS arm64, CLAUDE.md §3).
 pub fn build(opts: &BuildOptions) -> Result<PathBuf, Errors> {
     let (sources, file) = load(&opts.input)?;
-    let (typed, _warnings) = check_program(&sources, file)?;
-    let _ = typed; // lower → codegen → link land in P3
-    Err(Errors {
-        rendered: vec![
-            diagnostics::Diagnostic::error(
-                diagnostics::ErrorCode::NOT_IMPLEMENTED,
-                "code generation is not implemented until Phase 3",
-            )
-            .render(),
-        ],
-    })
+    let (typed, warnings) = check_program(&sources, file)?;
+    for w in &warnings {
+        eprintln!("{w}");
+    }
+    let program = mir::lower(&typed).map_err(|d| Errors::new(d, &sources))?;
+
+    let backend = codegen::llvm::LlvmBackend::default();
+    let object = backend
+        .compile(&program, &codegen::CodegenOpts::default())
+        .map_err(|d| Errors::new(d, &sources))?;
+
+    let output = opts.output.clone().unwrap_or_else(|| {
+        let stem = opts.input.file_stem().unwrap_or_default();
+        opts.input.with_file_name(stem)
+    });
+    let obj_path = output.with_extension("o");
+    std::fs::write(&obj_path, &object.bytes)
+        .map_err(|e| Errors::message(format!("cannot write `{}`: {e}", obj_path.display())))?;
+
+    let runtime_lib = find_runtime_lib(opts)?;
+    let link = Command::new("cc")
+        .arg(&obj_path)
+        .arg(&runtime_lib)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .map_err(|e| Errors::message(format!("cannot run linker `cc`: {e}")))?;
+    let _ = std::fs::remove_file(&obj_path);
+    if !link.status.success() {
+        return Err(Errors::message(format!(
+            "linking failed:\n{}",
+            String::from_utf8_lossy(&link.stderr)
+        )));
+    }
+
+    // Apple Silicon refuses unsigned binaries — ad-hoc sign (CLAUDE.md §3).
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        let sign = Command::new("codesign")
+            .args(["-s", "-", "--force"])
+            .arg(&output)
+            .output()
+            .map_err(|e| Errors::message(format!("cannot run codesign: {e}")))?;
+        if !sign.status.success() {
+            return Err(Errors::message(format!(
+                "codesign failed:\n{}",
+                String::from_utf8_lossy(&sign.stderr)
+            )));
+        }
+    }
+    Ok(output)
+}
+
+/// Builds and immediately runs; returns the program's exit code.
+pub fn run(opts: &BuildOptions) -> Result<i32, Errors> {
+    let exe = build(opts)?;
+    let exe = if exe.is_absolute() {
+        exe
+    } else {
+        Path::new(".").join(exe)
+    };
+    let status = Command::new(&exe)
+        .status()
+        .map_err(|e| Errors::message(format!("cannot run `{}`: {e}", exe.display())))?;
+    Ok(status.code().unwrap_or(1))
+}
+
+fn find_runtime_lib(opts: &BuildOptions) -> Result<PathBuf, Errors> {
+    if let Some(p) = &opts.runtime_lib {
+        if p.exists() {
+            return Ok(p.clone());
+        }
+        return Err(Errors::message(format!(
+            "runtime library not found at `{}`",
+            p.display()
+        )));
+    }
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    if let Some(dir) = exe_dir {
+        let candidate = dir.join("libruntime.a");
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+        // Test binaries live one level down (target/<profile>/deps/).
+        if let Some(parent) = dir.parent() {
+            let candidate = parent.join("libruntime.a");
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(Errors::message(
+        "cannot locate libruntime.a next to the compiler; pass --runtime-lib",
+    ))
 }

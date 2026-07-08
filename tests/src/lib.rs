@@ -1,7 +1,6 @@
-//! End-to-end golden-test harness (SPECS §10).
-//!
-//! Each `.as` program in `programs/` will have an expected stdout and exit
-//! code; the harness compiles, links, runs, and compares. Lands in P3 with
-//! the first golden test: `trace("hello");` → prints `hello`, exits 0.
+//! End-to-end golden-test harness (SPECS §10): each `.as` program in
+//! `programs/` has an expected stdout in a sibling `.out` file; the harness
+//! compiles to a native binary, runs it, and compares stdout + exit code.
+//! See `tests/golden.rs`.
 
 #![forbid(unsafe_code)]

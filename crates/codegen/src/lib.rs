@@ -2,10 +2,11 @@
 //!
 //! This is the only crate allowed to depend on `inkwell`; no inkwell/LLVM
 //! type may appear in this crate's public API or anywhere above it
-//! (CLAUDE.md prime directive 3). `unsafe` is permitted here (LLVM FFI) but
-//! must stay isolated behind safe wrappers; none is needed yet.
+//! (CLAUDE.md prime directive 3). The inkwell API is safe Rust, so this
+//! crate carries no `unsafe` today; the allowance exists for future direct
+//! LLVM FFI.
 
-use diagnostics::{Diagnostic, ErrorCode};
+use diagnostics::Diagnostic;
 
 pub mod llvm;
 
@@ -35,17 +36,4 @@ pub trait Backend {
         program: &mir::Program,
         opts: &CodegenOpts,
     ) -> Result<ObjectFile, Vec<Diagnostic>>;
-}
-
-impl Backend for llvm::LlvmBackend {
-    fn compile(
-        &self,
-        _program: &mir::Program,
-        _opts: &CodegenOpts,
-    ) -> Result<ObjectFile, Vec<Diagnostic>> {
-        Err(vec![Diagnostic::error(
-            ErrorCode::NOT_IMPLEMENTED,
-            "code generation is not implemented until Phase 3",
-        )])
-    }
 }

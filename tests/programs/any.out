@@ -1,0 +1,5 @@
+number true false
+string true text
+true false
+7 fallback
+undefined null
