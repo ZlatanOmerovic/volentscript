@@ -379,6 +379,7 @@ impl Dumper {
             ExprKind::UInt(v) => self.line(format!("UInt {v}")),
             ExprKind::Number(v) => self.line(format!("Number {v}")),
             ExprKind::Str(v) => self.line(format!("Str {v:?}")),
+            ExprKind::RegExp(pat, flags) => self.line(format!("RegExp /{pat}/{flags}")),
             ExprKind::Bool(v) => self.line(format!("Bool {v}")),
             ExprKind::Null => self.line("Null"),
             ExprKind::This => self.line("This"),

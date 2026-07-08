@@ -89,5 +89,14 @@ block pooling so heavy churn plateaus (a 1.5 GB-churn stress test holds
 ~34 MB peak RSS). `System.gc()` / `System.gcLiveBytes()` are available;
 `VS_GC_LOG=1` prints per-collection stats.
 
-Remaining (backlog): RegExp, Date instances, runtime namespaces,
-optimization passes, Linux cross-compile hardening. Phase plan: SPECS §11.
+P10 added RegExp (ES3 §15.10) on a backtracking engine (`fancy-regex` —
+ES3 needs backreferences and lazy quantifiers): `/pattern/flags` literals
+(division disambiguated by the standard prev-token heuristic),
+`new RegExp(p, f)`, `test`/`exec` with global `lastIndex`,
+`String.match/search/replace` ($&/$n substitutions), `is`/`as RegExp`,
+catchable SyntaxError on bad patterns, and GC-integrated regex objects.
+Indices are UTF-16 units per the spec. `VS_DUMP_IR=1` dumps the LLVM
+module (debugging aid).
+
+Remaining (backlog): Date instances, runtime namespaces, optimization
+passes, Linux cross-compile hardening. Phase plan: SPECS §11.

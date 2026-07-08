@@ -140,6 +140,7 @@ pub fn type_name(name: &str) -> Option<Ty> {
         "Boolean" => Ty::Boolean,
         "String" => Ty::String,
         "Function" => Ty::Function,
+        "RegExp" => Ty::RegExp,
         _ => return None,
     })
 }
@@ -473,8 +474,24 @@ pub fn member(receiver: Ty, name: &str) -> Option<Member> {
         (Ty::String, "substr") => Method(sig(&[Ty::Number, Ty::Number], 0, Ty::String)),
         // String.as:151
         (Ty::String, "split") => Method(sig(&[Ty::Any, Ty::Any], 0, Ty::Array)),
-        // §15.5.4.11 with a string pattern (regex patterns are P8).
-        (Ty::String, "replace") => Method(sig(&[Ty::String, Ty::String], 2, Ty::String)),
+        // §15.5.4.11 — pattern is a String or a RegExp (checked at the
+        // call site; the parameter is `*` to admit both).
+        (Ty::String, "replace") => Method(sig(&[Ty::Any, Ty::String], 2, Ty::String)),
+        // AS3 String.match/search take a RegExp (String.as:87,133).
+        (Ty::String, "match") => Method(sig(&[Ty::RegExp], 1, Ty::Array)),
+        (Ty::String, "search") => Method(sig(&[Ty::RegExp], 1, Ty::Int)),
+
+        // RegExp (ES3 §15.10.6, AS3 RegExp class). `exec` returns the
+        // match Array or null.
+        (Ty::RegExp, "test") => Method(sig(&[Ty::String], 1, Ty::Boolean)),
+        (Ty::RegExp, "exec") => Method(sig(&[Ty::String], 1, Ty::Array)),
+        (Ty::RegExp, "toString") => Method(sig(&[], 0, Ty::String)),
+        (Ty::RegExp, "source") => Property(Ty::String),
+        (Ty::RegExp, "global") => Property(Ty::Boolean),
+        (Ty::RegExp, "ignoreCase") => Property(Ty::Boolean),
+        (Ty::RegExp, "multiline") => Property(Ty::Boolean),
+        // Read-only in v1 (the runtime advances it on global exec).
+        (Ty::RegExp, "lastIndex") => Property(Ty::Int),
         // String.as:182,194
         (Ty::String, "toLowerCase") => Method(sig(&[], 0, Ty::String)),
         (Ty::String, "toUpperCase") => Method(sig(&[], 0, Ty::String)),

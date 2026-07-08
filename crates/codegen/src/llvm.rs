@@ -36,6 +36,7 @@ mod tag {
     pub const ARRAY: u32 = 8;
     pub const VECTOR: u32 = 9;
     pub const FUNCTION: u32 = 10;
+    pub const REGEXP: u32 = 11;
 }
 
 /// LLVM implementor of [`Backend`].
@@ -84,6 +85,9 @@ impl Backend for LlvmBackend {
             FnCx::emit(&cx, &fns, program, f, *decl);
         }
 
+        if std::env::var_os("VS_DUMP_IR").is_some() {
+            eprintln!("{}", cx.module.print_to_string().to_string());
+        }
         if let Err(e) = cx.module.verify() {
             // A verifier failure is a compiler bug, not a user error — but
             // never panic on the user (CLAUDE.md §4): report it.
@@ -175,6 +179,8 @@ enum Val<'ctx> {
     VecP(PointerValue<'ctx>),
     /// Function value (closure pointer, possibly null).
     Fun(PointerValue<'ctx>),
+    /// RegExp pointer (possibly null).
+    Reg(PointerValue<'ctx>),
     /// Pointer to an entry-block alloca holding a `{i32, i64}` box.
     Any(PointerValue<'ctx>),
     Void,
@@ -191,9 +197,12 @@ impl<'ctx> Cx<'ctx> {
             Ty::Number => self.context.f64_type().into(),
             Ty::Boolean => self.context.bool_type().into(),
             Ty::String => self.ptr().into(),
-            Ty::Object(_) | Ty::Iface(_) | Ty::Array | Ty::Vector(_) | Ty::Function => {
-                self.ptr().into()
-            }
+            Ty::Object(_)
+            | Ty::Iface(_)
+            | Ty::Array
+            | Ty::Vector(_)
+            | Ty::Function
+            | Ty::RegExp => self.ptr().into(),
             Ty::Any => self.any_ty.into(),
             Ty::Void => unreachable!("void has no storage"),
         }
@@ -355,7 +364,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     | Ty::Iface(_)
                     | Ty::Array
                     | Ty::Vector(_)
-                    | Ty::Function => cx.ptr().const_null().into(),
+                    | Ty::Function
+                    | Ty::RegExp => cx.ptr().const_null().into(),
                     Ty::Any => cx.any_ty.const_zero().into(), // tag 0 = undefined
                     Ty::Void => unreachable!(),
                 };
@@ -412,7 +422,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             | Ty::Iface(_)
             | Ty::Array
             | Ty::Vector(_)
-            | Ty::Function => b
+            | Ty::Function
+            | Ty::RegExp => b
                 .build_return(Some(&self.cx.ptr().const_null()))
                 .expect("ret"),
             Ty::Any => b
@@ -895,7 +906,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     | Ty::Iface(_)
                     | Ty::Array
                     | Ty::Vector(_)
-                    | Ty::Function => 1,
+                    | Ty::Function
+                    | Ty::RegExp => 1,
                     Ty::Int | Ty::UInt | Ty::Number | Ty::Boolean | Ty::Void => continue,
                 };
                 let g = cx.classes[ci].statics[si];
@@ -990,6 +1002,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             Ty::Array => Val::Arr(cx.ptr().const_null()),
             Ty::Vector(_) => Val::VecP(cx.ptr().const_null()),
             Ty::Function => Val::Fun(cx.ptr().const_null()),
+            Ty::RegExp => Val::Reg(cx.ptr().const_null()),
             Ty::Any => {
                 let slot = self.entry_alloca(cx.any_ty, "undef");
                 self.cx
@@ -1124,6 +1137,68 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             ExprKind::UInt(v) => Val::UInt(cx.context.i32_type().const_int(u64::from(*v), false)),
             ExprKind::Number(v) => Val::Num(cx.context.f64_type().const_float(*v)),
             ExprKind::Bool(v) => Val::Bool(cx.context.bool_type().const_int(u64::from(*v), false)),
+            ExprKind::RegExpLit(pat, flags) => {
+                let pat_g = self
+                    .cx
+                    .builder
+                    .build_global_string_ptr(pat, "relit")
+                    .expect("global");
+                let fl_g = self
+                    .cx
+                    .builder
+                    .build_global_string_ptr(flags, "reflags")
+                    .expect("global");
+                let i32t = cx.context.i32_type();
+                let f = cx.runtime_fn(
+                    "vs_regexp_lit",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), i32t.into(), cx.ptr().into(), i32t.into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(
+                        f,
+                        &[
+                            pat_g.as_pointer_value().into(),
+                            i32t.const_int(pat.len() as u64, false).into(),
+                            fl_g.as_pointer_value().into(),
+                            i32t.const_int(flags.len() as u64, false).into(),
+                        ],
+                        "re",
+                    )
+                    .expect("call");
+                Val::Reg(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            ExprKind::NewRegExp(args) => {
+                let pat = self.str_arg(&args[0]);
+                let flags = match args.get(1) {
+                    Some(a) => self.str_arg(a),
+                    None => cx.ptr().const_null(),
+                };
+                let f = cx.runtime_fn(
+                    "vs_regexp_new",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[pat.into(), flags.into()], "re")
+                    .expect("call");
+                Val::Reg(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            ExprKind::CallRegex(op, operands) => self.call_regex(*op, operands),
             ExprKind::Str(s) => {
                 let global = self
                     .cx
@@ -1377,6 +1452,25 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                         .build_call(f, &[p.into(), rtti.into()], "as_c")
                         .expect("call");
                     return Val::Obj(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("value")
+                            .into_pointer_value(),
+                    );
+                }
+                if *target == Ty::RegExp {
+                    let p = self.as_any_ptr(v);
+                    let f = cx.runtime_fn(
+                        "vs_any_as_regexp",
+                        Some(cx.ptr().into()),
+                        &[cx.ptr().into()],
+                    );
+                    let call = self
+                        .cx
+                        .builder
+                        .build_call(f, &[p.into()], "as_re")
+                        .expect("call");
+                    return Val::Reg(
                         call.try_as_basic_value()
                             .basic()
                             .expect("value")
@@ -2099,10 +2193,17 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
     fn ref_tolerant_basic(&mut self, v: Val<'ctx>, target: Ty) -> BasicValueEnum<'ctx> {
         match (target, v) {
             (
-                Ty::Object(_) | Ty::Iface(_) | Ty::Array | Ty::Vector(_) | Ty::Function,
+                Ty::Object(_)
+                | Ty::Iface(_)
+                | Ty::Array
+                | Ty::Vector(_)
+                | Ty::Function
+                | Ty::RegExp,
                 Val::Str(p),
             ) => p.into(),
-            (Ty::String, Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p)) => p.into(),
+            (Ty::String, Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) | Val::Reg(p)) => {
+                p.into()
+            }
             _ => self.materialize(v),
         }
     }
@@ -2401,9 +2502,21 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
         // (null literals, upcasts share representation).
         if matches!(
             ty,
-            Ty::Object(_) | Ty::Iface(_) | Ty::String | Ty::Array | Ty::Vector(_) | Ty::Function
+            Ty::Object(_)
+                | Ty::Iface(_)
+                | Ty::String
+                | Ty::Array
+                | Ty::Vector(_)
+                | Ty::Function
+                | Ty::RegExp
         ) {
-            if let Val::Str(p) | Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) = v {
+            if let Val::Str(p)
+            | Val::Obj(p)
+            | Val::Arr(p)
+            | Val::VecP(p)
+            | Val::Fun(p)
+            | Val::Reg(p) = v
+            {
                 self.cx.builder.build_store(slot, p).expect("store");
                 return;
             }
@@ -2428,7 +2541,9 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
         match v {
             Val::Int(v) | Val::UInt(v) | Val::Bool(v) => v.into(),
             Val::Num(v) => v.into(),
-            Val::Str(p) | Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) => p.into(),
+            Val::Str(p) | Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) | Val::Reg(p) => {
+                p.into()
+            }
             Val::Any(p) => self
                 .cx
                 .builder
@@ -2449,6 +2564,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             Ty::Array => Val::Arr(v.into_pointer_value()),
             Ty::Vector(_) => Val::VecP(v.into_pointer_value()),
             Ty::Function => Val::Fun(v.into_pointer_value()),
+            Ty::RegExp => Val::Reg(v.into_pointer_value()),
             Ty::Any => {
                 let slot = self.entry_alloca(self.cx.any_ty, "anyv");
                 self.cx.builder.build_store(slot, v).expect("store");
@@ -2629,6 +2745,27 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                         .into_pointer_value(),
                 )
             }
+            Conv::AnyToRegExp => {
+                let Val::Any(p) = v else {
+                    unreachable!("AnyToRegExp operand")
+                };
+                let f = cx.runtime_fn(
+                    "vs_any_to_regexp",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "coerce_re")
+                    .expect("call");
+                Val::Reg(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
             Conv::AnyToIface(iface) => {
                 let Val::Any(p) = v else {
                     unreachable!("AnyToIface operand")
@@ -2729,6 +2866,14 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     &[cx.ptr().into()],
                 );
                 self.cx.builder.build_call(rf, &[p.into()], "vec2s")
+            }
+            Val::Reg(p) => {
+                let rf = cx.runtime_fn(
+                    "vs_regexp_display",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                self.cx.builder.build_call(rf, &[p.into()], "re2s")
             }
             Val::Fun(_) => {
                 let lit = self
@@ -2870,11 +3015,12 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .expect("cast");
                 (t, bits)
             }
-            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) => {
+            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) | Val::Reg(p) => {
                 let full_tag = match v {
                     Val::Obj(_) => tag::OBJECT,
                     Val::Arr(_) => tag::ARRAY,
                     Val::Fun(_) => tag::FUNCTION,
+                    Val::Reg(_) => tag::REGEXP,
                     _ => tag::VECTOR,
                 };
                 // null pointers box as the null value.
@@ -2943,7 +3089,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     "tob",
                 )
                 .expect("cmp"),
-            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) => self
+            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) | Val::Fun(p) | Val::Reg(p) => self
                 .cx
                 .builder
                 .build_is_not_null(p, "objtrue")
@@ -3978,6 +4124,24 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                         .into_pointer_value(),
                 )
             }
+            Ty::RegExp => {
+                let f = cx.runtime_fn(
+                    "vs_any_to_regexp",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "rev")
+                    .expect("call");
+                Val::Reg(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
             Ty::Function => {
                 let f = cx.runtime_fn(
                     "vs_any_coerce_function",
@@ -3997,6 +4161,190 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 )
             }
             Ty::Void => Val::Void,
+        }
+    }
+
+    /// RegExp/String regex operations (mir::RegexOp; runtime regexp.rs).
+    fn call_regex(&mut self, op: mir::RegexOp, operands: &[mir::Expr]) -> Val<'ctx> {
+        use mir::RegexOp as R;
+        let cx = self.cx;
+        let i32t = cx.context.i32_type();
+        let ptr_of = |slf: &mut Self, e: &mir::Expr| -> PointerValue<'ctx> {
+            match slf.expr(e) {
+                Val::Reg(p) | Val::Str(p) => p,
+                _ => unreachable!("regex operand shape"),
+            }
+        };
+        // Flag bits mirror runtime::regexp::flag.
+        let flag_mask = |op: R| match op {
+            R::Global => 1u64,
+            R::IgnoreCase => 2,
+            R::Multiline => 4,
+            _ => unreachable!(),
+        };
+        match op {
+            R::Test => {
+                let re = ptr_of(self, &operands[0]);
+                let s = self.str_arg(&operands[1]);
+                let f = cx.runtime_fn(
+                    "vs_regexp_test",
+                    Some(i32t.into()),
+                    &[cx.ptr().into(), cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[re.into(), s.into()], "retest")
+                    .expect("call");
+                let raw = call
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("value")
+                    .into_int_value();
+                Val::Bool(
+                    self.cx
+                        .builder
+                        .build_int_truncate(raw, cx.context.bool_type(), "b")
+                        .expect("trunc"),
+                )
+            }
+            R::Exec | R::Match => {
+                let (re, s) = if op == R::Exec {
+                    (ptr_of(self, &operands[0]), self.str_arg(&operands[1]))
+                } else {
+                    (ptr_of(self, &operands[1]), self.str_arg(&operands[0]))
+                };
+                let name = if op == R::Exec {
+                    "vs_regexp_exec"
+                } else {
+                    "vs_str_match_re"
+                };
+                let f = cx.runtime_fn(
+                    name,
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.ptr().into()],
+                );
+                let args: [inkwell::values::BasicMetadataValueEnum; 2] = if op == R::Exec {
+                    [re.into(), s.into()]
+                } else {
+                    [s.into(), re.into()]
+                };
+                let call = self.cx.builder.build_call(f, &args, "rearr").expect("call");
+                Val::Arr(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            R::Search => {
+                let s = self.str_arg(&operands[0]);
+                let re = ptr_of(self, &operands[1]);
+                let f = cx.runtime_fn(
+                    "vs_str_search_re",
+                    Some(i32t.into()),
+                    &[cx.ptr().into(), cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[s.into(), re.into()], "research")
+                    .expect("call");
+                Val::Int(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_int_value(),
+                )
+            }
+            R::Replace => {
+                let s = self.str_arg(&operands[0]);
+                let re = ptr_of(self, &operands[1]);
+                let repl = self.str_arg(&operands[2]);
+                let f = cx.runtime_fn(
+                    "vs_str_replace_re",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.ptr().into(), cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[s.into(), re.into(), repl.into()], "rerepl")
+                    .expect("call");
+                Val::Str(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            R::ToString | R::Source => {
+                let re = ptr_of(self, &operands[0]);
+                let name = if op == R::ToString {
+                    "vs_regexp_display"
+                } else {
+                    "vs_regexp_source"
+                };
+                let f = cx.runtime_fn(name, Some(cx.ptr().into()), &[cx.ptr().into()]);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[re.into()], "restr")
+                    .expect("call");
+                Val::Str(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            R::Global | R::IgnoreCase | R::Multiline => {
+                let re = ptr_of(self, &operands[0]);
+                let f = cx.runtime_fn(
+                    "vs_regexp_flag",
+                    Some(i32t.into()),
+                    &[cx.ptr().into(), i32t.into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(
+                        f,
+                        &[re.into(), i32t.const_int(flag_mask(op), false).into()],
+                        "reflag",
+                    )
+                    .expect("call");
+                let raw = call
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("value")
+                    .into_int_value();
+                Val::Bool(
+                    self.cx
+                        .builder
+                        .build_int_truncate(raw, cx.context.bool_type(), "b")
+                        .expect("trunc"),
+                )
+            }
+            R::LastIndex => {
+                let re = ptr_of(self, &operands[0]);
+                let f = cx.runtime_fn(
+                    "vs_regexp_last_index",
+                    Some(i32t.into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[re.into()], "relast")
+                    .expect("call");
+                Val::Int(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_int_value(),
+                )
+            }
         }
     }
 
@@ -5437,6 +5785,7 @@ fn ty_tag(ty: Ty) -> u32 {
         Ty::Number => tag::NUMBER,
         Ty::Boolean => tag::BOOLEAN,
         Ty::String => tag::STRING,
+        Ty::RegExp => tag::REGEXP,
         // Class/interface/sequence targets dispatch through dedicated
         // runtime calls, never through core tags.
         Ty::Any

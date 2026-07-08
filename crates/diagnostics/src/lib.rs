@@ -39,6 +39,10 @@ impl ErrorCode {
     pub const UNTERMINATED_COMMENT: ErrorCode = ErrorCode(103);
     /// Ill-formed numeric literal.
     pub const MALFORMED_NUMBER: ErrorCode = ErrorCode(104);
+    /// Regex literal not closed before line end / EOF.
+    pub const UNTERMINATED_REGEX: ErrorCode = ErrorCode(105);
+    /// Regex pattern or flags rejected by the engine.
+    pub const INVALID_REGEX: ErrorCode = ErrorCode(106);
 
     // E03xx — semantic errors.
     /// Name not found in any scope.

@@ -739,7 +739,7 @@ impl<'a> Checker<'a> {
             (Int | UInt | Number, Int) => Some(Some(Coercion::ToInt)),
             (Int | UInt | Number, UInt) => Some(Some(Coercion::ToUInt)),
             (Int | UInt | Number, Number) => Some(Some(Coercion::ToNumber)),
-            (Null, String | Function | Class(_) | Iface(_)) => Some(None),
+            (Null, String | Function | RegExp | Class(_) | Iface(_)) => Some(None),
             // Widening reference conversions are representation no-ops
             // (SPECS §4.5 nominal subtyping). Narrowing needs `as`/a cast
             // (ASC error 1118 territory).

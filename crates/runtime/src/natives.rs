@@ -17,7 +17,7 @@ pub fn stringify(v: VsAny, depth: usize) -> Option<String> {
         conv::type_error("JSON.stringify: structure too deep (cycle?)");
     }
     Some(match v.tag() {
-        Tag::Undefined | Tag::Function => return None,
+        Tag::Undefined | Tag::Function | Tag::RegExp => return None,
         Tag::Null => "null".to_string(),
         Tag::Boolean => if v.data != 0 { "true" } else { "false" }.to_string(),
         Tag::Int | Tag::UInt => conv::any_to_display(v),

@@ -213,6 +213,15 @@ impl Dumper {
             TExprKind::UInt(v) => self.line(format!("{header}UInt {v}")),
             TExprKind::Number(v) => self.line(format!("{header}Number {v}")),
             TExprKind::Str(v) => self.line(format!("{header}Str {v:?}")),
+            TExprKind::RegExp(pat, flags) => self.line(format!("{header}RegExp /{pat}/{flags}")),
+            TExprKind::NewRegExp(args) => {
+                self.line(format!("{header}NewRegExp"));
+                self.indented(|d| {
+                    for a in args {
+                        d.expr(a);
+                    }
+                });
+            }
             TExprKind::Bool(v) => self.line(format!("{header}Bool {v}")),
             TExprKind::Null => self.line(format!("{header}Null")),
             TExprKind::Undefined => self.line(format!("{header}Undefined")),

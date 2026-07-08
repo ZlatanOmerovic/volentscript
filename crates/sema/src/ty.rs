@@ -37,6 +37,8 @@ pub enum Ty {
     Any,
     /// The type of the `null` literal (bottom of reference types).
     Null,
+    /// ES3 §15.10 RegExp: reference type, engine-backed (SPECS §6).
+    RegExp,
     /// The AS3 `Function` type: callable, signature unchecked
     /// (AS3's `Function` class carries no signature).
     Function,
@@ -64,6 +66,7 @@ impl Ty {
                 | Ty::Iface(_)
                 | Ty::Array
                 | Ty::Vector(_)
+                | Ty::RegExp
         )
     }
 }
@@ -85,6 +88,7 @@ impl fmt::Display for Ty {
             Ty::Any => "*",
             Ty::Null => "null",
             Ty::Function => "Function",
+            Ty::RegExp => "RegExp",
             Ty::Error => "<error>",
         })
     }

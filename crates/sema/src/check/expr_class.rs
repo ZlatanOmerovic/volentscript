@@ -581,6 +581,36 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // `new RegExp(pattern, flags)` (§15.10.4; both args Strings, the
+        // second optional). Bad patterns throw SyntaxError at runtime.
+        if let ExprKind::Ident(name) = &callee.kind {
+            if name == "RegExp" && !self.is_shadowed(name) {
+                if args.is_empty() || args.len() > 2 {
+                    self.error(
+                        ErrorCode::WRONG_ARG_COUNT,
+                        "RegExp(pattern:String, flags:String = \"\") takes 1-2 arguments",
+                        span,
+                    );
+                    for a in args {
+                        self.expr(a);
+                    }
+                    return self.error_expr(span);
+                }
+                let checked: Vec<TExpr> = args
+                    .iter()
+                    .map(|a| {
+                        let e = self.expr(a);
+                        let sp = e.span;
+                        self.coerce(e, Ty::String, sp)
+                    })
+                    .collect();
+                return TExpr {
+                    ty: Ty::RegExp,
+                    span,
+                    kind: TExprKind::NewRegExp(checked),
+                };
+            }
+        }
         // `new Array(...)` — literal-equivalent.
         if let ExprKind::Ident(name) = &callee.kind {
             if name == "Array" && !self.is_shadowed(name) {

@@ -269,6 +269,11 @@ pub enum TExprKind {
     /// Runtime type test/cast against a core type, class, or interface.
     Is(Box<TExpr>, Ty),
     As(Box<TExpr>, Ty),
+    /// `/pattern/flags` literal — a fresh RegExp per evaluation (§7.8.5;
+    /// per-evaluation like avmplus, not the ES3 shared-object rule).
+    RegExp(String, String),
+    /// `new RegExp(pattern, flags)` (§15.10.4).
+    NewRegExp(Vec<TExpr>),
     /// `this` inside an instance member.
     This,
     /// `new C(args)` — allocate, init fields, run constructor.

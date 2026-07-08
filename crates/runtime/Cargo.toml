@@ -11,3 +11,6 @@ crate-type = ["staticlib", "rlib"]
 
 [lints]
 workspace = true
+
+[dependencies]
+fancy-regex = "0.18.0"

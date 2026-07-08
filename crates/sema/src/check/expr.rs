@@ -19,6 +19,7 @@ impl<'a> Checker<'a> {
             ExprKind::UInt(v) => mk(Ty::UInt, span, TExprKind::UInt(*v)),
             ExprKind::Number(v) => mk(Ty::Number, span, TExprKind::Number(*v)),
             ExprKind::Str(v) => mk(Ty::String, span, TExprKind::Str(v.clone())),
+            ExprKind::RegExp(pat, flags) => self.regex_literal(pat, flags, span),
             ExprKind::Bool(v) => mk(Ty::Boolean, span, TExprKind::Bool(*v)),
             ExprKind::Null => mk(Ty::Null, span, TExprKind::Null),
             ExprKind::This => self.this_expr(span),
@@ -1049,6 +1050,46 @@ impl<'a> Checker<'a> {
         } else {
             mk(Ty::Function, span, TExprKind::Closure(id))
         }
+    }
+
+    /// Regex literal: flags are validated here (§15.10.4.1 — repeated or
+    /// unknown flags are a SyntaxError); the pattern itself is compiled by
+    /// the engine when the literal is evaluated (a bad pattern throws a
+    /// catchable SyntaxError at runtime — documented deviation from the
+    /// compile-time rule).
+    pub(crate) fn regex_literal(&mut self, pat: &str, flags: &str, span: Span) -> TExpr {
+        let mut seen = [false; 5];
+        for c in flags.chars() {
+            let i = match c {
+                'g' => 0,
+                'i' => 1,
+                'm' => 2,
+                's' => 3,
+                'x' => 4,
+                other => {
+                    self.error(
+                        ErrorCode::INVALID_REGEX,
+                        format!("unknown regular expression flag `{other}`"),
+                        span,
+                    );
+                    return self.error_expr(span);
+                }
+            };
+            if seen[i] {
+                self.error(
+                    ErrorCode::INVALID_REGEX,
+                    format!("repeated regular expression flag `{c}`"),
+                    span,
+                );
+                return self.error_expr(span);
+            }
+            seen[i] = true;
+        }
+        mk(
+            Ty::RegExp,
+            span,
+            TExprKind::RegExp(pat.to_string(), flags.to_string()),
+        )
     }
 
     pub(crate) fn coerce_to_any(&mut self, e: TExpr) -> TExpr {

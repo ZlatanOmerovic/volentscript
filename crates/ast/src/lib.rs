@@ -379,6 +379,8 @@ pub enum ExprKind {
     UInt(u32),
     Number(f64),
     Str(String),
+    /// `/pattern/flags` regex literal (§7.8.5): (pattern source, flags).
+    RegExp(String, String),
     Bool(bool),
     Null,
     This,

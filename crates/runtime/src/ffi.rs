@@ -22,6 +22,11 @@ fn tag_from(raw: u32) -> Tag {
         4 => Tag::UInt,
         5 => Tag::Number,
         6 => Tag::String,
+        7 => Tag::Object,
+        8 => Tag::Array,
+        9 => Tag::Vector,
+        10 => Tag::Function,
+        11 => Tag::RegExp,
         _ => Tag::Undefined,
     }
 }
@@ -2205,4 +2210,227 @@ pub extern "C" fn vs_gc_collect() {
 #[unsafe(no_mangle)]
 pub extern "C" fn vs_gc_live_bytes() -> f64 {
     crate::gc::live_bytes() as f64
+}
+
+// --- RegExp (ES3 §15.10; SPECS §6) --------------------------------------------
+
+use crate::regexp::{self, VsRegExp};
+
+/// Live regexp or TypeError (null receiver).
+///
+/// # Safety
+/// `re` null or a live VsRegExp.
+unsafe fn re_ref<'x>(re: *const VsRegExp) -> &'x VsRegExp {
+    if re.is_null() {
+        exc::throw_error(exc::ErrorKind::Type, "null RegExp");
+    }
+    // SAFETY: caller contract.
+    unsafe { &*re }
+}
+
+/// Regex literal / constructor from codegen UTF-8 globals.
+///
+/// # Safety
+/// `pat`/`flags` point to `pat_len`/`flags_len` valid UTF-8 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_regexp_lit(
+    pat: *const u8,
+    pat_len: u32,
+    flags: *const u8,
+    flags_len: u32,
+) -> *const VsRegExp {
+    // SAFETY: caller contract (codegen emits the literal bytes).
+    let (pat, flags) = unsafe {
+        (
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(pat, pat_len as usize)),
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(flags, flags_len as usize)),
+        )
+    };
+    regexp::new(pat, flags)
+}
+
+/// `new RegExp(pattern, flags)` with runtime String operands.
+///
+/// # Safety
+/// Pointers null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_regexp_new(
+    pattern: *const VsString,
+    flags: *const VsString,
+) -> *const VsRegExp {
+    // SAFETY: caller contract. Null pattern/flags read as "" (§15.10.4.1
+    // undefined-pattern rule).
+    let pat = unsafe { string::deref(pattern) }
+        .map(|s| s.to_rust())
+        .unwrap_or_default();
+    let fl = unsafe { string::deref(flags) }
+        .map(|s| s.to_rust())
+        .unwrap_or_default();
+    regexp::new(&pat, &fl)
+}
+
+/// `re.test(s)`.
+///
+/// # Safety
+/// Pointers null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_regexp_test(re: *const VsRegExp, s: *const VsString) -> u32 {
+    // SAFETY: caller contract.
+    let re = unsafe { re_ref(re) };
+    match unsafe { string::deref(s) } {
+        Some(s) => u32::from(regexp::test(re, s)),
+        None => {
+            let s = VsString::from_rust("null");
+            // SAFETY: freshly allocated live string.
+            u32::from(regexp::test(re, unsafe { &*s }))
+        }
+    }
+}
+
+/// `re.exec(s)` → match Array or null.
+///
+/// # Safety
+/// Pointers null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_regexp_exec(
+    re: *const VsRegExp,
+    s: *const VsString,
+) -> *const seq::VsArray {
+    // SAFETY: caller contract.
+    let re = unsafe { re_ref(re) };
+    match unsafe { string::deref(s) } {
+        Some(s) => regexp::exec(re, s),
+        None => {
+            let s = VsString::from_rust("null");
+            // SAFETY: freshly allocated live string.
+            regexp::exec(re, unsafe { &*s })
+        }
+    }
+}
+
+/// `re.source`.
+///
+/// # Safety
+/// `re` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_regexp_source(re: *const VsRegExp) -> *const VsString {
+    // SAFETY: caller contract.
+    unsafe { re_ref(re) }.source
+}
+
+/// Flag accessor: returns non-zero when `mask` bits are set.
+///
+/// # Safety
+/// `re` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_regexp_flag(re: *const VsRegExp, mask: u32) -> u32 {
+    // SAFETY: caller contract.
+    u32::from(unsafe { re_ref(re) }.flags & mask as u8 != 0)
+}
+
+/// `re.lastIndex` (UTF-16 units).
+///
+/// # Safety
+/// `re` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_regexp_last_index(re: *const VsRegExp) -> i32 {
+    // SAFETY: caller contract.
+    unsafe { re_ref(re) }.last_index.get() as i32
+}
+
+/// `re.toString()` → "/source/flags".
+///
+/// # Safety
+/// `re` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_regexp_display(re: *const VsRegExp) -> *const VsString {
+    if re.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: caller contract.
+    VsString::from_rust(&regexp::to_display(unsafe { &*re }))
+}
+
+/// `s.match(re)` → Array or null.
+///
+/// # Safety
+/// Pointers null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_str_match_re(
+    s: *const VsString,
+    re: *const VsRegExp,
+) -> *const seq::VsArray {
+    // SAFETY: caller contract.
+    let re = unsafe { re_ref(re) };
+    match unsafe { string::deref(s) } {
+        Some(s) => regexp::string_match(s, re),
+        None => exc::throw_error(exc::ErrorKind::Type, "match() on null String"),
+    }
+}
+
+/// `s.search(re)` → first match index or -1.
+///
+/// # Safety
+/// Pointers null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_str_search_re(s: *const VsString, re: *const VsRegExp) -> i32 {
+    // SAFETY: caller contract.
+    let re = unsafe { re_ref(re) };
+    match unsafe { string::deref(s) } {
+        Some(s) => regexp::string_search(s, re),
+        None => exc::throw_error(exc::ErrorKind::Type, "search() on null String"),
+    }
+}
+
+/// `s.replace(re, repl)`.
+///
+/// # Safety
+/// Pointers null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_str_replace_re(
+    s: *const VsString,
+    re: *const VsRegExp,
+    repl: *const VsString,
+) -> *const VsString {
+    // SAFETY: caller contract.
+    let re = unsafe { re_ref(re) };
+    let (Some(s), Some(repl)) = (unsafe { string::deref(s) }, unsafe { string::deref(repl) })
+    else {
+        exc::throw_error(exc::ErrorKind::Type, "replace() on null String");
+    };
+    regexp::string_replace(s, re, repl)
+}
+
+/// AVM2-style coerce of a boxed value to RegExp (null/undefined pass as
+/// null, RegExp passes, anything else TypeError).
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_to_regexp(v: *const VsAny) -> *const VsRegExp {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    match v.tag() {
+        Tag::Null | Tag::Undefined => std::ptr::null(),
+        Tag::RegExp => v.data as *const VsRegExp,
+        _ => exc::throw_error(
+            exc::ErrorKind::Type,
+            &format!("cannot convert {} to RegExp", conv::any_to_display(v)),
+        ),
+    }
+}
+
+/// `v as RegExp` (null on mismatch, never throws — §AS3 `as`).
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_as_regexp(v: *const VsAny) -> *const VsRegExp {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    if v.tag() == Tag::RegExp {
+        v.data as *const VsRegExp
+    } else {
+        std::ptr::null()
+    }
 }

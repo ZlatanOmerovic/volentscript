@@ -1,0 +1,19 @@
+/ab+c/i
+ab+c | false true false
+true false
+true lastIndex=2
+exec 22 lastIndex=5
+match 1,22,333
+search 6
+replace 08/07/2026
+replace-g a+b+c
+replace-str a+b-c
+groups zed example
+backref true
+lazy _<b>
+is true false
+as true
+caught SyntaxError
+bounded true
+division 5
+regex done

@@ -43,6 +43,8 @@ pub enum Ty {
     /// Vector pointer; payload indexes [`Program::vectors`] (reified
     /// element type, SPECS §4.2/§4.3).
     Vector(u32),
+    /// RegExp pointer (ES3 §15.10; engine-backed runtime object).
+    RegExp,
 }
 
 /// Index of a function in [`Program::functions`].
@@ -240,6 +242,30 @@ pub enum Builtin {
     Unescape,
 }
 
+/// RegExp instance operations (ES3 §15.10.6) plus the String methods that
+/// take a RegExp (§15.5.4.10-12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum RegexOp {
+    /// `re.test(s)` → Boolean.
+    Test,
+    /// `re.exec(s)` → Array | null (advances lastIndex when global).
+    Exec,
+    /// `re.toString()` / display form `/source/flags`.
+    ToString,
+    Source,
+    Global,
+    IgnoreCase,
+    Multiline,
+    LastIndex,
+    /// `s.match(re)` → Array | null.
+    Match,
+    /// `s.search(re)` → int.
+    Search,
+    /// `s.replace(re, repl)` → String ($&/$1..$9 substitutions).
+    Replace,
+}
+
 /// String instance methods with runtime implementations (SPECS §6, P3 set;
 /// signatures per avmplus core/String.as).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,6 +361,8 @@ pub enum Conv {
     AnyToArray,
     /// Checked coercion to a Vector instantiation.
     AnyToVector(u32),
+    /// Checked coercion to RegExp.
+    AnyToRegExp,
 }
 
 /// Binary operators (operand types already made uniform by sema).
@@ -524,4 +552,11 @@ pub enum ExprKind {
     /// Native static call (Math/System/File/JSON/Date; emission strategy in
     /// the backend).
     CallNative(SemaNativeFn, Vec<Expr>),
+    /// Regex literal: (pattern source, flags) — compiles a fresh RegExp
+    /// per evaluation (throws SyntaxError on a bad pattern).
+    RegExpLit(String, String),
+    /// `new RegExp(pattern, flags)`; args are Strings.
+    NewRegExp(Vec<Expr>),
+    /// RegExp/String regex operation; operands per [`RegexOp`] docs.
+    CallRegex(RegexOp, Vec<Expr>),
 }

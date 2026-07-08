@@ -216,3 +216,10 @@ fn showcase() {
 fn gc_churn() {
     run_golden("gcchurn");
 }
+
+/// The Phase 10 milestone (SPECS §6): RegExp literals, methods, and the
+/// String regex integration.
+#[test]
+fn regex() {
+    run_golden("regex");
+}

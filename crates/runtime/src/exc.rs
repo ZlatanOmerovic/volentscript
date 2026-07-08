@@ -30,6 +30,8 @@ pub enum ErrorKind {
     Type = 1,
     Range = 2,
     Reference = 3,
+    Argument = 4,
+    Syntax = 5,
 }
 
 struct ErrorTable {
@@ -132,6 +134,8 @@ pub fn throw_error(kind: ErrorKind, message: &str) -> ! {
                 ErrorKind::Type => "TypeError",
                 ErrorKind::Range => "RangeError",
                 ErrorKind::Reference => "ReferenceError",
+                ErrorKind::Argument => "ArgumentError",
+                ErrorKind::Syntax => "SyntaxError",
             }); // name
             Some(VsAny::object(obj))
         }

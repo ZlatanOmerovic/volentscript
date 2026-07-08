@@ -65,11 +65,18 @@ impl Scanner<'_> {
                 '*' => self.op_maybe_assign(start, TokenKind::Star, TokenKind::StarAssign),
                 '%' => self.op_maybe_assign(start, TokenKind::Percent, TokenKind::PercentAssign),
                 '^' => self.op_maybe_assign(start, TokenKind::BitXor, TokenKind::BitXorAssign),
-                // Comments were consumed by skip_trivia, so a `/` here is
-                // division. Regex literals are P7: they need the parser-fed
-                // operand/operator distinction avmplus solves with its
-                // T_BreakSlash meta-token (eval-lex.cpp:298).
-                '/' => self.op_maybe_assign(start, TokenKind::Slash, TokenKind::SlashAssign),
+                // Comments were consumed by skip_trivia. A `/` is a regex
+                // literal when the previous significant token cannot end an
+                // expression, else division — the standard ES3 heuristic
+                // standing in for avmplus's parser-fed T_BreakSlash
+                // meta-token (eval-lex.cpp:298); ECMA-262 3rd ed. §7.8.5.
+                '/' => {
+                    if self.regex_allowed() {
+                        self.regex(start)
+                    } else {
+                        self.op_maybe_assign(start, TokenKind::Slash, TokenKind::SlashAssign)
+                    }
+                }
                 '&' => self.amp(start),
                 '|' => self.pipe(start),
                 '<' => self.left_angle(start),
@@ -570,6 +577,84 @@ impl Scanner<'_> {
             span,
             newline_before: std::mem::take(&mut self.newline_before),
         });
+    }
+
+    /// Whether a `/` at the current position starts a regex literal:
+    /// true when the previous significant token cannot end an expression
+    /// (ES3 lexical-grammar disambiguation, ECMA-262 3rd ed. §7.8.5).
+    fn regex_allowed(&self) -> bool {
+        match self.tokens.last().map(|t| &t.kind) {
+            None => true,
+            Some(k) => !matches!(
+                k,
+                TokenKind::Int(_)
+                    | TokenKind::UInt(_)
+                    | TokenKind::Number(_)
+                    | TokenKind::Str(_)
+                    | TokenKind::Ident(_)
+                    | TokenKind::RegExp(..)
+                    | TokenKind::RParen
+                    | TokenKind::RBracket
+                    | TokenKind::This
+                    | TokenKind::Super
+                    | TokenKind::True
+                    | TokenKind::False
+                    | TokenKind::Null
+                    | TokenKind::PlusPlus
+                    | TokenKind::MinusMinus
+            ),
+        }
+    }
+
+    /// Scans `/pattern/flags` past the opening `/`. A `/` inside a
+    /// character class does not terminate; `\` escapes anything; a line
+    /// terminator or EOF before the closing `/` is an error (§7.8.5).
+    fn regex(&mut self, start: usize) {
+        self.pos += 1; // opening '/'
+        let body_start = self.pos;
+        let mut in_class = false;
+        loop {
+            match self.peek_char() {
+                None | Some('\n') | Some('\r') => {
+                    self.error(
+                        ErrorCode::UNTERMINATED_REGEX,
+                        "unterminated regular expression literal",
+                        start,
+                    );
+                    return;
+                }
+                Some('\\') => {
+                    self.pos += 1;
+                    if let Some(c) = self.peek_char() {
+                        if c != '\n' && c != '\r' {
+                            self.bump(c);
+                        }
+                    }
+                }
+                Some('[') => {
+                    in_class = true;
+                    self.pos += 1;
+                }
+                Some(']') => {
+                    in_class = false;
+                    self.pos += 1;
+                }
+                Some('/') if !in_class => break,
+                Some(c) => self.bump(c),
+            }
+        }
+        let pattern = self.text[body_start..self.pos].to_string();
+        self.pos += 1; // closing '/'
+        let flags_start = self.pos;
+        while let Some(c) = self.peek_char() {
+            if c.is_ascii_alphabetic() {
+                self.bump(c);
+            } else {
+                break;
+            }
+        }
+        let flags = self.text[flags_start..self.pos].to_string();
+        self.push(TokenKind::RegExp(pattern, flags), start);
     }
 
     fn error(&mut self, code: ErrorCode, message: impl Into<String>, start: usize) {

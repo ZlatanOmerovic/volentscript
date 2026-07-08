@@ -45,6 +45,9 @@ pub enum Kind {
     Vector,
     /// An expando `PropMap`; values traced precisely, map dropped.
     PropMap,
+    /// A `VsRegExp`; its source string is traced, the compiled program
+    /// dropped on sweep.
+    RegExp,
 }
 
 struct Block {
@@ -281,6 +284,13 @@ pub fn collect() {
                         mark_any(&h, v, &mut work);
                     }
                 }
+                Kind::RegExp => {
+                    // SAFETY: block layout fixed by regexp::new.
+                    let r = unsafe { &*(addr as *const crate::regexp::VsRegExp) };
+                    if let Some(start) = h.find_block(r.source as usize) {
+                        work.push(start);
+                    }
+                }
             }
         }
 
@@ -404,6 +414,9 @@ fn drop_side_storage(addr: usize, kind: Kind) {
             }
             Kind::PropMap => {
                 std::ptr::drop_in_place(addr as *mut crate::object::PropMap);
+            }
+            Kind::RegExp => {
+                std::ptr::drop_in_place(addr as *mut crate::regexp::VsRegExp);
             }
         }
     }

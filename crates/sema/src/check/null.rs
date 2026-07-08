@@ -48,7 +48,6 @@ impl<'a> Checker<'a> {
             | TExprKind::Array(_)
             | TExprKind::CallArr(..)
             | TExprKind::CallVec(..)
-            | TExprKind::CallMethod(..)
             // Operators produce values, never null (concat, is, etc.).
             | TExprKind::Binary(..)
             | TExprKind::Unary(..)
@@ -60,6 +59,12 @@ impl<'a> Checker<'a> {
             | TExprKind::BuiltinRef(_)
             | TExprKind::Closure(_)
             | TExprKind::BoundMethod(..) => false,
+            // exec/match return null on no-match (§15.10.6.2, §15.5.4.10).
+            TExprKind::CallMethod(recv, name, _) => {
+                (recv.ty == Ty::RegExp && name == "exec")
+                    || (recv.ty == Ty::String && name == "match")
+            }
+            TExprKind::RegExp(..) | TExprKind::NewRegExp(_) => false,
             TExprKind::LocalGet(id) => {
                 let fn_index = *self.fn_stack.last().expect("fn");
                 let local = &self.functions[fn_index].locals[id.0 as usize];

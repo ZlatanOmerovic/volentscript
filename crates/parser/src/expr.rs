@@ -337,6 +337,11 @@ impl Parser {
                 self.advance();
                 ExprKind::Str(v)
             }
+            RegExp(ref pat, ref flags) => {
+                let (pat, flags) = (pat.clone(), flags.clone());
+                self.advance();
+                ExprKind::RegExp(pat, flags)
+            }
             True => {
                 self.advance();
                 ExprKind::Bool(true)

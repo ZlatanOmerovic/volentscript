@@ -34,6 +34,9 @@ pub enum TokenKind {
     Number(f64),
     Str(String),
     Ident(String),
+    /// Regex literal `/pattern/flags` (ECMA-262 3rd ed. §7.8.5); payload
+    /// is (pattern source, flags).
+    RegExp(String, String),
 
     // Keywords.
     As,
@@ -224,6 +227,7 @@ impl TokenKind {
         match self {
             Int(_) | UInt(_) | Number(_) => "number literal".to_string(),
             Str(_) => "string literal".to_string(),
+            RegExp(..) => "regular expression literal".to_string(),
             Ident(name) => format!("identifier `{name}`"),
             Eof => "end of file".to_string(),
             other => format!("`{}`", other.text()),
@@ -233,6 +237,7 @@ impl TokenKind {
     fn text(&self) -> &'static str {
         use TokenKind::*;
         match self {
+            RegExp(..) => "/regex/",
             As => "as",
             Break => "break",
             Case => "case",

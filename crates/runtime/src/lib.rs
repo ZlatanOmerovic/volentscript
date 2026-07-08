@@ -23,6 +23,7 @@ pub(crate) mod ffi;
 mod gc;
 mod natives;
 mod object;
+mod regexp;
 mod seq;
 mod string;
 

@@ -72,6 +72,7 @@ pub fn any_truthy(v: VsAny) -> bool {
             let f = f64::from_bits(v.data);
             f != 0.0 && !f.is_nan()
         }
+        Tag::RegExp => v.data != 0,
         Tag::String => {
             // SAFETY: String-tagged payloads always hold a live VsString.
             unsafe { crate::string::deref(v.as_string_ptr()) }.is_some_and(|s| s.len > 0)
@@ -136,6 +137,10 @@ pub fn any_to_display(v: VsAny) -> String {
             crate::seq::join(&vec.data.borrow(), ",")
         }
         Tag::Function => "function Function() {}".to_string(),
+        Tag::RegExp => {
+            // SAFETY: RegExp-tagged payloads hold live VsRegExps.
+            crate::regexp::to_display(unsafe { &*(v.data as *const crate::regexp::VsRegExp) })
+        }
     }
 }
 
@@ -148,7 +153,7 @@ pub fn any_typeof(v: VsAny) -> &'static str {
         Tag::Boolean => "boolean",
         Tag::Int | Tag::UInt | Tag::Number => "number",
         Tag::String => "string",
-        Tag::Object | Tag::Array | Tag::Vector => "object",
+        Tag::Object | Tag::Array | Tag::Vector | Tag::RegExp => "object",
         Tag::Function => "function",
     }
 }
@@ -168,6 +173,7 @@ pub fn any_is(v: VsAny, target: Tag) -> bool {
         Tag::Boolean => v.tag() == Tag::Boolean,
         Tag::String => v.tag() == Tag::String,
         Tag::Function => v.tag() == Tag::Function,
+        Tag::RegExp => v.tag() == Tag::RegExp,
         Tag::Null | Tag::Undefined | Tag::Object | Tag::Array | Tag::Vector => false,
     }
 }

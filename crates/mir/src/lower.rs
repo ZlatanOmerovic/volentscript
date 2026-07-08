@@ -217,6 +217,7 @@ impl Lowerer<'_> {
             sema::Ty::Array => Ty::Array,
             sema::Ty::Vector(inst) => Ty::Vector(inst),
             sema::Ty::Function => Ty::Function,
+            sema::Ty::RegExp => Ty::RegExp,
             sema::Ty::Error => {
                 // Sema fails the build before lowering on real errors.
                 unreachable!("error type survived sema")
@@ -560,6 +561,8 @@ impl Lowerer<'_> {
             E::UInt(v) => ExprKind::UInt(*v),
             E::Number(v) => ExprKind::Number(*v),
             E::Str(v) => ExprKind::Str(v.clone()),
+            E::RegExp(pat, flags) => ExprKind::RegExpLit(pat.clone(), flags.clone()),
+            E::NewRegExp(args) => ExprKind::NewRegExp(args.iter().map(|a| self.expr(a)).collect()),
             E::Bool(v) => ExprKind::Bool(*v),
             E::Null => ExprKind::Null,
             E::Undefined => ExprKind::Undefined,
@@ -585,6 +588,16 @@ impl Lowerer<'_> {
             E::Member(receiver, name) => {
                 if receiver.ty == sema::Ty::String && name == "length" {
                     ExprKind::StrLen(Box::new(self.expr(receiver)))
+                } else if receiver.ty == sema::Ty::RegExp {
+                    let op = match name.as_str() {
+                        "source" => RegexOp::Source,
+                        "global" => RegexOp::Global,
+                        "ignoreCase" => RegexOp::IgnoreCase,
+                        "multiline" => RegexOp::Multiline,
+                        "lastIndex" => RegexOp::LastIndex,
+                        other => unreachable!("sema admitted RegExp.{other}"),
+                    };
+                    ExprKind::CallRegex(op, vec![self.expr(receiver)])
                 } else {
                     // Boxed receiver: runtime property lookup (SPECS §3.2).
                     ExprKind::PropGet(Box::new(self.expr(receiver)), name.clone())
@@ -696,6 +709,7 @@ impl Lowerer<'_> {
                         sema::Ty::Iface(i) => Conv::AnyToIface(i.0),
                         sema::Ty::Array => Conv::AnyToArray,
                         sema::Ty::Vector(i) => Conv::AnyToVector(i),
+                        sema::Ty::RegExp => Conv::AnyToRegExp,
                         _ => {
                             return self.gated_expr(
                                 span,
@@ -1235,7 +1249,56 @@ impl Lowerer<'_> {
                         fill_num(&mut lowered, 1, 0x7FFFFFFF as f64);
                         StrMethod::Substr
                     }
-                    "replace" => StrMethod::Replace,
+                    // §15.5.4.11: regex pattern dispatches to the engine;
+                    // a string pattern replaces the first occurrence.
+                    "replace" => {
+                        // Sema coerced the `*` pattern param; look through
+                        // the box to see the original type.
+                        fn is_regex(a: &sema::TExpr) -> bool {
+                            match &a.kind {
+                                sema::TExprKind::Coerce(_, inner) => is_regex(inner),
+                                _ => a.ty == sema::Ty::RegExp,
+                            }
+                        }
+                        if args.first().is_some_and(is_regex) {
+                            let recv = self.expr(receiver);
+                            // Drop the ToAny box: the engine wants the
+                            // RegExp pointer itself.
+                            let pat = match lowered.remove(0) {
+                                Expr {
+                                    kind: ExprKind::Conv(Conv::ToAny, inner),
+                                    ..
+                                } => *inner,
+                                other => other,
+                            };
+                            return Expr {
+                                ty,
+                                span,
+                                kind: ExprKind::CallRegex(
+                                    RegexOp::Replace,
+                                    vec![recv, pat, lowered.remove(0)],
+                                ),
+                            };
+                        }
+                        // Sema typed the pattern `*` to admit RegExp;
+                        // unbox the string case.
+                        let pat = lowered.remove(0);
+                        lowered.insert(0, coerce_any_to(pat, Ty::String, span));
+                        StrMethod::Replace
+                    }
+                    "match" | "search" => {
+                        let op = if name == "match" {
+                            RegexOp::Match
+                        } else {
+                            RegexOp::Search
+                        };
+                        let recv = self.expr(receiver);
+                        return Expr {
+                            ty,
+                            span,
+                            kind: ExprKind::CallRegex(op, vec![recv, lowered.remove(0)]),
+                        };
+                    }
                     "toLowerCase" => StrMethod::ToLowerCase,
                     "toUpperCase" => StrMethod::ToUpperCase,
                     "toString" => StrMethod::ToString,
@@ -1270,6 +1333,21 @@ impl Lowerer<'_> {
                     ty,
                     span,
                     kind: ExprKind::CallStrMethod(method, Box::new(self.expr(receiver)), lowered),
+                }
+            }
+            sema::Ty::RegExp => {
+                let op = match name {
+                    "test" => RegexOp::Test,
+                    "exec" => RegexOp::Exec,
+                    "toString" => RegexOp::ToString,
+                    other => unreachable!("sema admitted RegExp.{other}()"),
+                };
+                let mut operands = vec![self.expr(receiver)];
+                operands.append(&mut lowered);
+                Expr {
+                    ty,
+                    span,
+                    kind: ExprKind::CallRegex(op, operands),
                 }
             }
             sema::Ty::Int | sema::Ty::UInt | sema::Ty::Number | sema::Ty::Boolean => {
@@ -1356,6 +1434,7 @@ fn coerce_any_to(e: Expr, ty: Ty, span: Span) -> Expr {
         Ty::Iface(i) => Conv::AnyToIface(i),
         Ty::Array => Conv::AnyToArray,
         Ty::Vector(i) => Conv::AnyToVector(i),
+        Ty::RegExp => Conv::AnyToRegExp,
         Ty::Function | Ty::Void => return e,
     };
     Expr {
