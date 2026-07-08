@@ -9,7 +9,7 @@ var label:String = "n = " + count; // concat coerces the int side
 var anything:* = label;            // T -> *
 var narrowed:int = anything;       // * -> int (runtime-checked)
 var flag:Boolean = anything is int;
-var maybe:String = anything as String;
+var maybe:String? = anything as String;
 const LIMIT:int = 100;
 
 function scale(value:Number, factor:Number = 2):Number {

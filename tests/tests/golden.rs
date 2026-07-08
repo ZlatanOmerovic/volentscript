@@ -96,3 +96,10 @@ fn dynamic_any() {
 fn oop_polymorphism() {
     run_golden("oop");
 }
+
+/// The Phase 5 milestone: generic collections — monomorphized reified
+/// Box.<T>, Vector.<T>, Array, split, rest params.
+#[test]
+fn generic_collections() {
+    run_golden("generics");
+}

@@ -232,6 +232,9 @@ impl Dumper {
 
     fn class(&mut self, c: &ClassDecl) {
         let mut header = format!("Class {}{}", Self::attrs_text(&c.attrs), c.name);
+        if !c.type_params.is_empty() {
+            let _ = write!(header, ".<{}>", c.type_params.join(","));
+        }
         if let Some(e) = &c.extends {
             let _ = write!(header, " extends {}", type_text(e));
         }
@@ -470,6 +473,21 @@ impl Dumper {
                 self.indented(|d| {
                     d.expr(l);
                     d.expr(r);
+                });
+            }
+            ExprKind::ApplyType(base, args) => {
+                self.line(format!(
+                    "ApplyType .<{}>",
+                    args.iter().map(type_text).collect::<Vec<_>>().join(",")
+                ));
+                self.indented(|d| d.expr(base));
+            }
+            ExprKind::VectorLit { elem, elements } => {
+                self.line(format!("VectorLit <{}>", type_text(elem)));
+                self.indented(|d| {
+                    for e in elements {
+                        d.expr(e);
+                    }
                 });
             }
         }

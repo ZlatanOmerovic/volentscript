@@ -33,6 +33,8 @@ mod tag {
     pub const NUMBER: u32 = 5;
     pub const STRING: u32 = 6;
     pub const OBJECT: u32 = 7;
+    pub const ARRAY: u32 = 8;
+    pub const VECTOR: u32 = 9;
 }
 
 /// LLVM implementor of [`Backend`].
@@ -155,6 +157,10 @@ enum Val<'ctx> {
     Str(PointerValue<'ctx>),
     /// Class instance pointer (possibly null).
     Obj(PointerValue<'ctx>),
+    /// Array pointer (possibly null).
+    Arr(PointerValue<'ctx>),
+    /// Vector pointer (possibly null).
+    VecP(PointerValue<'ctx>),
     /// Pointer to an entry-block alloca holding a `{i32, i64}` box.
     Any(PointerValue<'ctx>),
     Void,
@@ -171,7 +177,7 @@ impl<'ctx> Cx<'ctx> {
             Ty::Number => self.context.f64_type().into(),
             Ty::Boolean => self.context.bool_type().into(),
             Ty::String => self.ptr().into(),
-            Ty::Object(_) | Ty::Iface(_) => self.ptr().into(),
+            Ty::Object(_) | Ty::Iface(_) | Ty::Array | Ty::Vector(_) => self.ptr().into(),
             Ty::Any => self.any_ty.into(),
             Ty::Void => unreachable!("void has no storage"),
         }
@@ -275,7 +281,9 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     Ty::Int | Ty::UInt => cx.context.i32_type().const_zero().into(),
                     Ty::Number => cx.context.f64_type().const_float(f64::NAN).into(),
                     Ty::Boolean => cx.context.bool_type().const_zero().into(),
-                    Ty::String | Ty::Object(_) | Ty::Iface(_) => cx.ptr().const_null().into(),
+                    Ty::String | Ty::Object(_) | Ty::Iface(_) | Ty::Array | Ty::Vector(_) => {
+                        cx.ptr().const_null().into()
+                    }
                     Ty::Any => cx.any_ty.const_zero().into(), // tag 0 = undefined
                     Ty::Void => unreachable!(),
                 };
@@ -315,7 +323,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             Ty::Boolean => b
                 .build_return(Some(&self.cx.context.bool_type().const_zero()))
                 .expect("ret"),
-            Ty::String | Ty::Object(_) | Ty::Iface(_) => b
+            Ty::String | Ty::Object(_) | Ty::Iface(_) | Ty::Array | Ty::Vector(_) => b
                 .build_return(Some(&self.cx.ptr().const_null()))
                 .expect("ret"),
             Ty::Any => b
@@ -709,6 +717,49 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             ExprKind::Logical { is_and, lhs, rhs } => self.logical(*is_and, lhs, rhs, e.ty),
             ExprKind::Conditional(c, t, f) => self.conditional(c, t, f, e.ty),
             ExprKind::Is(v, target) => {
+                if *target == Ty::Array {
+                    let p = self.as_any_ptr(v);
+                    let f = cx.runtime_fn(
+                        "vs_any_is_array",
+                        Some(cx.context.i32_type().into()),
+                        &[cx.ptr().into()],
+                    );
+                    let call = self
+                        .cx
+                        .builder
+                        .build_call(f, &[p.into()], "is_a")
+                        .expect("call");
+                    return Val::Bool(
+                        self.nonzero(
+                            call.try_as_basic_value()
+                                .basic()
+                                .expect("value")
+                                .into_int_value(),
+                        ),
+                    );
+                }
+                if let Ty::Vector(inst) = *target {
+                    let p = self.as_any_ptr(v);
+                    let f = cx.runtime_fn(
+                        "vs_any_is_vector",
+                        Some(cx.context.i32_type().into()),
+                        &[cx.ptr().into(), cx.context.i32_type().into()],
+                    );
+                    let id = cx.context.i32_type().const_int(u64::from(inst), false);
+                    let call = self
+                        .cx
+                        .builder
+                        .build_call(f, &[p.into(), id.into()], "is_v")
+                        .expect("call");
+                    return Val::Bool(
+                        self.nonzero(
+                            call.try_as_basic_value()
+                                .basic()
+                                .expect("value")
+                                .into_int_value(),
+                        ),
+                    );
+                }
                 if let Ty::Object(class) = *target {
                     let p = self.as_any_ptr(v);
                     let f = cx.runtime_fn(
@@ -778,6 +829,42 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 )
             }
             ExprKind::As(v, target) => {
+                if *target == Ty::Array {
+                    let p = self.as_any_ptr(v);
+                    let f =
+                        cx.runtime_fn("vs_any_as_array", Some(cx.ptr().into()), &[cx.ptr().into()]);
+                    let call = self
+                        .cx
+                        .builder
+                        .build_call(f, &[p.into()], "as_a")
+                        .expect("call");
+                    return Val::Arr(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("value")
+                            .into_pointer_value(),
+                    );
+                }
+                if let Ty::Vector(inst) = *target {
+                    let p = self.as_any_ptr(v);
+                    let f = cx.runtime_fn(
+                        "vs_any_as_vector",
+                        Some(cx.ptr().into()),
+                        &[cx.ptr().into(), cx.context.i32_type().into()],
+                    );
+                    let id = cx.context.i32_type().const_int(u64::from(inst), false);
+                    let call = self
+                        .cx
+                        .builder
+                        .build_call(f, &[p.into(), id.into()], "as_v")
+                        .expect("call");
+                    return Val::VecP(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("value")
+                            .into_pointer_value(),
+                    );
+                }
                 if let Ty::Object(class) = *target {
                     let p = self.as_any_ptr(v);
                     let f = cx.runtime_fn(
@@ -862,6 +949,148 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             ExprKind::Comma(l, r) => {
                 self.expr(l);
                 self.expr(r)
+            }
+            ExprKind::ArrayLit(elements) => {
+                let staged: Vec<Option<&mir::Expr>> = elements.iter().map(|e| e.as_ref()).collect();
+                let arr_ptr = self.stage_any_array_opt(&staged);
+                let f = cx.runtime_fn(
+                    "vs_array_new",
+                    Some(cx.ptr().into()),
+                    &[cx.context.i32_type().into(), cx.ptr().into()],
+                );
+                let n = cx
+                    .context
+                    .i32_type()
+                    .const_int(elements.len() as u64, false);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[n.into(), arr_ptr.into()], "arr")
+                    .expect("call");
+                Val::Arr(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            ExprKind::VectorLit(inst, elements) => {
+                let staged: Vec<Option<&mir::Expr>> = elements.iter().map(Some).collect();
+                let buf = self.stage_any_array_opt(&staged);
+                let f = cx.runtime_fn(
+                    "vs_vector_new",
+                    Some(cx.ptr().into()),
+                    &[
+                        cx.context.i32_type().into(),
+                        cx.context.i32_type().into(),
+                        cx.ptr().into(),
+                    ],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(
+                        f,
+                        &[
+                            cx.context
+                                .i32_type()
+                                .const_int(u64::from(*inst), false)
+                                .into(),
+                            cx.context
+                                .i32_type()
+                                .const_int(elements.len() as u64, false)
+                                .into(),
+                            buf.into(),
+                        ],
+                        "vec",
+                    )
+                    .expect("call");
+                Val::VecP(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            ExprKind::CallArr(m, recv, args) => self.call_arr(*m, recv, args),
+            ExprKind::CallVec(m, recv, args) => self.call_vec(*m, recv, args, e.ty),
+            ExprKind::SeqLen(recv) => {
+                let (p, is_vec) = self.seq_ptr(recv);
+                let name = if is_vec { "vs_vec_len" } else { "vs_arr_len" };
+                let f = cx.runtime_fn(name, Some(cx.context.i32_type().into()), &[cx.ptr().into()]);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "len")
+                    .expect("call");
+                Val::UInt(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_int_value(),
+                )
+            }
+            ExprKind::SeqSetLen(recv, v) => {
+                let (p, is_vec) = self.seq_ptr(recv);
+                let n = match self.expr(v) {
+                    Val::UInt(i) | Val::Int(i) => i,
+                    _ => unreachable!("length operand"),
+                };
+                let name = if is_vec {
+                    "vs_vec_set_len"
+                } else {
+                    "vs_arr_set_len"
+                };
+                let f = cx.runtime_fn(name, None, &[cx.ptr().into(), cx.context.i32_type().into()]);
+                self.cx
+                    .builder
+                    .build_call(f, &[p.into(), n.into()], "")
+                    .expect("call");
+                Val::UInt(n)
+            }
+            ExprKind::SeqGet(recv, idx) => {
+                let (p, is_vec) = self.seq_ptr(recv);
+                let i = self.num_arg(idx);
+                let out = self.entry_alloca(cx.any_ty, "seqget");
+                let name = if is_vec { "vs_vec_get" } else { "vs_arr_get" };
+                let f = cx.runtime_fn(
+                    name,
+                    None,
+                    &[
+                        cx.ptr().into(),
+                        cx.context.f64_type().into(),
+                        cx.ptr().into(),
+                    ],
+                );
+                self.cx
+                    .builder
+                    .build_call(f, &[p.into(), i.into(), out.into()], "")
+                    .expect("call");
+                self.unbox_any_ptr(out, e.ty)
+            }
+            ExprKind::SeqSet(recv, idx, v) => {
+                let (p, is_vec) = self.seq_ptr(recv);
+                let i = self.num_arg(idx);
+                let value = self.expr(v);
+                let boxed = match value {
+                    Val::Any(p) => p,
+                    other => self.box_value(other),
+                };
+                let name = if is_vec { "vs_vec_set" } else { "vs_arr_set" };
+                let f = cx.runtime_fn(
+                    name,
+                    None,
+                    &[
+                        cx.ptr().into(),
+                        cx.context.f64_type().into(),
+                        cx.ptr().into(),
+                    ],
+                );
+                self.cx
+                    .builder
+                    .build_call(f, &[p.into(), i.into(), boxed.into()], "")
+                    .expect("call");
+                value
             }
             ExprKind::StaticIncDec {
                 class,
@@ -1002,8 +1231,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
     /// interchange freely as pointers (null literals, upcasts).
     fn ref_tolerant_basic(&mut self, v: Val<'ctx>, target: Ty) -> BasicValueEnum<'ctx> {
         match (target, v) {
-            (Ty::Object(_) | Ty::Iface(_), Val::Str(p)) => p.into(),
-            (Ty::String, Val::Obj(p)) => p.into(),
+            (Ty::Object(_) | Ty::Iface(_) | Ty::Array | Ty::Vector(_), Val::Str(p)) => p.into(),
+            (Ty::String, Val::Obj(p) | Val::Arr(p) | Val::VecP(p)) => p.into(),
             _ => self.materialize(v),
         }
     }
@@ -1264,8 +1493,11 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
         let (slot, ty) = self.locals[id.0 as usize];
         // Reference kinds (String/Object/Iface) interchange as pointers
         // (null literals, upcasts share representation).
-        if matches!(ty, Ty::Object(_) | Ty::Iface(_) | Ty::String) {
-            if let Val::Str(p) | Val::Obj(p) = v {
+        if matches!(
+            ty,
+            Ty::Object(_) | Ty::Iface(_) | Ty::String | Ty::Array | Ty::Vector(_)
+        ) {
+            if let Val::Str(p) | Val::Obj(p) | Val::Arr(p) | Val::VecP(p) = v {
                 self.cx.builder.build_store(slot, p).expect("store");
                 return;
             }
@@ -1290,7 +1522,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
         match v {
             Val::Int(v) | Val::UInt(v) | Val::Bool(v) => v.into(),
             Val::Num(v) => v.into(),
-            Val::Str(p) | Val::Obj(p) => p.into(),
+            Val::Str(p) | Val::Obj(p) | Val::Arr(p) | Val::VecP(p) => p.into(),
             Val::Any(p) => self
                 .cx
                 .builder
@@ -1308,6 +1540,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             Ty::Boolean => Val::Bool(v.into_int_value()),
             Ty::String => Val::Str(v.into_pointer_value()),
             Ty::Object(_) | Ty::Iface(_) => Val::Obj(v.into_pointer_value()),
+            Ty::Array => Val::Arr(v.into_pointer_value()),
+            Ty::Vector(_) => Val::VecP(v.into_pointer_value()),
             Ty::Any => {
                 let slot = self.entry_alloca(self.cx.any_ty, "anyv");
                 self.cx.builder.build_store(slot, v).expect("store");
@@ -1445,6 +1679,49 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                         .into_pointer_value(),
                 )
             }
+            Conv::AnyToArray => {
+                let Val::Any(p) = v else {
+                    unreachable!("AnyToArray operand")
+                };
+                let f = cx.runtime_fn(
+                    "vs_any_coerce_array",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "coerce_arr")
+                    .expect("call");
+                Val::Arr(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            Conv::AnyToVector(inst) => {
+                let Val::Any(p) = v else {
+                    unreachable!("AnyToVector operand")
+                };
+                let f = cx.runtime_fn(
+                    "vs_any_coerce_vector",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.context.i32_type().into()],
+                );
+                let id = cx.context.i32_type().const_int(u64::from(inst), false);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), id.into()], "coerce_vec")
+                    .expect("call");
+                Val::VecP(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
             Conv::AnyToIface(iface) => {
                 let Val::Any(p) = v else {
                     unreachable!("AnyToIface operand")
@@ -1529,6 +1806,22 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     &[cx.ptr().into()],
                 );
                 self.cx.builder.build_call(rf, &[p.into()], "o2s")
+            }
+            Val::Arr(p) => {
+                let rf = cx.runtime_fn(
+                    "vs_arr_to_string",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                self.cx.builder.build_call(rf, &[p.into()], "arr2s")
+            }
+            Val::VecP(p) => {
+                let rf = cx.runtime_fn(
+                    "vs_vec_to_string",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                self.cx.builder.build_call(rf, &[p.into()], "vec2s")
             }
             Val::Num(f) => {
                 let rf = cx.runtime_fn(
@@ -1654,8 +1947,13 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .expect("cast");
                 (t, bits)
             }
-            Val::Obj(p) => {
-                // null object boxes as the null value.
+            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) => {
+                let full_tag = match v {
+                    Val::Obj(_) => tag::OBJECT,
+                    Val::Arr(_) => tag::ARRAY,
+                    _ => tag::VECTOR,
+                };
+                // null pointers box as the null value.
                 let is_null = self.cx.builder.build_is_null(p, "isnull").expect("isnull");
                 let t = self
                     .cx
@@ -1663,7 +1961,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     .build_select(
                         is_null,
                         i32t.const_int(u64::from(tag::NULL), false),
-                        i32t.const_int(u64::from(tag::OBJECT), false),
+                        i32t.const_int(u64::from(full_tag), false),
                         "tag",
                     )
                     .expect("select")
@@ -1721,7 +2019,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     "tob",
                 )
                 .expect("cmp"),
-            Val::Obj(p) => self
+            Val::Obj(p) | Val::Arr(p) | Val::VecP(p) => self
                 .cx
                 .builder
                 .build_is_not_null(p, "objtrue")
@@ -2129,9 +2427,12 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 .expect("cmp"),
             // Object reference identity (§11.9.6 step 13). A null String
             // literal compared against an object also lands here.
-            (Val::Obj(a), Val::Obj(b))
-            | (Val::Obj(a), Val::Str(b))
-            | (Val::Str(a), Val::Obj(b)) => self
+            (
+                Val::Obj(a) | Val::Arr(a) | Val::VecP(a),
+                Val::Obj(b) | Val::Arr(b) | Val::VecP(b),
+            )
+            | (Val::Obj(a) | Val::Arr(a) | Val::VecP(a), Val::Str(b))
+            | (Val::Str(a), Val::Obj(b) | Val::Arr(b) | Val::VecP(b)) => self
                 .cx
                 .builder
                 .build_int_compare(
@@ -2427,7 +2728,33 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
     fn str_method(&mut self, m: StrMethod, recv: &mir::Expr, args: &[mir::Expr]) -> Val<'ctx> {
         let cx = self.cx;
         let this = self.str_arg(recv);
+        if m == StrMethod::Split {
+            let this = self.str_arg(recv);
+            let delim = self.str_arg(&args[0]);
+            let limit = self.num_arg(&args[1]);
+            let f = cx.runtime_fn(
+                "vs_str_split",
+                Some(cx.ptr().into()),
+                &[
+                    cx.ptr().into(),
+                    cx.ptr().into(),
+                    cx.context.f64_type().into(),
+                ],
+            );
+            let call = self
+                .cx
+                .builder
+                .build_call(f, &[this.into(), delim.into(), limit.into()], "split")
+                .expect("call");
+            return Val::Arr(
+                call.try_as_basic_value()
+                    .basic()
+                    .expect("value")
+                    .into_pointer_value(),
+            );
+        }
         let (name, arg_kinds, ret_str): (&str, &[ArgKind], bool) = match m {
+            StrMethod::Split => unreachable!("handled above"),
             StrMethod::CharAt => ("vs_str_char_at", &[ArgKind::Num], true),
             StrMethod::CharCodeAt => ("vs_str_char_code_at", &[ArgKind::Num], false),
             StrMethod::IndexOf => ("vs_str_index_of", &[ArgKind::Str, ArgKind::Num], false),
@@ -2498,6 +2825,528 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 .expect("value")
                 .into_pointer_value(),
         )
+    }
+}
+
+impl<'a, 'ctx> FnCx<'a, 'ctx> {
+    /// Stages expressions as a stack array of boxed values; holes become
+    /// undefined. Returns the array pointer.
+    fn stage_any_array_opt(&mut self, elements: &[Option<&mir::Expr>]) -> PointerValue<'ctx> {
+        let cx = self.cx;
+        let n = elements.len() as u32;
+        let arr_ty = cx.any_ty.array_type(n.max(1));
+        let arr = self.entry_alloca(arr_ty, "staged");
+        for (i, el) in elements.iter().enumerate() {
+            let v = match el {
+                Some(e) => {
+                    let val = self.expr(e);
+                    let p = match val {
+                        Val::Any(p) => p,
+                        other => self.box_value(other),
+                    };
+                    self.cx
+                        .builder
+                        .build_load(cx.any_ty, p, "el")
+                        .expect("load")
+                }
+                None => cx.any_ty.const_zero().into(),
+            };
+            let slot = unsafe {
+                self.cx.builder.build_in_bounds_gep(
+                    arr_ty,
+                    arr,
+                    &[
+                        cx.context.i32_type().const_zero(),
+                        cx.context.i32_type().const_int(i as u64, false),
+                    ],
+                    "slot",
+                )
+            }
+            .expect("gep");
+            self.cx.builder.build_store(slot, v).expect("store");
+        }
+        arr
+    }
+
+    /// Sequence receiver: pointer + is-vector flag.
+    fn seq_ptr(&mut self, recv: &mir::Expr) -> (PointerValue<'ctx>, bool) {
+        let is_vec = matches!(recv.ty, Ty::Vector(_));
+        let v = self.expr(recv);
+        match v {
+            Val::Arr(p) | Val::VecP(p) | Val::Str(p) | Val::Obj(p) => (p, is_vec),
+            _ => unreachable!("sequence receiver"),
+        }
+    }
+
+    /// Unboxes a `VsAny` alloca into a typed value (ES3 §9 conversions —
+    /// the uniform-storage boundary of SPECS §4.2).
+    fn unbox_any_ptr(&mut self, p: PointerValue<'ctx>, ty: Ty) -> Val<'ctx> {
+        let cx = self.cx;
+        match ty {
+            Ty::Any => Val::Any(p),
+            Ty::Int | Ty::UInt => {
+                let n = self.any_to_number(p);
+                self.convert_num_to_int(
+                    n,
+                    if ty == Ty::Int {
+                        Conv::ToInt
+                    } else {
+                        Conv::ToUInt
+                    },
+                )
+            }
+            Ty::Number => Val::Num(self.any_to_number(p)),
+            Ty::Boolean => {
+                let f = cx.runtime_fn(
+                    "vs_any_truthy",
+                    Some(cx.context.i32_type().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "b")
+                    .expect("call");
+                Val::Bool(
+                    self.nonzero(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("value")
+                            .into_int_value(),
+                    ),
+                )
+            }
+            Ty::String => {
+                let f = cx.runtime_fn(
+                    "vs_any_coerce_string",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "s")
+                    .expect("call");
+                Val::Str(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            Ty::Object(class) => {
+                let f = cx.runtime_fn(
+                    "vs_any_coerce_class",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.ptr().into()],
+                );
+                let rtti = cx.classes[class as usize].rtti;
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), rtti.into()], "o")
+                    .expect("call");
+                Val::Obj(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            Ty::Iface(iface) => {
+                let f = cx.runtime_fn(
+                    "vs_any_coerce_iface",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.context.i32_type().into()],
+                );
+                let id = cx.context.i32_type().const_int(u64::from(iface), false);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), id.into()], "i")
+                    .expect("call");
+                Val::Obj(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            Ty::Array => {
+                let f = cx.runtime_fn(
+                    "vs_any_coerce_array",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "a")
+                    .expect("call");
+                Val::Arr(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            Ty::Vector(inst) => {
+                let f = cx.runtime_fn(
+                    "vs_any_coerce_vector",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.context.i32_type().into()],
+                );
+                let id = cx.context.i32_type().const_int(u64::from(inst), false);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), id.into()], "v")
+                    .expect("call");
+                Val::VecP(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            Ty::Void => Val::Void,
+        }
+    }
+
+    fn call_arr(&mut self, m: mir::ArrMethod, recv: &mir::Expr, args: &[mir::Expr]) -> Val<'ctx> {
+        use mir::ArrMethod::*;
+        let cx = self.cx;
+        let (p, _) = self.seq_ptr(recv);
+        let i32t = cx.context.i32_type();
+        let f64t = cx.context.f64_type();
+        match m {
+            Push | Unshift => {
+                let staged: Vec<Option<&mir::Expr>> = args.iter().map(Some).collect();
+                let buf = self.stage_any_array_opt(&staged);
+                let name = if m == Push {
+                    "vs_arr_push"
+                } else {
+                    "vs_arr_unshift"
+                };
+                let f = cx.runtime_fn(
+                    name,
+                    Some(i32t.into()),
+                    &[cx.ptr().into(), i32t.into(), cx.ptr().into()],
+                );
+                let n = i32t.const_int(args.len() as u64, false);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), n.into(), buf.into()], "n")
+                    .expect("call");
+                Val::UInt(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_int_value(),
+                )
+            }
+            Pop | Shift => {
+                let out = self.entry_alloca(cx.any_ty, "popped");
+                let name = if m == Pop {
+                    "vs_arr_pop"
+                } else {
+                    "vs_arr_shift"
+                };
+                let f = cx.runtime_fn(name, None, &[cx.ptr().into(), cx.ptr().into()]);
+                self.cx
+                    .builder
+                    .build_call(f, &[p.into(), out.into()], "")
+                    .expect("call");
+                Val::Any(out)
+            }
+            Slice => {
+                let a = self.num_arg_or(args, 0, 0.0);
+                let b = self.num_arg_or(args, 1, f64::MAX);
+                let f = cx.runtime_fn(
+                    "vs_arr_slice",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), f64t.into(), f64t.into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), a.into(), b.into()], "sl")
+                    .expect("call");
+                Val::Arr(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            Splice => {
+                let a = self.num_arg_or(args, 0, 0.0);
+                let b = self.num_arg_or(args, 1, f64::MAX);
+                let rest = if args.len() > 2 { &args[2..] } else { &[] };
+                let staged: Vec<Option<&mir::Expr>> = rest.iter().map(Some).collect();
+                let buf = self.stage_any_array_opt(&staged);
+                let f = cx.runtime_fn(
+                    "vs_arr_splice",
+                    Some(cx.ptr().into()),
+                    &[
+                        cx.ptr().into(),
+                        f64t.into(),
+                        f64t.into(),
+                        i32t.into(),
+                        cx.ptr().into(),
+                    ],
+                );
+                let n = i32t.const_int(rest.len() as u64, false);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(
+                        f,
+                        &[p.into(), a.into(), b.into(), n.into(), buf.into()],
+                        "sp",
+                    )
+                    .expect("call");
+                Val::Arr(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            IndexOf => {
+                let needle = self.expr(&args[0]);
+                let np = match needle {
+                    Val::Any(p) => p,
+                    other => self.box_value(other),
+                };
+                let from = self.num_arg_or(args, 1, 0.0);
+                let f = cx.runtime_fn(
+                    "vs_arr_index_of",
+                    Some(i32t.into()),
+                    &[cx.ptr().into(), cx.ptr().into(), f64t.into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), np.into(), from.into()], "idx")
+                    .expect("call");
+                Val::Int(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_int_value(),
+                )
+            }
+            Concat => {
+                let staged: Vec<Option<&mir::Expr>> = args.iter().map(Some).collect();
+                let buf = self.stage_any_array_opt(&staged);
+                let f = cx.runtime_fn(
+                    "vs_arr_concat",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), i32t.into(), cx.ptr().into()],
+                );
+                let n = i32t.const_int(args.len() as u64, false);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), n.into(), buf.into()], "cc")
+                    .expect("call");
+                Val::Arr(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            Join => {
+                let sep = if args.is_empty() {
+                    cx.ptr().const_null()
+                } else {
+                    self.str_arg(&args[0])
+                };
+                let f = cx.runtime_fn(
+                    "vs_arr_join",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), sep.into()], "j")
+                    .expect("call");
+                Val::Str(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            Reverse | Sort => {
+                let name = if m == Reverse {
+                    "vs_arr_reverse"
+                } else {
+                    "vs_arr_sort"
+                };
+                let f = cx.runtime_fn(name, Some(cx.ptr().into()), &[cx.ptr().into()]);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "r")
+                    .expect("call");
+                Val::Arr(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+        }
+    }
+
+    fn call_vec(
+        &mut self,
+        m: mir::VecMethod,
+        recv: &mir::Expr,
+        args: &[mir::Expr],
+        expr_ty: Ty,
+    ) -> Val<'ctx> {
+        use mir::VecMethod::*;
+        let cx = self.cx;
+        let (p, _) = self.seq_ptr(recv);
+        let i32t = cx.context.i32_type();
+        let f64t = cx.context.f64_type();
+        match m {
+            Push | Unshift => {
+                let staged: Vec<Option<&mir::Expr>> = args.iter().map(Some).collect();
+                let buf = self.stage_any_array_opt(&staged);
+                let name = if m == Push {
+                    "vs_vec_push"
+                } else {
+                    "vs_vec_unshift"
+                };
+                let f = cx.runtime_fn(
+                    name,
+                    Some(i32t.into()),
+                    &[cx.ptr().into(), i32t.into(), cx.ptr().into()],
+                );
+                let n = i32t.const_int(args.len() as u64, false);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), n.into(), buf.into()], "n")
+                    .expect("call");
+                Val::UInt(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_int_value(),
+                )
+            }
+            Pop | Shift => {
+                let out = self.entry_alloca(cx.any_ty, "popped");
+                let name = if m == Pop {
+                    "vs_vec_pop"
+                } else {
+                    "vs_vec_shift"
+                };
+                let f = cx.runtime_fn(name, None, &[cx.ptr().into(), cx.ptr().into()]);
+                self.cx
+                    .builder
+                    .build_call(f, &[p.into(), out.into()], "")
+                    .expect("call");
+                self.unbox_any_ptr(out, expr_ty)
+            }
+            Slice => {
+                let a = self.num_arg_or(args, 0, 0.0);
+                let b = self.num_arg_or(args, 1, f64::MAX);
+                let f = cx.runtime_fn(
+                    "vs_vec_slice",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), f64t.into(), f64t.into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), a.into(), b.into()], "sl")
+                    .expect("call");
+                Val::VecP(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            IndexOf => {
+                let needle = self.expr(&args[0]);
+                let np = match needle {
+                    Val::Any(p) => p,
+                    other => self.box_value(other),
+                };
+                let from = self.num_arg_or(args, 1, 0.0);
+                let f = cx.runtime_fn(
+                    "vs_vec_index_of",
+                    Some(i32t.into()),
+                    &[cx.ptr().into(), cx.ptr().into(), f64t.into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), np.into(), from.into()], "idx")
+                    .expect("call");
+                Val::Int(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_int_value(),
+                )
+            }
+            Join => {
+                let sep = if args.is_empty() {
+                    cx.ptr().const_null()
+                } else {
+                    self.str_arg(&args[0])
+                };
+                let f = cx.runtime_fn(
+                    "vs_vec_join",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into(), sep.into()], "j")
+                    .expect("call");
+                Val::Str(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            Reverse => {
+                let f = cx.runtime_fn("vs_vec_reverse", Some(cx.ptr().into()), &[cx.ptr().into()]);
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "r")
+                    .expect("call");
+                Val::VecP(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+        }
+    }
+
+    /// f64 argument at `i`, or the default when omitted.
+    fn num_arg_or(&mut self, args: &[mir::Expr], i: usize, default: f64) -> FloatValue<'ctx> {
+        match args.get(i) {
+            Some(a) => self.num_arg(a),
+            None => self.cx.context.f64_type().const_float(default),
+        }
     }
 }
 
@@ -2671,9 +3520,9 @@ fn ty_tag(ty: Ty) -> u32 {
         Ty::Number => tag::NUMBER,
         Ty::Boolean => tag::BOOLEAN,
         Ty::String => tag::STRING,
-        // Class/interface targets dispatch through the object-model
+        // Class/interface/sequence targets dispatch through dedicated
         // runtime calls, never through core tags.
-        Ty::Any | Ty::Void | Ty::Object(_) | Ty::Iface(_) => tag::NULL,
+        Ty::Any | Ty::Void | Ty::Object(_) | Ty::Iface(_) | Ty::Array | Ty::Vector(_) => tag::NULL,
     }
 }
 

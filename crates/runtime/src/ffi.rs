@@ -746,3 +746,648 @@ pub unsafe extern "C" fn vs_parse_float(s: *const VsString) -> f64 {
         None => f64::NAN,
     }
 }
+
+// --- arrays & vectors --------------------------------------------------------
+
+use crate::seq::{self, VsArray, VsVector};
+
+/// Builds an Array from staged boxed elements.
+///
+/// # Safety
+/// `args..args+argc` live `VsAny`s.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_array_new(argc: u32, args: *const VsAny) -> *const VsArray {
+    // SAFETY: caller contract.
+    let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
+    seq::new_array(items.to_vec())
+}
+
+/// Builds a Vector from staged boxed elements (already element-coerced).
+///
+/// # Safety
+/// `args..args+argc` live `VsAny`s.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_vector_new(
+    inst: u32,
+    argc: u32,
+    args: *const VsAny,
+) -> *const VsVector {
+    // SAFETY: caller contract.
+    let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
+    seq::new_vector(inst, items.to_vec())
+}
+
+/// # Safety
+/// `arr` live.
+unsafe fn arr<'x>(a: *const VsArray, what: &str) -> &'x VsArray {
+    if a.is_null() {
+        conv::type_error(&format!("null reference in {what}"));
+    }
+    // SAFETY: non-null arrays are live.
+    unsafe { &*a }
+}
+
+/// # Safety
+/// `v` live.
+unsafe fn vec_ref<'x>(v: *const VsVector, what: &str) -> &'x VsVector {
+    if v.is_null() {
+        conv::type_error(&format!("null reference in {what}"));
+    }
+    // SAFETY: non-null vectors are live.
+    unsafe { &*v }
+}
+
+/// `Array#length` / element count.
+///
+/// # Safety
+/// Pointer null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_len(a: *const VsArray) -> u32 {
+    // SAFETY: caller contract.
+    unsafe { arr(a, "Array.length") }.data.borrow().len() as u32
+}
+
+/// `Array#length = n` (§15.4.5.2: truncate or extend with holes).
+///
+/// # Safety
+/// Pointer null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_set_len(a: *const VsArray, n: u32) {
+    // SAFETY: caller contract.
+    unsafe { arr(a, "Array.length") }
+        .data
+        .borrow_mut()
+        .resize(n as usize, VsAny::UNDEFINED);
+}
+
+/// `arr[i]` read: out-of-range → undefined (§15.4).
+///
+/// # Safety
+/// Pointers live; `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_get(a: *const VsArray, index: f64, out: *mut VsAny) {
+    // SAFETY: caller contract.
+    let a = unsafe { arr(a, "Array index") };
+    let data = a.data.borrow();
+    let v = if index >= 0.0 && (index as usize) < data.len() {
+        data[index as usize]
+    } else {
+        VsAny::UNDEFINED
+    };
+    // SAFETY: caller contract.
+    unsafe { *out = v };
+}
+
+/// `arr[i] = v`: extends with holes when i >= length.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_set(a: *const VsArray, index: f64, v: *const VsAny) {
+    // SAFETY: caller contract.
+    let a = unsafe { arr(a, "Array index") };
+    if index < 0.0 {
+        return; // negative indices are expando keys — dynamic props are P7
+    }
+    let i = index as usize;
+    let mut data = a.data.borrow_mut();
+    if i >= data.len() {
+        data.resize(i + 1, VsAny::UNDEFINED);
+    }
+    // SAFETY: caller contract.
+    data[i] = unsafe { *v };
+}
+
+/// push (§15.4.4.7) — returns new length.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_push(a: *const VsArray, argc: u32, args: *const VsAny) -> u32 {
+    // SAFETY: caller contract.
+    let a = unsafe { arr(a, "push") };
+    let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
+    let mut data = a.data.borrow_mut();
+    data.extend_from_slice(items);
+    data.len() as u32
+}
+
+/// pop (§15.4.4.6).
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_pop(a: *const VsArray, out: *mut VsAny) {
+    // SAFETY: caller contract.
+    let v = unsafe { arr(a, "pop") }
+        .data
+        .borrow_mut()
+        .pop()
+        .unwrap_or(VsAny::UNDEFINED);
+    unsafe { *out = v };
+}
+
+/// shift (§15.4.4.9).
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_shift(a: *const VsArray, out: *mut VsAny) {
+    // SAFETY: caller contract.
+    let a = unsafe { arr(a, "shift") };
+    let mut data = a.data.borrow_mut();
+    let v = if data.is_empty() {
+        VsAny::UNDEFINED
+    } else {
+        data.remove(0)
+    };
+    unsafe { *out = v };
+}
+
+/// unshift (§15.4.4.13) — returns new length.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_unshift(a: *const VsArray, argc: u32, args: *const VsAny) -> u32 {
+    // SAFETY: caller contract.
+    let a = unsafe { arr(a, "unshift") };
+    let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
+    let mut data = a.data.borrow_mut();
+    for (i, it) in items.iter().enumerate() {
+        data.insert(i, *it);
+    }
+    data.len() as u32
+}
+
+/// slice (§15.4.4.10).
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_slice(a: *const VsArray, start: f64, end: f64) -> *const VsArray {
+    // SAFETY: caller contract.
+    let a = unsafe { arr(a, "slice") };
+    let data = a.data.borrow();
+    let (s, e) = (
+        seq::norm_index(start, data.len()),
+        seq::norm_index(end, data.len()),
+    );
+    seq::new_array(if s < e {
+        data[s..e].to_vec()
+    } else {
+        Vec::new()
+    })
+}
+
+/// splice (§15.4.4.12) — returns removed elements; inserts `args`.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_splice(
+    a: *const VsArray,
+    start: f64,
+    delete_count: f64,
+    argc: u32,
+    args: *const VsAny,
+) -> *const VsArray {
+    // SAFETY: caller contract.
+    let a = unsafe { arr(a, "splice") };
+    let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
+    let mut data = a.data.borrow_mut();
+    let s = seq::norm_index(start, data.len());
+    let del = delete_count.max(0.0) as usize;
+    let e = (s + del).min(data.len());
+    let removed: Vec<VsAny> = data.splice(s..e, items.iter().copied()).collect();
+    seq::new_array(removed)
+}
+
+/// indexOf (AS3 Array): strict equality search.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_index_of(
+    a: *const VsArray,
+    needle: *const VsAny,
+    from: f64,
+) -> i32 {
+    // SAFETY: caller contract.
+    let a = unsafe { arr(a, "indexOf") };
+    let needle = unsafe { *needle };
+    let data = a.data.borrow();
+    let from = seq::norm_index(from, data.len());
+    data[from..]
+        .iter()
+        .position(|v| conv::any_strict_equals(*v, needle))
+        .map_or(-1, |p| (from + p) as i32)
+}
+
+/// concat (§15.4.4.4): array arguments flatten one level.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_concat(
+    a: *const VsArray,
+    argc: u32,
+    args: *const VsAny,
+) -> *const VsArray {
+    // SAFETY: caller contract.
+    let a = unsafe { arr(a, "concat") };
+    let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
+    let mut out = a.data.borrow().clone();
+    for it in items {
+        if it.tag() == Tag::Array {
+            // SAFETY: Array-tagged payloads hold live VsArrays.
+            out.extend_from_slice(&unsafe { &*it.as_array_ptr() }.data.borrow());
+        } else {
+            out.push(*it);
+        }
+    }
+    seq::new_array(out)
+}
+
+/// join (§15.4.4.3).
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_join(a: *const VsArray, sep: *const VsString) -> *const VsString {
+    // SAFETY: caller contract.
+    let a = unsafe { arr(a, "join") };
+    let sep = match unsafe { string::deref(sep) } {
+        Some(s) => s.to_rust(),
+        None => ",".to_string(),
+    };
+    VsString::from_rust(&seq::join(&a.data.borrow(), &sep))
+}
+
+/// reverse (§15.4.4.8) — in place, returns the array.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_reverse(a: *const VsArray) -> *const VsArray {
+    // SAFETY: caller contract.
+    unsafe { arr(a, "reverse") }.data.borrow_mut().reverse();
+    a
+}
+
+/// sort (§15.4.4.11, default comparator: ToString comparison).
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_sort(a: *const VsArray) -> *const VsArray {
+    // SAFETY: caller contract.
+    unsafe { arr(a, "sort") }
+        .data
+        .borrow_mut()
+        .sort_by_key(|v| conv::any_to_display(*v));
+    a
+}
+
+/// Vector length.
+///
+/// # Safety
+/// Pointer null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_vec_len(v: *const VsVector) -> u32 {
+    // SAFETY: caller contract.
+    unsafe { vec_ref(v, "Vector.length") }.data.borrow().len() as u32
+}
+
+/// Vector length set (extends with element-type zero boxed as undefined —
+/// codegen reads convert at access, so undefined converts to the default).
+///
+/// # Safety
+/// Pointer null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_vec_set_len(v: *const VsVector, n: u32) {
+    // SAFETY: caller contract.
+    unsafe { vec_ref(v, "Vector.length") }
+        .data
+        .borrow_mut()
+        .resize(n as usize, VsAny::UNDEFINED);
+}
+
+/// `vec[i]` read: out of range → RangeError (abort until P6).
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_vec_get(v: *const VsVector, index: f64, out: *mut VsAny) {
+    // SAFETY: caller contract.
+    let v = unsafe { vec_ref(v, "Vector index") };
+    let data = v.data.borrow();
+    if index < 0.0 || index as usize >= data.len() {
+        eprintln!("RangeError: vector index {index} out of range");
+        std::process::exit(1);
+    }
+    // SAFETY: caller contract.
+    unsafe { *out = data[index as usize] };
+}
+
+/// `vec[i] = x`: i == length appends, beyond → RangeError (AS3 Vector).
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_vec_set(v: *const VsVector, index: f64, value: *const VsAny) {
+    // SAFETY: caller contract.
+    let v = unsafe { vec_ref(v, "Vector index") };
+    let mut data = v.data.borrow_mut();
+    let i = index as usize;
+    if index < 0.0 || i > data.len() {
+        eprintln!("RangeError: vector index {index} out of range");
+        std::process::exit(1);
+    }
+    // SAFETY: caller contract.
+    let value = unsafe { *value };
+    if i == data.len() {
+        data.push(value);
+    } else {
+        data[i] = value;
+    }
+}
+
+/// Vector push — returns new length.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_vec_push(v: *const VsVector, argc: u32, args: *const VsAny) -> u32 {
+    // SAFETY: caller contract.
+    let v = unsafe { vec_ref(v, "push") };
+    let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
+    let mut data = v.data.borrow_mut();
+    data.extend_from_slice(items);
+    data.len() as u32
+}
+
+/// Vector pop.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_vec_pop(v: *const VsVector, out: *mut VsAny) {
+    // SAFETY: caller contract.
+    let value = unsafe { vec_ref(v, "pop") }
+        .data
+        .borrow_mut()
+        .pop()
+        .unwrap_or(VsAny::UNDEFINED);
+    unsafe { *out = value };
+}
+
+/// Vector shift.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_vec_shift(v: *const VsVector, out: *mut VsAny) {
+    // SAFETY: caller contract.
+    let v = unsafe { vec_ref(v, "shift") };
+    let mut data = v.data.borrow_mut();
+    let value = if data.is_empty() {
+        VsAny::UNDEFINED
+    } else {
+        data.remove(0)
+    };
+    unsafe { *out = value };
+}
+
+/// Vector unshift — returns new length.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_vec_unshift(v: *const VsVector, argc: u32, args: *const VsAny) -> u32 {
+    // SAFETY: caller contract.
+    let v = unsafe { vec_ref(v, "unshift") };
+    let items = unsafe { std::slice::from_raw_parts(args, argc as usize) };
+    let mut data = v.data.borrow_mut();
+    for (i, it) in items.iter().enumerate() {
+        data.insert(i, *it);
+    }
+    data.len() as u32
+}
+
+/// Vector slice — same instantiation.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_vec_slice(v: *const VsVector, start: f64, end: f64) -> *const VsVector {
+    // SAFETY: caller contract.
+    let v = unsafe { vec_ref(v, "slice") };
+    let data = v.data.borrow();
+    let (s, e) = (
+        seq::norm_index(start, data.len()),
+        seq::norm_index(end, data.len()),
+    );
+    seq::new_vector(
+        v.inst,
+        if s < e {
+            data[s..e].to_vec()
+        } else {
+            Vec::new()
+        },
+    )
+}
+
+/// Vector indexOf (strict equality).
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_vec_index_of(
+    v: *const VsVector,
+    needle: *const VsAny,
+    from: f64,
+) -> i32 {
+    // SAFETY: caller contract.
+    let v = unsafe { vec_ref(v, "indexOf") };
+    let needle = unsafe { *needle };
+    let data = v.data.borrow();
+    let from = seq::norm_index(from, data.len());
+    data[from..]
+        .iter()
+        .position(|x| conv::any_strict_equals(*x, needle))
+        .map_or(-1, |p| (from + p) as i32)
+}
+
+/// Vector join.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_vec_join(v: *const VsVector, sep: *const VsString) -> *const VsString {
+    // SAFETY: caller contract.
+    let v = unsafe { vec_ref(v, "join") };
+    let sep = match unsafe { string::deref(sep) } {
+        Some(s) => s.to_rust(),
+        None => ",".to_string(),
+    };
+    VsString::from_rust(&seq::join(&v.data.borrow(), &sep))
+}
+
+/// Vector reverse — in place, returns the vector.
+///
+/// # Safety
+/// Pointers live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_vec_reverse(v: *const VsVector) -> *const VsVector {
+    // SAFETY: caller contract.
+    unsafe { vec_ref(v, "reverse") }.data.borrow_mut().reverse();
+    v
+}
+
+/// ToString for a bare Array value (concat contexts).
+///
+/// # Safety
+/// Pointer null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_arr_to_string(a: *const VsArray) -> *const VsString {
+    if a.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: caller contract.
+    VsString::from_rust(&seq::join(&unsafe { &*a }.data.borrow(), ","))
+}
+
+/// ToString for a bare Vector value.
+///
+/// # Safety
+/// Pointer null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_vec_to_string(v: *const VsVector) -> *const VsString {
+    if v.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: caller contract.
+    VsString::from_rust(&seq::join(&unsafe { &*v }.data.borrow(), ","))
+}
+
+/// Boxed `is Array`.
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_is_array(v: *const VsAny) -> u32 {
+    // SAFETY: caller contract.
+    u32::from(unsafe { *v }.tag() == Tag::Array)
+}
+
+/// Boxed `is Vector.<inst>` — reified per instantiation (SPECS §4.2).
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_is_vector(v: *const VsAny, inst: u32) -> u32 {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    u32::from(v.tag() == Tag::Vector && unsafe { &*v.as_vector_ptr() }.inst == inst)
+}
+
+/// Boxed `as Array` → ptr or null.
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_as_array(v: *const VsAny) -> *const VsArray {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    if v.tag() == Tag::Array {
+        v.as_array_ptr()
+    } else {
+        std::ptr::null()
+    }
+}
+
+/// Boxed `as Vector.<inst>` → ptr or null.
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_as_vector(v: *const VsAny, inst: u32) -> *const VsVector {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    if v.tag() == Tag::Vector && unsafe { &*v.as_vector_ptr() }.inst == inst {
+        v.as_vector_ptr()
+    } else {
+        std::ptr::null()
+    }
+}
+
+/// AVM2 coerce to Array (checked).
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_coerce_array(v: *const VsAny) -> *const VsArray {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    match v.tag() {
+        Tag::Null | Tag::Undefined => std::ptr::null(),
+        Tag::Array => v.as_array_ptr(),
+        _ => conv::type_error(&format!(
+            "cannot convert {} to Array",
+            conv::any_to_display(v)
+        )),
+    }
+}
+
+/// AVM2 coerce to Vector.<inst> (checked).
+///
+/// # Safety
+/// `v` live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_any_coerce_vector(v: *const VsAny, inst: u32) -> *const VsVector {
+    // SAFETY: caller contract.
+    let v = unsafe { *v };
+    match v.tag() {
+        Tag::Null | Tag::Undefined => std::ptr::null(),
+        Tag::Vector if unsafe { &*v.as_vector_ptr() }.inst == inst => v.as_vector_ptr(),
+        _ => conv::type_error(&format!(
+            "cannot convert {} to Vector",
+            conv::any_to_display(v)
+        )),
+    }
+}
+
+/// `String#split` (§15.5.4.14, string separators; regex separators are P7).
+///
+/// # Safety
+/// Pointers null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_str_split(
+    this: *const VsString,
+    delim: *const VsString,
+    limit: f64,
+) -> *const VsArray {
+    // SAFETY: caller contract.
+    let s = unsafe { require(this, "split") }.to_rust();
+    let limit = if limit.is_nan() || limit < 0.0 {
+        u32::MAX as usize
+    } else {
+        limit as usize
+    };
+    // SAFETY: caller contract.
+    let parts: Vec<VsAny> = match unsafe { string::deref(delim) } {
+        None => vec![VsAny::string(VsString::from_rust(&s))],
+        Some(d) if d.len == 0 => s
+            .chars()
+            .take(limit)
+            .map(|c| VsAny::string(VsString::from_rust(&c.to_string())))
+            .collect(),
+        Some(d) => s
+            .split(&d.to_rust())
+            .take(limit)
+            .map(|part| VsAny::string(VsString::from_rust(part)))
+            .collect(),
+    };
+    seq::new_array(parts)
+}

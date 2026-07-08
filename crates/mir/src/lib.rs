@@ -32,6 +32,11 @@ pub enum Ty {
     Object(u32),
     /// Instance pointer typed by interface index.
     Iface(u32),
+    /// Array pointer (SPECS §3.10).
+    Array,
+    /// Vector pointer; payload indexes [`Program::vectors`] (reified
+    /// element type, SPECS §4.2/§4.3).
+    Vector(u32),
 }
 
 /// Index of a function in [`Program::functions`].
@@ -54,6 +59,9 @@ pub struct Program {
     /// Number of interfaces (ids are dense; dispatch tables live on
     /// classes).
     pub iface_count: u32,
+    /// Vector instantiations: index = `Ty::Vector` payload, value =
+    /// element type.
+    pub vectors: Vec<Ty>,
 }
 
 /// One lowered class: everything a backend needs to emit layout, RTTI, and
@@ -187,6 +195,8 @@ pub enum Builtin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(missing_docs)]
 pub enum StrMethod {
+    /// `split(delim, limit)` → Array (§15.5.4.14).
+    Split,
     CharAt,
     CharCodeAt,
     IndexOf,
@@ -205,6 +215,37 @@ pub enum StrMethod {
 pub enum NumMethod {
     ToString,
     ToFixed,
+}
+
+/// Array methods with runtime implementations (SPECS §6 P5 surface).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum ArrMethod {
+    Push,
+    Pop,
+    Shift,
+    Unshift,
+    Slice,
+    Splice,
+    IndexOf,
+    Concat,
+    Join,
+    Reverse,
+    Sort,
+}
+
+/// Vector methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum VecMethod {
+    Push,
+    Pop,
+    Shift,
+    Unshift,
+    Slice,
+    IndexOf,
+    Join,
+    Reverse,
 }
 
 /// Value conversions (AS3 semantics, SPECS §3.3; ECMA-262 3rd ed. §9).
@@ -230,6 +271,10 @@ pub enum Conv {
     AnyToObject(u32),
     /// Same, interface target.
     AnyToIface(u32),
+    /// Checked coercion to Array.
+    AnyToArray,
+    /// Checked coercion to a Vector instantiation.
+    AnyToVector(u32),
 }
 
 /// Binary operators (operand types already made uniform by sema).
@@ -357,4 +402,20 @@ pub enum ExprKind {
     /// Static field storage access.
     StaticGet(u32, usize),
     StaticSet(u32, usize, Box<Expr>),
+    /// `[a, , b]` — holes become undefined.
+    ArrayLit(Vec<Option<Expr>>),
+    /// `new <T>[...]` (elements already element-coerced).
+    VectorLit(u32, Vec<Expr>),
+    /// Array method dispatch (args boxed per the sema signature).
+    CallArr(ArrMethod, Box<Expr>, Vec<Expr>),
+    /// Vector method dispatch.
+    CallVec(VecMethod, Box<Expr>, Vec<Expr>),
+    /// Array/Vector length read (receiver type discriminates).
+    SeqLen(Box<Expr>),
+    /// Array/Vector length write.
+    SeqSetLen(Box<Expr>, Box<Expr>),
+    /// `seq[i]` read (index already ToNumber).
+    SeqGet(Box<Expr>, Box<Expr>),
+    /// `seq[i] = v` (value already element-coerced).
+    SeqSet(Box<Expr>, Box<Expr>, Box<Expr>),
 }

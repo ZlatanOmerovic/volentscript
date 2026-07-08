@@ -219,7 +219,7 @@ fn #4 classify : String
       Return
         [String] Str "odd"
 fn #5 sum : Number
-  local %0 rest-param values : *
+  local %0 rest-param values : Array
   local %1 var acc : Number
   local %2 var v : Number
   Init %1
@@ -227,7 +227,7 @@ fn #5 sum : Number
       [int] Int 0
   ForEachIn target=%2
     object:
-      [*] LocalGet %0
+      [Array] LocalGet %0
     body:
       Block
         ExprStmt

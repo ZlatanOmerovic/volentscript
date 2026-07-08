@@ -160,8 +160,8 @@ pub fn member(receiver: Ty, name: &str) -> Option<Member> {
         (Ty::String, "substring") => Method(sig(&[Ty::Number, Ty::Number], 0, Ty::String)),
         // String.as:176
         (Ty::String, "substr") => Method(sig(&[Ty::Number, Ty::Number], 0, Ty::String)),
-        // String.as:151 — returns Array (P5); `*` until then
-        (Ty::String, "split") => Method(sig(&[Ty::Any, Ty::Any], 0, Ty::Any)),
+        // String.as:151
+        (Ty::String, "split") => Method(sig(&[Ty::Any, Ty::Any], 0, Ty::Array)),
         // String.as:182,194
         (Ty::String, "toLowerCase") => Method(sig(&[], 0, Ty::String)),
         (Ty::String, "toUpperCase") => Method(sig(&[], 0, Ty::String)),

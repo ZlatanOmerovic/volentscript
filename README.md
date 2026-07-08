@@ -62,17 +62,17 @@ and `runtime`.
 
 ## Status
 
-Phases 0–4 done: scaffold + CI (P0); lexer + parser (P1); semantic analysis
-with typed AST and coercion insertion (P2); native compilation via MIR +
-LLVM + Rust runtime with link/codesign (P3); **classes, interfaces,
-inheritance** (P4) — sealed classes with native struct layouts, vtable
-dispatch, interface method tables, mandatory `override` + `final`
-enforcement, get/set accessors, statics, constructors with implicit
-`super()` chains and field initializers, access control
-(public/private/protected/internal), packages (single file), `is`/`as` on
-class hierarchies, `Object` root with `toString`.
+Phases 0–5 done: scaffold + CI (P0); lexer + parser (P1); sema with typed
+AST (P2); native compilation via MIR + LLVM + Rust runtime (P3); classes,
+interfaces, inheritance with vtable/interface dispatch (P4); **full type
+system** (P5) — user-definable reified generics (`class Box.<T>`,
+monomorphized per instantiation: `x is Box.<int>` is a real runtime test),
+null safety per SPECS §4.1 (non-nullable by default, `T?`, flow + deref
+diagnostics with `if (x != null)` narrowing; `*` stays the escape hatch),
+`Array` with the P5 method surface, `Vector.<T>` incl. `new <T>[...]`
+literals, rest parameters binding real Arrays, `String#split`.
 
-`vigorscript run file.as` compiles and executes a real arm64/x86-64 binary
-— including polymorphic OOP programs. Remaining phase-gated constructs
-(closures/Function values, exceptions, for..in, Array/Vector generics,
-dynamic-class expando) report honest `error[E0001]`s. Phase plan: SPECS §11.
+`vigorscript run file.as` compiles and executes native arm64/x86-64
+binaries for polymorphic OOP and generic-collection programs. Remaining
+gates: closures/Function values, exceptions, for..in (P6); dynamic
+property access, stdlib breadth (P7). Phase plan: SPECS §11.

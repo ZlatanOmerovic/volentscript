@@ -11,7 +11,7 @@ use crate::builtins::{self, Member, Signature};
 use crate::tast::*;
 use crate::ty::Ty;
 
-impl Checker {
+impl Checker<'_> {
     pub(crate) fn expr(&mut self, e: &ast::Expr) -> TExpr {
         let span = e.span;
         match &e.kind {
@@ -31,7 +31,7 @@ impl Checker {
                 self.error_expr(span)
             }
             ExprKind::Ident(name) => self.ident(name, span),
-            // Array literal: the Array class lands in P5; `*` until then.
+            // Array literal (SPECS §3.10): elements are `*`.
             ExprKind::Array(elements) => {
                 let elements = elements
                     .iter()
@@ -42,8 +42,15 @@ impl Checker {
                         })
                     })
                     .collect();
-                mk(Ty::Any, span, TExprKind::Array(elements))
+                mk(Ty::Array, span, TExprKind::Array(elements))
             }
+            ExprKind::VectorLit { elem, elements } => self.vector_literal(elem, elements, span),
+            // Valid in `new`/`is`/`as`/annotation positions (handled
+            // there); as a bare value it needs the Class type.
+            ExprKind::ApplyType(..) => self.not_implemented(
+                span,
+                "using a parameterized type as a value requires the Class type — Phase 6",
+            ),
             // Object initializer: the Object class lands in P4; `*` until then.
             ExprKind::Object(props) => {
                 let props = props
@@ -380,6 +387,9 @@ impl Checker {
 
     /// Resolves the RHS of `is`/`as` to a core type, class, or interface.
     fn type_operand(&mut self, e: &ast::Expr) -> Ty {
+        if let Some(ty) = self.apply_type_to_ty(e) {
+            return ty;
+        }
         if let ExprKind::Ident(name) = &e.kind {
             if !self.is_shadowed(name) {
                 if let Some(ty) = self.ident_as_type(name) {
@@ -446,6 +456,13 @@ impl Checker {
                 };
                 let rhs = self.compound_rhs(op, ty, id, value, span);
                 let rhs = self.coerce(rhs, ty, span);
+                let fn_index = *self.fn_stack.last().expect("fn");
+                let nullable_slot = self.functions[fn_index]
+                    .locals
+                    .get(id.0 as usize)
+                    .is_some_and(|l| l.nullable);
+                self.check_null_flow(&rhs, ty, nullable_slot, "variable", span);
+                self.update_narrow_on_assign(id, self.expr_nullable(&rhs));
                 mk(ty, span, TExprKind::LocalSet(id, Box::new(rhs)))
             }
             ExprKind::Member(object, name) => {
@@ -467,6 +484,10 @@ impl Checker {
                     Ty::Iface(iface) => {
                         let checked = self.expr(value);
                         return self.iface_member_write(object, iface, name, checked, span);
+                    }
+                    Ty::Array | Ty::Vector(_) => {
+                        let checked = self.expr(value);
+                        return self.seq_member_write(object, name, checked, span);
                     }
                     _ => {}
                 }
@@ -501,6 +522,9 @@ impl Checker {
                 let object = self.expr(object);
                 let index = self.expr(index);
                 let value_checked = self.expr(value);
+                if matches!(object.ty, Ty::Array | Ty::Vector(_)) {
+                    return self.seq_index_write(object, index, value_checked, span);
+                }
                 if object.ty != Ty::Any && object.ty != Ty::Error {
                     self.error(
                         ErrorCode::UNKNOWN_PROPERTY,
@@ -607,6 +631,14 @@ impl Checker {
         }
         if let ExprKind::Member(object, method) = &callee.kind {
             let object = self.expr(object);
+            self.check_null_deref(&object, span);
+            // Collections dispatch.
+            if object.ty == Ty::Array {
+                return self.array_method_call(object, method, args, span);
+            }
+            if let Ty::Vector(inst) = object.ty {
+                return self.vector_method_call(object, inst, method, args, span);
+            }
             // Class / interface dispatch.
             if let Ty::Class(class) = object.ty {
                 return self.class_method_call(object, class, method, args, span);
@@ -715,7 +747,11 @@ impl Checker {
             .map(|(i, a)| {
                 let checked = self.expr(a);
                 match sig.params.get(i) {
-                    Some(&ty) => self.coerce(checked, ty, a.span),
+                    Some(&ty) => {
+                        let coerced = self.coerce(checked, ty, a.span);
+                        self.check_null_flow(&coerced, ty, false, "parameter", a.span);
+                        coerced
+                    }
                     None => self.coerce_to_any(checked), // variadic tail
                 }
             })
@@ -730,7 +766,15 @@ impl Checker {
             .map(|(i, a)| {
                 let checked = self.expr(a);
                 match params.get(i) {
-                    Some(&ty) => self.coerce(checked, ty, a.span),
+                    Some(&ty) => {
+                        let coerced = self.coerce(checked, ty, a.span);
+                        let nullable = self.functions[id.0 as usize]
+                            .locals
+                            .get(i)
+                            .is_some_and(|l| l.nullable);
+                        self.check_null_flow(&coerced, ty, nullable, "parameter", a.span);
+                        coerced
+                    }
                     None => self.coerce_to_any(checked),
                 }
             })
@@ -764,9 +808,12 @@ impl Checker {
     // --- members ----------------------------------------------------------------
 
     fn member_read(&mut self, object: TExpr, name: &str, span: Span) -> TExpr {
+        self.check_null_deref(&object, span);
         match object.ty {
             Ty::Class(class) => return self.class_member_read(object, class, name, span),
             Ty::Iface(iface) => return self.iface_member_read(object, iface, name, span),
+            Ty::Array => return self.array_member_read(object, name, span),
+            Ty::Vector(inst) => return self.vector_member_read(object, inst, name, span),
             _ => {}
         }
         match object.ty {
@@ -813,6 +860,10 @@ impl Checker {
     }
 
     fn index_read(&mut self, object: TExpr, index: TExpr, span: Span) -> TExpr {
+        self.check_null_deref(&object, span);
+        if matches!(object.ty, Ty::Array | Ty::Vector(_)) {
+            return self.seq_index_read(object, index, span);
+        }
         if object.ty != Ty::Any && object.ty != Ty::Error {
             self.error(
                 ErrorCode::UNKNOWN_PROPERTY,

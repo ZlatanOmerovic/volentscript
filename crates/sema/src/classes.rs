@@ -38,21 +38,27 @@ pub enum VKind {
 pub struct Sig {
     /// Parameter types.
     pub params: Vec<Ty>,
+    /// Per-parameter `T?` flags (SPECS §4.1), parallel to `params`.
+    pub params_nullable: Vec<bool>,
     /// Arguments before the first defaulted parameter.
     pub required: usize,
     /// Trailing `...rest`.
     pub variadic: bool,
     /// Return type.
     pub ret: Ty,
+    /// `T?` return.
+    pub ret_nullable: bool,
 }
 
 impl Default for Sig {
     fn default() -> Self {
         Sig {
             params: Vec::new(),
+            params_nullable: Vec::new(),
             required: 0,
             variadic: false,
             ret: Ty::Void,
+            ret_nullable: false,
         }
     }
 }
@@ -62,9 +68,11 @@ impl Sig {
     /// override to match the inherited signature exactly.
     pub fn matches(&self, other: &Sig) -> bool {
         self.params == other.params
+            && self.params_nullable == other.params_nullable
             && self.required == other.required
             && self.variadic == other.variadic
             && self.ret == other.ret
+            && self.ret_nullable == other.ret_nullable
     }
 }
 
@@ -75,6 +83,8 @@ pub struct FieldInfo {
     pub name: String,
     /// Declared type.
     pub ty: Ty,
+    /// Declared `T?` (SPECS §4.1).
+    pub nullable: bool,
     /// `const` — writable only inside the defining class's constructor.
     pub is_const: bool,
     /// Access control.
@@ -113,6 +123,8 @@ pub struct StaticField {
     pub name: String,
     /// Declared type.
     pub ty: Ty,
+    /// Declared `T?` (SPECS §4.1).
+    pub nullable: bool,
     /// `const`.
     pub is_const: bool,
     /// Access control.
@@ -276,6 +288,19 @@ impl Registry {
             .extends
             .iter()
             .any(|&e| self.iface_extends(e, sup))
+    }
+
+    /// Looks up a field by its slot index, walking the ancestor chain.
+    pub fn field_by_slot(&self, class_id: ClassId, slot: usize) -> Option<&FieldInfo> {
+        let mut cur = Some(class_id);
+        while let Some(c) = cur {
+            let info = &self.classes[c.0 as usize];
+            if let Some(f) = info.fields.iter().find(|f| f.slot == slot) {
+                return Some(f);
+            }
+            cur = info.parent;
+        }
+        None
     }
 
     /// Looks up an instance field by name, walking the ancestor chain.

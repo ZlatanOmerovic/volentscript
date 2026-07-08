@@ -17,6 +17,10 @@ pub enum Tag {
     String = 6,
     /// Class instance; payload = object pointer (header = descriptor ptr).
     Object = 7,
+    /// Array; payload = VsArray pointer.
+    Array = 8,
+    /// Vector.<T>; payload = VsVector pointer.
+    Vector = 9,
 }
 
 /// A boxed dynamic value (`*`). 16 bytes, passed/returned by value.
@@ -104,6 +108,40 @@ impl VsAny {
         self.data as usize as *const u8
     }
 
+    /// Boxes an Array pointer (null → `null`).
+    pub fn array(ptr: *const crate::seq::VsArray) -> VsAny {
+        if ptr.is_null() {
+            VsAny::NULL
+        } else {
+            VsAny {
+                tag: Tag::Array as u32,
+                data: ptr as usize as u64,
+            }
+        }
+    }
+
+    /// Boxes a Vector pointer (null → `null`).
+    pub fn vector(ptr: *const crate::seq::VsVector) -> VsAny {
+        if ptr.is_null() {
+            VsAny::NULL
+        } else {
+            VsAny {
+                tag: Tag::Vector as u32,
+                data: ptr as usize as u64,
+            }
+        }
+    }
+
+    /// Array payload.
+    pub fn as_array_ptr(&self) -> *const crate::seq::VsArray {
+        self.data as usize as *const crate::seq::VsArray
+    }
+
+    /// Vector payload.
+    pub fn as_vector_ptr(&self) -> *const crate::seq::VsVector {
+        self.data as usize as *const crate::seq::VsVector
+    }
+
     /// The tag, decoded.
     pub fn tag(&self) -> Tag {
         match self.tag {
@@ -114,6 +152,8 @@ impl VsAny {
             5 => Tag::Number,
             6 => Tag::String,
             7 => Tag::Object,
+            8 => Tag::Array,
+            9 => Tag::Vector,
             _ => Tag::Undefined,
         }
     }

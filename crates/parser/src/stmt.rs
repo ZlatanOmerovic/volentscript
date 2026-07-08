@@ -388,6 +388,17 @@ impl Parser {
     fn class_decl(&mut self, start: Span, attrs: Attributes) -> Stmt {
         self.advance(); // `class`
         let (name, _) = self.expect_ident();
+        // Generic type parameters: `class Box.<T, U>` (SPECS §4.2).
+        let mut type_params = Vec::new();
+        if self.eat(&TokenKind::LeftDotAngle) {
+            loop {
+                type_params.push(self.expect_ident().0);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect_type_close();
+        }
         let extends = if self.eat(&TokenKind::Extends) {
             Some(self.type_ref())
         } else {
@@ -419,6 +430,7 @@ impl Parser {
             kind: StmtKind::Class(Box::new(ClassDecl {
                 attrs,
                 name,
+                type_params,
                 extends,
                 implements,
                 members,

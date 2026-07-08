@@ -9,12 +9,18 @@ use std::fmt;
 use crate::classes::{ClassId, IfaceId};
 
 /// A semantic type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ty {
     /// Instance of a registered class (nominal identity, SPECS §4.5).
     Class(ClassId),
     /// Value typed by a registered interface.
     Iface(IfaceId),
+    /// The Array class (SPECS §3.10): dynamic length, `*` elements.
+    Array,
+    /// `Vector.<T>` (SPECS §4.3): typed dense vector; payload indexes the
+    /// checker's instantiation table (reified — each element type is a
+    /// distinct runtime type).
+    Vector(u32),
     /// 32-bit signed integer (SPECS §3.3).
     Int,
     /// 32-bit unsigned integer.
@@ -50,7 +56,14 @@ impl Ty {
     pub fn is_reference(self) -> bool {
         matches!(
             self,
-            Ty::String | Ty::Function | Ty::Any | Ty::Null | Ty::Class(_) | Ty::Iface(_)
+            Ty::String
+                | Ty::Function
+                | Ty::Any
+                | Ty::Null
+                | Ty::Class(_)
+                | Ty::Iface(_)
+                | Ty::Array
+                | Ty::Vector(_)
         )
     }
 }
@@ -61,6 +74,8 @@ impl fmt::Display for Ty {
             // Bare ids; diagnostics use `Checker::ty_name` for real names.
             Ty::Class(id) => return write!(f, "class#{}", id.0),
             Ty::Iface(id) => return write!(f, "interface#{}", id.0),
+            Ty::Array => "Array",
+            Ty::Vector(id) => return write!(f, "Vector#{id}"),
             Ty::Int => "int",
             Ty::UInt => "uint",
             Ty::Number => "Number",

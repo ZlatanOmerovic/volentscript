@@ -63,6 +63,10 @@ impl ErrorCode {
     pub const BAD_JUMP: ErrorCode = ErrorCode(310);
     /// `is`/`as` right side does not name a type.
     pub const NOT_A_TYPE: ErrorCode = ErrorCode(311);
+    /// Possibly-null value into a non-nullable slot (SPECS §4.1).
+    pub const NULL_FLOW: ErrorCode = ErrorCode(312);
+    /// Dereference of a possibly-null value (SPECS §4.1).
+    pub const NULL_DEREF: ErrorCode = ErrorCode(313);
 
     // E02xx — syntax errors.
     /// Token cannot appear here.

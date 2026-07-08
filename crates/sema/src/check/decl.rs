@@ -19,10 +19,10 @@ pub(crate) enum TypeSym {
     Iface(IfaceId),
 }
 
-impl Checker {
+impl<'a> Checker<'a> {
     /// Pass A: register every class/interface name in the file (recursing
     /// into packages) so forward references resolve.
-    pub(crate) fn collect_types<'a>(
+    pub(crate) fn collect_types(
         &mut self,
         stmts: &'a [ast::Stmt],
         package: &[String],
@@ -40,6 +40,20 @@ impl Checker {
                         );
                     }
                     self.collect_types(body, path, classes, ifaces);
+                }
+                ast::StmtKind::Class(decl) if !decl.type_params.is_empty() => {
+                    // Generic template (SPECS §4.2): instantiated on use.
+                    if self.template_index(&decl.name).is_some()
+                        || self.type_names.contains_key(&decl.name)
+                    {
+                        self.error(
+                            ErrorCode::CONFLICTING_DECL,
+                            format!("type `{}` is already declared", decl.name),
+                            decl.span,
+                        );
+                    } else {
+                        self.templates.push((decl.name.clone(), decl));
+                    }
                 }
                 ast::StmtKind::Class(decl) => {
                     let id = ClassId(u32::try_from(self.registry.classes.len()).unwrap());
@@ -269,6 +283,7 @@ impl Checker {
     /// are handled when the method is checked).
     fn build_sig(&mut self, params: &[ast::Param], ret: Option<&ast::TypeRef>, kind: VKind) -> Sig {
         let mut tys = Vec::new();
+        let mut nullables = Vec::new();
         let mut required = params.len();
         let mut variadic = false;
         for (i, p) in params.iter().enumerate() {
@@ -285,7 +300,12 @@ impl Checker {
                     .map(|t| self.resolve_type(t))
                     .unwrap_or(Ty::Any),
             );
+            nullables.push(p.ty.as_ref().is_some_and(|t| t.nullable));
         }
+        let ret_nullable = match kind {
+            VKind::Setter => false,
+            _ => ret.is_some_and(|t| t.nullable),
+        };
         let ret = match kind {
             VKind::Setter => Ty::Void,
             _ => ret
@@ -294,9 +314,11 @@ impl Checker {
         };
         Sig {
             params: tys,
+            params_nullable: nullables,
             required,
             variadic,
             ret,
+            ret_nullable,
         }
     }
 
@@ -317,7 +339,7 @@ impl Checker {
 
     /// Pass B2 (per class, parents first): slots, vtable, statics,
     /// constructor signature. Bodies are checked later (pass C).
-    fn build_class_members(&mut self, id: ClassId, decl: &ast::ClassDecl) {
+    pub(crate) fn build_class_members(&mut self, id: ClassId, decl: &ast::ClassDecl) {
         let parent = self.registry.classes[id.0 as usize]
             .parent
             .unwrap_or(OBJECT);
@@ -349,10 +371,12 @@ impl Checker {
                             );
                             continue;
                         }
+                        let nullable = b.ty.as_ref().is_some_and(|t| t.nullable);
                         if member.attrs.is_static {
                             static_fields.push(StaticField {
                                 name: b.name.clone(),
                                 ty,
+                                nullable,
                                 is_const: var.is_const,
                                 visibility,
                                 init: None, // checked in pass C
@@ -362,6 +386,7 @@ impl Checker {
                             fields.push(FieldInfo {
                                 name: b.name.clone(),
                                 ty,
+                                nullable,
                                 is_const: var.is_const,
                                 visibility,
                                 init: None,
@@ -392,6 +417,7 @@ impl Checker {
                     }
                     if member.attrs.is_static {
                         let fn_id = self.new_function_for_static(&name, sig.ret, f.span);
+                        self.set_ret_nullable(fn_id, sig.ret_nullable);
                         static_methods.push(StaticMethod {
                             name,
                             sig,
@@ -401,6 +427,7 @@ impl Checker {
                         continue;
                     }
                     let fn_id = self.new_function_for_method(&name, sig.ret, id, f.span);
+                    self.set_ret_nullable(fn_id, sig.ret_nullable);
                     // Override handling (SPECS §3.4: `override` mandatory).
                     if let Some(pos) = vtable.iter().position(|m| m.name == name && m.kind == kind)
                     {
@@ -474,7 +501,7 @@ impl Checker {
 
     /// Interface conformance (SPECS §3.5): every flattened interface method
     /// must exist publicly with an exactly matching signature.
-    fn check_conformance(&mut self, id: ClassId, decl: &ast::ClassDecl) {
+    pub(crate) fn check_conformance(&mut self, id: ClassId, decl: &ast::ClassDecl) {
         for &iface in self.registry.classes[id.0 as usize]
             .interfaces
             .clone()
@@ -540,7 +567,22 @@ impl Checker {
                             }
                             continue;
                         };
-                        let checked = self.check_initializer(id, member.attrs.is_static, init);
+                        let mut checked = self.check_initializer(id, member.attrs.is_static, init);
+                        // Field initializers coerce + null-check here (the
+                        // hoisted registry entry knows the declared type).
+                        let target = if member.attrs.is_static {
+                            self.registry
+                                .find_static_field(id, &b.name)
+                                .map(|f| (f.ty, f.nullable))
+                        } else {
+                            self.registry
+                                .find_field(id, &b.name)
+                                .map(|f| (f.ty, f.nullable))
+                        };
+                        if let Some((fty, fnullable)) = target {
+                            checked = self.coerce(checked, fty, b.span);
+                            self.check_null_flow(&checked, fty, fnullable, "field", b.span);
+                        }
                         if member.attrs.is_static {
                             if let Some(f) = self.registry.classes[id.0 as usize]
                                 .static_fields

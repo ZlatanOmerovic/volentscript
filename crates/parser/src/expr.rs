@@ -190,6 +190,19 @@ impl Parser {
                         span,
                     }
                 }
+                TokenKind::LeftDotAngle => {
+                    self.advance();
+                    let mut args = vec![self.type_ref()];
+                    while self.eat(&TokenKind::Comma) {
+                        args.push(self.type_ref());
+                    }
+                    self.expect_type_close();
+                    let span = expr.span.to(self.tokens[self.pos - 1].span);
+                    Expr {
+                        kind: ExprKind::ApplyType(Box::new(expr), args),
+                        span,
+                    }
+                }
                 TokenKind::DotDot => {
                     let token = self.advance();
                     self.error(
@@ -208,6 +221,31 @@ impl Parser {
     /// `new a.b.C(x)` constructs `a.b.C` (ES3 §11.2.2).
     fn new_expression(&mut self) -> Expr {
         let start = self.advance().span; // `new`
+        // `new <T>[...]` Vector literal (SPECS §4.3; avmplus
+        // vectorInitializer, eval-parse-expr.cpp:214).
+        if self.at(&TokenKind::Lt) {
+            self.advance();
+            let elem = self.type_ref();
+            self.expect_type_close();
+            self.expect(&TokenKind::LBracket);
+            let mut elements = Vec::new();
+            if !self.at(&TokenKind::RBracket) {
+                loop {
+                    elements.push(self.assignment_expression());
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                    if self.at(&TokenKind::RBracket) {
+                        break;
+                    }
+                }
+            }
+            let end = self.expect(&TokenKind::RBracket);
+            return Expr {
+                kind: ExprKind::VectorLit { elem, elements },
+                span: start.to(end),
+            };
+        }
         let mut callee = if self.at(&TokenKind::New) {
             self.new_expression()
         } else {
@@ -215,6 +253,19 @@ impl Parser {
         };
         loop {
             callee = match &self.current().kind {
+                TokenKind::LeftDotAngle => {
+                    self.advance();
+                    let mut targs = vec![self.type_ref()];
+                    while self.eat(&TokenKind::Comma) {
+                        targs.push(self.type_ref());
+                    }
+                    self.expect_type_close();
+                    let span = callee.span.to(self.tokens[self.pos - 1].span);
+                    Expr {
+                        kind: ExprKind::ApplyType(Box::new(callee), targs),
+                        span,
+                    }
+                }
                 TokenKind::Dot => {
                     self.advance();
                     let (name, name_span) = self.expect_ident();

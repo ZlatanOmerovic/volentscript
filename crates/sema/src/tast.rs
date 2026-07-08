@@ -15,7 +15,7 @@ use crate::ty::Ty;
 pub struct FnId(pub u32);
 
 /// Index of a local slot in the enclosing function's [`TFunction::locals`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LocalId(pub u32);
 
 /// A fully type-checked program.
@@ -27,6 +27,9 @@ pub struct TProgram {
     pub functions: Vec<TFunction>,
     /// The class/interface registry (layouts, vtables).
     pub registry: Registry,
+    /// `Vector.<T>` instantiation table: index = `Ty::Vector` payload,
+    /// value = element type.
+    pub vectors: Vec<crate::ty::Ty>,
 }
 
 /// The id of the synthesized top-level script function.
@@ -60,6 +63,8 @@ pub struct Local {
     pub name: String,
     /// Declared (or defaulted) type.
     pub ty: Ty,
+    /// Declared `T?` (SPECS §4.1). Non-reference types ignore this.
+    pub nullable: bool,
     /// `const` — assignment outside initialization is E0304.
     pub is_const: bool,
     /// Parameter default value, if this local is a defaulted parameter.
@@ -168,6 +173,37 @@ pub struct TExpr {
     pub kind: TExprKind,
 }
 
+/// Array instance methods (SPECS §6, P5 set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum ArrMethod {
+    Push,
+    Pop,
+    Shift,
+    Unshift,
+    Slice,
+    Splice,
+    IndexOf,
+    Concat,
+    Join,
+    Reverse,
+    Sort,
+}
+
+/// Vector instance methods (same surface where meaningful, SPECS §6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum VecMethod {
+    Push,
+    Pop,
+    Shift,
+    Unshift,
+    Slice,
+    IndexOf,
+    Join,
+    Reverse,
+}
+
 /// Checked expression kinds.
 #[derive(Debug)]
 #[allow(missing_docs)]
@@ -245,6 +281,16 @@ pub enum TExprKind {
     /// Static field read/write: (class, static index).
     StaticGet(ClassId, usize),
     StaticSet(ClassId, usize, Box<TExpr>),
+    /// `new <T>[...]` / `new Vector.<T>(...)` (payload: instantiation id).
+    VectorLit(u32, Vec<TExpr>),
+    /// Array method call.
+    CallArr(ArrMethod, Box<TExpr>, Vec<TExpr>),
+    /// Vector method call (element coercions already inserted).
+    CallVec(VecMethod, Box<TExpr>, Vec<TExpr>),
+    /// `length` read on Array/Vector.
+    SeqLen(Box<TExpr>),
+    /// `length = n` on Array/Vector (truncates/extends).
+    SeqSetLen(Box<TExpr>, Box<TExpr>),
     /// Implicit conversion made explicit; `ty` is the target.
     Coerce(Coercion, Box<TExpr>),
     Array(Vec<Option<TExpr>>),

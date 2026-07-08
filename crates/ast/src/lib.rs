@@ -253,6 +253,8 @@ pub struct ClassDecl {
     pub attrs: Attributes,
     /// Class name.
     pub name: String,
+    /// Generic type parameters (`class Box.<T>`, SPECS §4.2).
+    pub type_params: Vec<String>,
     /// Superclass; `None` = Object.
     pub extends: Option<TypeRef>,
     /// Implemented interfaces.
@@ -401,6 +403,14 @@ pub enum ExprKind {
     Index(Box<Expr>, Box<Expr>),
     /// `a, b`.
     Comma(Box<Expr>, Box<Expr>),
+    /// `new <T>[a, b]` — Vector literal (SPECS §4.3).
+    VectorLit {
+        elem: TypeRef,
+        elements: Vec<Expr>,
+    },
+    /// `Base.<T, U>` type application in expression position
+    /// (avmplus T_LeftDotAngle property operator, eval-parse-expr.cpp:389).
+    ApplyType(Box<Expr>, Vec<TypeRef>),
 }
 
 /// An object-initializer property name.

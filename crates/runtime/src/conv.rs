@@ -77,7 +77,7 @@ pub fn any_truthy(v: VsAny) -> bool {
             unsafe { crate::string::deref(v.as_string_ptr()) }.is_some_and(|s| s.len > 0)
         }
         // Every object is truthy (§9.2).
-        Tag::Object => true,
+        Tag::Object | Tag::Array | Tag::Vector => true,
     }
 }
 
@@ -102,7 +102,7 @@ pub fn any_to_number(v: VsAny) -> f64 {
         }
         // Objects: ToPrimitive would call valueOf; the P4 object model has
         // none, so NaN (documented deviation until valueOf lands).
-        Tag::Object => f64::NAN,
+        Tag::Object | Tag::Array | Tag::Vector => f64::NAN,
         _ => v.numeric().unwrap_or(f64::NAN),
     }
 }
@@ -124,6 +124,17 @@ pub fn any_to_display(v: VsAny) -> String {
             }
         }
         Tag::Object => crate::object::object_to_display(v.as_object_ptr()),
+        // §15.4.4.2: elements joined with ",".
+        Tag::Array => {
+            // SAFETY: Array-tagged payloads hold live VsArrays.
+            let arr = unsafe { &*v.as_array_ptr() };
+            crate::seq::join(&arr.data.borrow(), ",")
+        }
+        Tag::Vector => {
+            // SAFETY: Vector-tagged payloads hold live VsVectors.
+            let vec = unsafe { &*v.as_vector_ptr() };
+            crate::seq::join(&vec.data.borrow(), ",")
+        }
     }
 }
 
@@ -136,7 +147,7 @@ pub fn any_typeof(v: VsAny) -> &'static str {
         Tag::Boolean => "boolean",
         Tag::Int | Tag::UInt | Tag::Number => "number",
         Tag::String => "string",
-        Tag::Object => "object",
+        Tag::Object | Tag::Array | Tag::Vector => "object",
     }
 }
 
@@ -154,7 +165,7 @@ pub fn any_is(v: VsAny, target: Tag) -> bool {
         Tag::Number => v.numeric().is_some(),
         Tag::Boolean => v.tag() == Tag::Boolean,
         Tag::String => v.tag() == Tag::String,
-        Tag::Null | Tag::Undefined | Tag::Object => false,
+        Tag::Null | Tag::Undefined | Tag::Object | Tag::Array | Tag::Vector => false,
     }
 }
 
@@ -170,7 +181,9 @@ pub fn any_strict_equals(a: VsAny, b: VsAny) -> bool {
         (Tag::Undefined, Tag::Undefined) | (Tag::Null, Tag::Null) => true,
         (Tag::Boolean, Tag::Boolean) => a.data == b.data,
         // Object identity (§11.9.6 step 13).
-        (Tag::Object, Tag::Object) => a.data == b.data,
+        (Tag::Object, Tag::Object) | (Tag::Array, Tag::Array) | (Tag::Vector, Tag::Vector) => {
+            a.data == b.data
+        }
         (Tag::String, Tag::String) => {
             // SAFETY: String-tagged payloads always hold live VsStrings.
             let (sa, sb) = unsafe {

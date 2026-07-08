@@ -66,6 +66,18 @@ pub fn lower(program: &sema::TProgram) -> Result<Program, Vec<Diagnostic>> {
             functions,
             classes,
             iface_count: u32::try_from(program.registry.ifaces.len()).unwrap_or(0),
+            vectors: {
+                let mut lo2 = Lowerer {
+                    program,
+                    diagnostics: Vec::new(),
+                    ctor_fn: Vec::new(),
+                };
+                program
+                    .vectors
+                    .iter()
+                    .map(|&t| lo2.ty(t, span::Span::new(span::SourceId(0), 0, 0)))
+                    .collect()
+            },
         })
     } else {
         lo.diagnostics
@@ -90,7 +102,6 @@ impl Lowerer<'_> {
             .take(f.param_count)
             .map(|l| {
                 if l.is_rest {
-                    self.gate(f.span, "rest parameters need Array — Phase 5");
                     None
                 } else {
                     l.default.as_ref().map(|d| self.expr(d))
@@ -123,6 +134,8 @@ impl Lowerer<'_> {
             sema::Ty::Any => Ty::Any,
             sema::Ty::Class(id) => Ty::Object(id.0),
             sema::Ty::Iface(id) => Ty::Iface(id.0),
+            sema::Ty::Array => Ty::Array,
+            sema::Ty::Vector(inst) => Ty::Vector(inst),
             sema::Ty::Function => {
                 self.gate(span, "Function values need closures — Phase 6");
                 Ty::Any
@@ -472,6 +485,7 @@ impl Lowerer<'_> {
                         lowered.push(self.expr(default));
                     }
                 }
+                self.bundle_rest(sema::FnId(id.0), &mut lowered, span);
                 ExprKind::CallFn(FnId(id.0), lowered)
             }
             E::CallBuiltin(b, args) => self.builtin_call(*b, args, span),
@@ -489,16 +503,31 @@ impl Lowerer<'_> {
                     );
                 }
             }
+            E::Index(recv, idx) if matches!(recv.ty, sema::Ty::Array | sema::Ty::Vector(_)) => {
+                ExprKind::SeqGet(Box::new(self.expr(recv)), Box::new(self.expr(idx)))
+            }
+            E::IndexSet(recv, idx, v)
+                if matches!(recv.ty, sema::Ty::Array | sema::Ty::Vector(_)) =>
+            {
+                ExprKind::SeqSet(
+                    Box::new(self.expr(recv)),
+                    Box::new(self.expr(idx)),
+                    Box::new(self.expr(v)),
+                )
+            }
             E::MemberSet(..) | E::IndexSet(..) | E::Index(..) => {
                 return self.gated_expr(
                     span,
                     ty,
-                    "dynamic property access needs the object model — Phase 4",
+                    "dynamic property access needs the object model — Phase 7",
                 );
             }
-            E::Array(_) => {
-                return self.gated_expr(span, ty, "Array literals need the Array class — Phase 5");
-            }
+            E::Array(elements) => ExprKind::ArrayLit(
+                elements
+                    .iter()
+                    .map(|el| el.as_ref().map(|e| self.expr(e)))
+                    .collect(),
+            ),
             E::Object(_) => {
                 return self.gated_expr(
                     span,
@@ -553,6 +582,8 @@ impl Lowerer<'_> {
                         // AVM2 coerce: checked class/interface conversion.
                         sema::Ty::Class(c) => Conv::AnyToObject(c.0),
                         sema::Ty::Iface(i) => Conv::AnyToIface(i.0),
+                        sema::Ty::Array => Conv::AnyToArray,
+                        sema::Ty::Vector(i) => Conv::AnyToVector(i),
                         _ => {
                             return self.gated_expr(
                                 span,
@@ -651,9 +682,71 @@ impl Lowerer<'_> {
             E::StaticSet(class, index, v) => {
                 ExprKind::StaticSet(class.0, *index, Box::new(self.expr(v)))
             }
+            E::VectorLit(inst, elements) => {
+                ExprKind::VectorLit(*inst, elements.iter().map(|e| self.expr(e)).collect())
+            }
+            E::CallArr(m, recv, args) => {
+                use sema::ArrMethod as A;
+                let m = match m {
+                    A::Push => ArrMethod::Push,
+                    A::Pop => ArrMethod::Pop,
+                    A::Shift => ArrMethod::Shift,
+                    A::Unshift => ArrMethod::Unshift,
+                    A::Slice => ArrMethod::Slice,
+                    A::Splice => ArrMethod::Splice,
+                    A::IndexOf => ArrMethod::IndexOf,
+                    A::Concat => ArrMethod::Concat,
+                    A::Join => ArrMethod::Join,
+                    A::Reverse => ArrMethod::Reverse,
+                    A::Sort => ArrMethod::Sort,
+                };
+                ExprKind::CallArr(
+                    m,
+                    Box::new(self.expr(recv)),
+                    args.iter().map(|a| self.expr(a)).collect(),
+                )
+            }
+            E::CallVec(m, recv, args) => {
+                use sema::VecMethod as V;
+                let m = match m {
+                    V::Push => VecMethod::Push,
+                    V::Pop => VecMethod::Pop,
+                    V::Shift => VecMethod::Shift,
+                    V::Unshift => VecMethod::Unshift,
+                    V::Slice => VecMethod::Slice,
+                    V::IndexOf => VecMethod::IndexOf,
+                    V::Join => VecMethod::Join,
+                    V::Reverse => VecMethod::Reverse,
+                };
+                ExprKind::CallVec(
+                    m,
+                    Box::new(self.expr(recv)),
+                    args.iter().map(|a| self.expr(a)).collect(),
+                )
+            }
+            E::SeqLen(o) => ExprKind::SeqLen(Box::new(self.expr(o))),
+            E::SeqSetLen(o, v) => {
+                ExprKind::SeqSetLen(Box::new(self.expr(o)), Box::new(self.expr(v)))
+            }
             E::Error => unreachable!("error expr survived sema"),
         };
         Expr { ty, span, kind }
+    }
+
+    /// Bundles trailing arguments into the callee's `...rest` Array
+    /// parameter (SPECS §6).
+    fn bundle_rest(&mut self, callee: sema::FnId, lowered: &mut Vec<Expr>, span: Span) {
+        let f = &self.program.functions[callee.0 as usize];
+        if f.param_count == 0 || !f.locals[f.param_count - 1].is_rest {
+            return;
+        }
+        let rest_at = f.param_count - 1;
+        let extra: Vec<Expr> = lowered.split_off(rest_at.min(lowered.len()));
+        lowered.push(Expr {
+            ty: Ty::Array,
+            span,
+            kind: ExprKind::ArrayLit(extra.into_iter().map(Some).collect()),
+        });
     }
 
     /// Appends omitted defaulted arguments from a sema function's parameter
@@ -904,7 +997,14 @@ impl Lowerer<'_> {
                         return acc;
                     }
                     "split" => {
-                        return self.gated_expr(span, ty, "`split` returns Array — Phase 5");
+                        // Defaults per String.as:151 (delim/limit untyped).
+                        if lowered.is_empty() {
+                            lowered.push(str_lit(",", span));
+                        }
+                        if lowered.len() == 1 {
+                            lowered.push(num_lit(4294967295.0, span));
+                        }
+                        StrMethod::Split
                     }
                     _ => return self.gated_expr(span, ty, "this String method — Phase 7"),
                 };

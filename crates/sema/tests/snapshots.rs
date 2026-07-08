@@ -51,9 +51,10 @@ fn type_errors_snapshot() {
 
 #[test]
 fn null_into_reference_ok_into_machine_err() {
-    // null → String legal; null → int illegal (machine types can't hold
-    // null — avmplus Verifier.cpp:1604).
-    assert!(!run("a.as", "var s:String = null;").contains("error"));
+    // Under SPECS §4.1, null needs a nullable slot (`String?`); machine
+    // types can never hold null (avmplus Verifier.cpp:1604).
+    assert!(!run("a.as", "var s:String? = null;").contains("error"));
+    assert!(run("a2.as", "var s:String = null;").contains("E0312"));
     assert!(run("b.as", "var i:int = null;").contains("E0302"));
 }
 
@@ -79,4 +80,11 @@ fn closures_gated_until_p6() {
 fn oop_errors_snapshot() {
     let text = include_str!("programs/oop_errors.as");
     expect_file!["programs/oop_errors.diag"].assert_eq(&run("oop_errors.as", text));
+}
+
+/// P5 null safety (SPECS §4.1): flow and deref diagnostics + narrowing.
+#[test]
+fn null_safety_snapshot() {
+    let text = include_str!("programs/nulls.as");
+    expect_file!["programs/nulls.diag"].assert_eq(&run("nulls.as", text));
 }

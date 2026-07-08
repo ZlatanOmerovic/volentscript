@@ -64,8 +64,10 @@ c.radius = c.radius * 2;
 trace(shapes0.name, shapes0.area() > 12, shapes0 is Circle, shapes0 is Shape);
 trace(c.name, c.radius, c.describe());
 trace(new Unit().area() == Circle.PI, Circle.count);
-var b:Ball = shapes0 as Ball;
-trace(b.darken());
-trace(b);
-var miss:Ball = c as Ball;
+var b:Ball? = shapes0 as Ball;
+if (b != null) {
+    trace(b.darken());
+    trace(b);
+}
+var miss:Ball? = c as Ball;
 trace(miss == null, Object(b) === b);

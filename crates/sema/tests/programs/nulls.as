@@ -1,0 +1,19 @@
+var bad:String = null;                    // E0312 null literal
+var maybe:String? = "x";
+function needs(s:String):String { return s; }
+needs(maybe);                             // E0312 unnarrowed argument
+trace(maybe.length);                      // E0313 unnarrowed deref
+if (maybe != null) {
+    needs(maybe);                         // ok
+    trace(maybe.length);                  // ok
+}
+class Holder {
+    public var name:String = "n";
+    public var tag:String? = null;
+}
+var h:Holder = new Holder();
+h.name = h.tag;                           // E0312 nullable into non-nullable field
+var loose:* = null;
+var esc:String = loose;                   // ok: `*` is the escape hatch (§4.1)
+function giveOrNot(flag:Boolean):String? { return flag ? "y" : null; }
+var got:String = giveOrNot(true);         // E0312 nullable return

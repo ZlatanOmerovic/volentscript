@@ -19,6 +19,7 @@ mod any;
 mod conv;
 mod ffi;
 mod object;
+mod seq;
 mod string;
 
 pub use any::{Tag, VsAny};

@@ -29,7 +29,7 @@ pub(crate) enum ClassMember {
     },
 }
 
-impl Checker {
+impl Checker<'_> {
     pub(crate) fn current_method(&self) -> Option<MethodCtx> {
         self.method_ctx.last().copied().flatten()
     }
@@ -230,6 +230,14 @@ impl Checker {
                 ty,
                 is_const,
             }) => {
+                {
+                    let nullable = self
+                        .registry
+                        .field_by_slot(defined_in, slot)
+                        .is_some_and(|f| f.nullable);
+                    // Evaluate flow before the const check reports.
+                    let _ = nullable;
+                }
                 if is_const {
                     // const fields assign only inside the defining class's
                     // constructor (AS3 allows constructor initialization).
@@ -245,6 +253,11 @@ impl Checker {
                     }
                 }
                 let value = self.coerce(value, ty, span);
+                let nullable = self
+                    .registry
+                    .field_by_slot(defined_in, slot)
+                    .is_some_and(|f| f.nullable);
+                self.check_null_flow(&value, ty, nullable, "field", span);
                 TExpr {
                     ty,
                     span,
@@ -254,6 +267,13 @@ impl Checker {
             Some(ClassMember::Accessor { setter, .. }) => match setter {
                 Some((vslot, param_ty)) => {
                     let value = self.coerce(value, param_ty, span);
+                    let nullable = self.registry.classes[class.0 as usize].vtable[vslot]
+                        .sig
+                        .params_nullable
+                        .first()
+                        .copied()
+                        .unwrap_or(false);
+                    self.check_null_flow(&value, param_ty, nullable, "property", span);
                     TExpr {
                         ty: param_ty,
                         span,
@@ -485,15 +505,71 @@ impl Checker {
             .map(|(i, a)| {
                 let checked = self.expr(a);
                 match sig.params.get(i) {
-                    Some(&ty) => self.coerce(checked, ty, a.span),
+                    Some(&ty) => {
+                        let coerced = self.coerce(checked, ty, a.span);
+                        let nullable = sig.params_nullable.get(i).copied().unwrap_or(false);
+                        self.check_null_flow(&coerced, ty, nullable, "parameter", a.span);
+                        coerced
+                    }
                     None => self.coerce_to_any(checked),
                 }
             })
             .collect()
     }
 
-    /// `new C(args)` (SPECS §3.4).
+    /// `new C(args)` (SPECS §3.4); also `new Vector.<T>()`, `new Array(...)`
+    /// and `new Box.<T>(args)`.
     pub(crate) fn new_expr(&mut self, callee: &ast::Expr, args: &[ast::Expr], span: Span) -> TExpr {
+        // Parameterized targets.
+        if matches!(callee.kind, ExprKind::ApplyType(..)) {
+            match self.apply_type_to_ty(callee) {
+                Some(Ty::Vector(inst)) => {
+                    if !args.is_empty() {
+                        self.error(
+                            ErrorCode::NOT_IMPLEMENTED,
+                            "sized Vector constructors — Phase 7 (use a literal)",
+                            span,
+                        );
+                    }
+                    return TExpr {
+                        ty: Ty::Vector(inst),
+                        span,
+                        kind: TExprKind::VectorLit(inst, Vec::new()),
+                    };
+                }
+                Some(Ty::Class(class)) => {
+                    let sig = self.registry.classes[class.0 as usize].ctor_sig.clone();
+                    let name = self.registry.classes[class.0 as usize].name.clone();
+                    let args = self.check_sig_args(&sig, &name, args, span);
+                    return TExpr {
+                        ty: Ty::Class(class),
+                        span,
+                        kind: TExprKind::New(class, args),
+                    };
+                }
+                _ => {
+                    self.error(ErrorCode::NOT_A_TYPE, "cannot construct this type", span);
+                    return self.error_expr(span);
+                }
+            }
+        }
+        // `new Array(...)` — literal-equivalent.
+        if let ExprKind::Ident(name) = &callee.kind {
+            if name == "Array" && !self.is_shadowed(name) {
+                let elements = args
+                    .iter()
+                    .map(|a| {
+                        let checked = self.expr(a);
+                        Some(self.coerce_to_any(checked))
+                    })
+                    .collect();
+                return TExpr {
+                    ty: Ty::Array,
+                    span,
+                    kind: TExprKind::Array(elements),
+                };
+            }
+        }
         let Some(class) = self.type_expr_to_class(callee) else {
             self.error(
                 ErrorCode::NOT_A_TYPE,
@@ -574,6 +650,8 @@ impl Checker {
                 );
             }
             let value = self.coerce(value, ty, span);
+            let nullable = self.registry.classes[class.0 as usize].static_fields[index].nullable;
+            self.check_null_flow(&value, ty, nullable, "static field", span);
             return TExpr {
                 ty,
                 span,
@@ -814,6 +892,9 @@ impl Checker {
         if let Some(ty) = crate::builtins::type_name(name) {
             return Some(ty);
         }
+        if name == "Array" {
+            return Some(Ty::Array);
+        }
         match self.type_names.get(name).copied() {
             Some(TypeSym::Class(id)) => Some(Ty::Class(id)),
             Some(TypeSym::Iface(id)) => Some(Ty::Iface(id)),
@@ -832,7 +913,7 @@ fn flatten_path(e: &ast::Expr) -> Option<String> {
     }
 }
 
-impl Checker {
+impl Checker<'_> {
     /// Whether a bare name is shadowed by a local/function symbol (locals
     /// shadow type names and members).
     pub(crate) fn is_shadowed(&self, name: &str) -> bool {

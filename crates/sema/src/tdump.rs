@@ -397,6 +397,43 @@ impl Dumper {
                 self.line(format!("{header}StaticSet class#{} s{i}", class.0));
                 self.indented(|d| d.expr(v));
             }
+            TExprKind::VectorLit(inst, elements) => {
+                self.line(format!("{header}VectorLit v#{inst}"));
+                self.indented(|d| {
+                    for e in elements {
+                        d.expr(e);
+                    }
+                });
+            }
+            TExprKind::CallArr(m, recv, args) => {
+                self.line(format!("{header}CallArr {m:?}"));
+                self.indented(|d| {
+                    d.expr(recv);
+                    for a in args {
+                        d.expr(a);
+                    }
+                });
+            }
+            TExprKind::CallVec(m, recv, args) => {
+                self.line(format!("{header}CallVec {m:?}"));
+                self.indented(|d| {
+                    d.expr(recv);
+                    for a in args {
+                        d.expr(a);
+                    }
+                });
+            }
+            TExprKind::SeqLen(o) => {
+                self.line(format!("{header}SeqLen"));
+                self.indented(|d| d.expr(o));
+            }
+            TExprKind::SeqSetLen(o, v) => {
+                self.line(format!("{header}SeqSetLen"));
+                self.indented(|d| {
+                    d.expr(o);
+                    d.expr(v);
+                });
+            }
             TExprKind::Array(elements) => {
                 self.line(format!("{header}Array"));
                 self.indented(|d| {

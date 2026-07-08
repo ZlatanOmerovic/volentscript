@@ -6,9 +6,11 @@
 //! not present in `docs/` (see P2 report), the conservative choice is taken
 //! and marked `DOC GAP`.
 
+mod collections;
 mod decl;
 mod expr;
 mod expr_class;
+mod null;
 
 use std::collections::HashMap;
 
@@ -42,7 +44,7 @@ pub struct CheckOutcome {
 
 /// Type-checks a parsed program.
 pub fn check(program: &ast::Program) -> CheckOutcome {
-    let mut checker = Checker::default();
+    let mut checker = Checker::new();
     checker.check_script(program);
     checker
         .diagnostics
@@ -55,6 +57,7 @@ pub fn check(program: &ast::Program) -> CheckOutcome {
         program: (!failed).then_some(TProgram {
             functions: checker.functions,
             registry: checker.registry,
+            vectors: checker.vector_insts,
         }),
         diagnostics: checker.diagnostics,
     }
@@ -102,7 +105,7 @@ struct JumpCtx {
 }
 
 #[derive(Default)]
-pub(crate) struct Checker {
+pub(crate) struct Checker<'a> {
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) functions: Vec<TFunction>,
     signatures: Vec<FnSig>,
@@ -119,10 +122,41 @@ pub(crate) struct Checker {
     pub(crate) method_ctx: Vec<Option<MethodCtx>>,
     /// Set when the constructor being checked contains a `super(...)` call.
     pub(crate) ctor_saw_super: bool,
+    /// Generic class templates (SPECS §4.2): name → declaration.
+    pub(crate) templates: Vec<(String, &'a ast::ClassDecl)>,
+    /// Memoized monomorphic instantiations: (template, args) → class.
+    pub(crate) instantiations: HashMap<(usize, Vec<Ty>), ClassId>,
+    /// Active type-parameter substitutions (innermost last).
+    pub(crate) subst: Vec<HashMap<String, Ty>>,
+    /// `Vector.<T>` instantiations: index = the `Ty::Vector` payload.
+    pub(crate) vector_insts: Vec<Ty>,
+    /// Locals proven non-null in the current flow (SPECS §4.1 narrowing);
+    /// one set per active narrowing scope.
+    pub(crate) narrowed: Vec<std::collections::HashSet<LocalId>>,
+    /// `T?` return flags parallel to `functions`.
+    pub(crate) fn_ret_nullable_flags: Vec<bool>,
 }
 
-impl Checker {
-    fn check_script(&mut self, program: &ast::Program) {
+impl<'a> Checker<'a> {
+    fn new() -> Checker<'a> {
+        Checker::default()
+    }
+
+    /// Interns a `Vector.<elem>` instantiation (SPECS §4.3 — reified:
+    /// distinct element types are distinct runtime types).
+    pub(crate) fn vector_of(&mut self, elem: Ty) -> Ty {
+        if let Some(i) = self.vector_insts.iter().position(|&e| e == elem) {
+            return Ty::Vector(i as u32);
+        }
+        self.vector_insts.push(elem);
+        Ty::Vector((self.vector_insts.len() - 1) as u32)
+    }
+
+    /// Element type of an interned vector.
+    pub(crate) fn vector_elem(&self, inst: u32) -> Ty {
+        self.vector_insts[inst as usize]
+    }
+    fn check_script(&mut self, program: &'a ast::Program) {
         self.registry = Registry::with_object_root();
         // The script body is function 0 with no params (SPECS §7 entry).
         let script = self.new_function("<script>", Ty::Void, program.span);
@@ -154,6 +188,7 @@ impl Checker {
         match ty {
             Ty::Class(id) => self.registry.classes[id.0 as usize].qualified(),
             Ty::Iface(id) => self.registry.ifaces[id.0 as usize].name.clone(),
+            Ty::Vector(inst) => format!("Vector.<{}>", self.ty_name(self.vector_elem(inst))),
             other => other.to_string(),
         }
     }
@@ -175,6 +210,7 @@ impl Checker {
             variadic: false,
             ret: return_ty,
         });
+        self.fn_ret_nullable_flags.push(false);
         id
     }
 
@@ -198,7 +234,7 @@ impl Checker {
                     .map(|t| self.resolve_type(t))
                     .unwrap_or(Ty::Any);
             if p.rest {
-                // `...rest` binds an Array (P5); `*` until then.
+                // `...rest` binds an Array (SPECS §6).
                 required = required.min(i);
                 self.signatures[fn_index].variadic = true;
             } else if p.default.is_some() {
@@ -220,7 +256,8 @@ impl Checker {
             let local = LocalId(u32::try_from(self.functions[fn_index].locals.len()).unwrap());
             self.functions[fn_index].locals.push(Local {
                 name: p.name.clone(),
-                ty: if p.rest { Ty::Any } else { ty },
+                ty: if p.rest { Ty::Array } else { ty },
+                nullable: p.ty.as_ref().is_some_and(|t| t.nullable),
                 is_const: false,
                 default,
                 is_rest: p.rest,
@@ -242,6 +279,7 @@ impl Checker {
             .locals
             .iter()
             .take(params.len())
+            .filter(|l| !l.is_rest)
             .map(|l| ParamSig { ty: l.ty })
             .collect();
 
@@ -262,6 +300,10 @@ impl Checker {
                 .map(|t| self.resolve_type_allow_void(t))
                 .unwrap_or(Ty::Any);
             let nested_id = self.new_function(&name, ret, f.span);
+            self.set_ret_nullable(
+                nested_id,
+                f.return_type.as_ref().is_some_and(|t| t.nullable),
+            );
             self.register_signature(nested_id, &f.params);
             if let Some(n) = &f.name {
                 self.declare(n, Symbol::Fn(nested_id), f.span);
@@ -319,13 +361,32 @@ impl Checker {
     }
 
     /// Checks a nested function in its own scope frame.
+    /// Registers the `T?` return flag once the return type is known.
+    pub(crate) fn set_ret_nullable(&mut self, id: FnId, nullable: bool) {
+        self.fn_ret_nullable_flags[id.0 as usize] = nullable;
+    }
+
+    /// Updates narrowing state after an assignment to a local.
+    pub(crate) fn update_narrow_on_assign(&mut self, id: LocalId, value_nullable: bool) {
+        if value_nullable {
+            for set in &mut self.narrowed {
+                set.remove(&id);
+            }
+        } else if let Some(top) = self.narrowed.last_mut() {
+            top.insert(id);
+        }
+    }
+
     fn enter_function(&mut self, f: &ast::FunctionDecl, id: FnId) {
         self.scopes.push(Scope::default());
         self.fn_stack.push(id.0 as usize);
         let saved_jumps = std::mem::take(&mut self.jumps);
         let saved_labels = std::mem::take(&mut self.labels);
+        let saved_narrow = std::mem::take(&mut self.narrowed);
+        self.set_ret_nullable(id, f.return_type.as_ref().is_some_and(|t| t.nullable));
         let body = self.check_function_body(id, &f.params, &f.body.stmts, f.span);
         self.functions[id.0 as usize].body = body;
+        self.narrowed = saved_narrow;
         self.labels = saved_labels;
         self.jumps = saved_jumps;
         self.fn_stack.pop();
@@ -335,11 +396,11 @@ impl Checker {
     /// Collects hoisted declarations: `var`/`const` bindings anywhere in the
     /// function (not crossing nested function boundaries) and directly
     /// declared functions.
-    fn hoist<'a>(
+    fn hoist<'b>(
         &mut self,
         fn_index: usize,
-        stmts: &'a [ast::Stmt],
-        nested: &mut Vec<&'a ast::FunctionDecl>,
+        stmts: &'b [ast::Stmt],
+        nested: &mut Vec<&'b ast::FunctionDecl>,
     ) {
         use ast::StmtKind::*;
         for stmt in stmts {
@@ -430,6 +491,7 @@ impl Checker {
             self.functions[fn_index].locals.push(Local {
                 name: b.name.clone(),
                 ty,
+                nullable: b.ty.as_ref().is_some_and(|t| t.nullable),
                 is_const: decl.is_const,
                 default: None,
                 is_rest: false,
@@ -502,16 +564,50 @@ impl Checker {
             ast::TypeRefKind::Void => Ty::Void,
             ast::TypeRefKind::Name { path, type_args } => {
                 if !type_args.is_empty() {
+                    let args: Vec<Ty> = type_args.iter().map(|a| self.resolve_type(a)).collect();
+                    if path.as_slice() == ["Vector"] {
+                        if args.len() != 1 {
+                            self.error(
+                                ErrorCode::WRONG_ARG_COUNT,
+                                "Vector takes exactly one type argument",
+                                t.span,
+                            );
+                            return Ty::Error;
+                        }
+                        return self.vector_of(args[0]);
+                    }
+                    if let [single] = path.as_slice() {
+                        if let Some(tid) = self.template_index(single) {
+                            return Ty::Class(self.instantiate_template(tid, args, t.span));
+                        }
+                    }
                     self.error(
-                        ErrorCode::NOT_IMPLEMENTED,
-                        "generic types are not implemented until Phase 5",
+                        ErrorCode::UNRESOLVED_NAME,
+                        format!("unknown generic type `{}`", path.join(".")),
                         t.span,
                     );
                     return Ty::Error;
                 }
                 if let [single] = path.as_slice() {
+                    // Active type parameters shadow everything (SPECS §4.2).
+                    for frame in self.subst.iter().rev() {
+                        if let Some(&ty) = frame.get(single) {
+                            return ty;
+                        }
+                    }
                     if let Some(ty) = builtins::type_name(single) {
                         return ty;
+                    }
+                    if single == "Array" {
+                        return Ty::Array;
+                    }
+                    if self.template_index(single).is_some() {
+                        self.error(
+                            ErrorCode::WRONG_ARG_COUNT,
+                            format!("generic class `{single}` needs type arguments"),
+                            t.span,
+                        );
+                        return Ty::Error;
                     }
                 }
                 match self.type_names.get(&path.join(".")) {
@@ -696,19 +792,41 @@ impl Checker {
             } => {
                 let cond = self.expr(cond);
                 let cond = self.coerce_condition(cond);
+                let (when_true, when_false) = Self::narrowing_of(&cond);
+                self.narrowed.push(when_true.iter().copied().collect());
+                let then_checked = Box::new(self.stmt(then_branch));
+                self.narrowed.pop();
+                self.narrowed.push(when_false.iter().copied().collect());
+                let else_checked = else_branch.as_ref().map(|e| Box::new(self.stmt(e)));
+                self.narrowed.pop();
+                // Early-exit narrowing: `if (x == null) return;` proves x
+                // non-null afterwards (and symmetrically).
+                let then_exits = !stmt_completes(&then_checked);
+                let else_exits = else_checked.as_ref().is_some_and(|e| !stmt_completes(e));
+                if then_exits {
+                    if let Some(top) = self.narrowed.last_mut() {
+                        top.extend(when_false.iter().copied());
+                    }
+                }
+                if else_exits {
+                    if let Some(top) = self.narrowed.last_mut() {
+                        top.extend(when_true.iter().copied());
+                    }
+                }
                 TStmtKind::If {
                     cond,
-                    then_branch: Box::new(self.stmt(then_branch)),
-                    else_branch: else_branch.as_ref().map(|e| Box::new(self.stmt(e))),
+                    then_branch: then_checked,
+                    else_branch: else_checked,
                 }
             }
             S::While { cond, body } => {
                 let cond = self.expr(cond);
                 let cond = self.coerce_condition(cond);
-                TStmtKind::While {
-                    cond,
-                    body: Box::new(self.loop_body(body, None)),
-                }
+                let (when_true, _) = Self::narrowing_of(&cond);
+                self.narrowed.push(when_true.into_iter().collect());
+                let body = Box::new(self.loop_body(body, None));
+                self.narrowed.pop();
+                TStmtKind::While { cond, body }
             }
             S::DoWhile { body, cond } => {
                 let body = Box::new(self.loop_body(body, None));
@@ -802,7 +920,16 @@ impl Checker {
                             );
                             None
                         } else {
-                            Some(self.coerce(checked, ret, v.span))
+                            let coerced = self.coerce(checked, ret, v.span);
+                            let ret_nullable = self.fn_ret_nullable_flags[fn_index];
+                            self.check_null_flow(
+                                &coerced,
+                                ret,
+                                ret_nullable,
+                                "return type",
+                                v.span,
+                            );
+                            Some(coerced)
                         }
                     }
                     None => {
@@ -843,6 +970,7 @@ impl Checker {
                         self.functions[fn_index].locals.push(Local {
                             name: c.name.clone(),
                             ty,
+                            nullable: false, // thrown values are non-null
                             is_const: false,
                             default: None,
                             is_rest: false,
@@ -940,6 +1068,10 @@ impl Checker {
             if let Some(init) = &b.init {
                 let checked = self.expr(init);
                 let coerced = self.coerce(checked, ty, init.span);
+                let fn_index = *self.fn_stack.last().expect("fn");
+                let nullable_slot = self.functions[fn_index].locals[id.0 as usize].nullable;
+                self.check_null_flow(&coerced, ty, nullable_slot, "variable", init.span);
+                self.update_narrow_on_assign(id, self.expr_nullable(&coerced));
                 inits.push(TStmt {
                     span: b.span,
                     kind: TStmtKind::Assign(id, coerced),
