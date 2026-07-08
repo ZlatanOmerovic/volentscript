@@ -43,8 +43,13 @@ jobs:
           test "$MAJOR" = "22" || {
             echo "::error::LLVM is $MAJOR, the workspace pins 22 (inkwell llvm22-1 / LLVM_SYS_221_PREFIX — see README toolchain table)"; exit 1; }
 
-      - name: Rust toolchain (MSRV)
-        run: rustup toolchain install 1.88 --profile minimal --component rustfmt,clippy && rustup default 1.88
+      # Build/test on the MSRV; lint on stable (clippy's lint set moves
+      # between versions — stable matches development machines).
+      - name: Rust toolchains
+        run: |
+          rustup toolchain install 1.88 --profile minimal
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default 1.88
 
       - uses: actions/cache@v4
         with:
@@ -55,10 +60,10 @@ jobs:
           key: cargo-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Format
-        run: cargo fmt --all -- --check
+        run: cargo +stable fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo +stable clippy --workspace --all-targets -- -D warnings
 
       - name: Build
         run: cargo build --workspace
