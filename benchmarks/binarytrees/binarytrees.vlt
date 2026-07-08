@@ -1,0 +1,32 @@
+class Node {
+    public var left:Node?;
+    public var right:Node?;
+    public function Node(left:Node?, right:Node?) {
+        this.left = left;
+        this.right = right;
+    }
+}
+function make(depth:int):Node {
+    return depth == 0 ? new Node(null, null) : new Node(make(depth - 1), make(depth - 1));
+}
+function check(n:Node):int {
+    var total:int = 1;
+    var l:Node? = n.left;
+    var r:Node? = n.right;
+    if (l != null) { total += check(l); }
+    if (r != null) { total += check(r); }
+    return total;
+}
+var maxDepth:int = 16;
+var stretch:Node = make(maxDepth + 1);
+trace("stretch: " + check(stretch));
+var longLived:Node = make(maxDepth);
+var sum:int = 0;
+for (var d:int = 4; d <= maxDepth; d += 2) {
+    var n:int = 1 << (maxDepth - d + 4);
+    for (var i:int = 0; i < n; i++) {
+        sum += check(make(d));
+    }
+}
+trace("sum: " + sum);
+trace("long: " + check(longLived));

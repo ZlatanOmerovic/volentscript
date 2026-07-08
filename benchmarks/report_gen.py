@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Generates REPORT.md + report.html from results/*.json (hyperfine)."""
+import json, subprocess, datetime
+
+BENCHES = ["fib", "nbody", "binarytrees", "mandelbrot", "strings"]
+RUNTIMES = ["volentscript", "c", "rust", "go", "java", "bun", "deno", "node"]
+LABEL = {"volentscript": "VolentScript", "c": "C (clang -O2)", "rust": "Rust (-O)",
+         "go": "Go", "java": "Java (OpenJDK)", "node": "Node.js", "bun": "Bun", "deno": "Deno"}
+DESC = {
+    "fib": ("fib(35), naive recursion", "function-call overhead, int arithmetic"),
+    "nbody": ("n-body, 5M steps (CLBG shape)", "float math on object fields, Vector indexing"),
+    "binarytrees": ("binary trees, depth 16 (CLBG shape)", "allocation churn, GC pressure"),
+    "mandelbrot": ("mandelbrot 1500², 50 iters", "tight numeric loops"),
+    "strings": ("split/join/case/search × 60k", "string operations, UTF handling"),
+}
+
+def sh(cmd): return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout.strip()
+
+data = {}
+for b in BENCHES:
+    d = json.load(open(f"results/{b}.json"))
+    data[b] = {r["command"]: (r["mean"] * 1000, r["stddev"] * 1000) for r in d["results"]}
+
+versions = {
+    "volentscript": sh("../target/release/volentscript --version"),
+    "c": sh("clang --version | head -1"),
+    "rust": sh("rustc --version"),
+    "go": sh("go version"),
+    "java": sh("java --version | head -1"),
+    "node": "node " + sh("node --version"),
+    "bun": "bun " + sh("bun --version"),
+    "deno": sh("deno --version | head -1"),
+}
+machine = sh("sysctl -n machdep.cpu.brand_string") + ", " + sh("sysctl -n hw.memsize | awk '{print $1/1073741824\" GB\"}'") + ", macOS"
+date = datetime.date.today().isoformat()
+
+def fmt(ms): return f"{ms/1000:.2f} s" if ms >= 1000 else f"{ms:.1f} ms"
+
+# ---------------- REPORT.md ----------------
+md = []
+md.append("# VolentScript benchmarks\n")
+md.append(f"*{date} — {machine}. Method: [hyperfine](https://github.com/sharkdp/hyperfine), 2 warmup + 5 timed runs, mean wall time of the whole process (startup included — that is how CLI tools are used). Every implementation prints identical output, verified before timing; sources in this directory, reproduce with `./run.sh`.*\n")
+md.append("## Results (mean wall time; lower is better)\n")
+hdr = "| benchmark | " + " | ".join(LABEL[r] for r in RUNTIMES) + " |"
+md.append(hdr)
+md.append("|" + "---|" * (len(RUNTIMES) + 1))
+for b in BENCHES:
+    cells = []
+    best = min(data[b][r][0] for r in RUNTIMES)
+    for r in RUNTIMES:
+        m = data[b][r][0]
+        cell = fmt(m)
+        if m == best: cell = f"**{cell}**"
+        cells.append(cell)
+    md.append(f"| {b} | " + " | ".join(cells) + " |")
+md.append("\n## Relative to C (times slower; 1.0 = C)\n")
+md.append(hdr)
+md.append("|" + "---|" * (len(RUNTIMES) + 1))
+for b in BENCHES:
+    c = data[b]["c"][0]
+    md.append(f"| {b} | " + " | ".join(f"{data[b][r][0]/c:.1f}x" for r in RUNTIMES) + " |")
+md.append("""
+## Reading the numbers honestly
+
+**Where VolentScript stands (v0.2.x, first-ever benchmark run):**
+
+- **Tight numeric loops (mandelbrot)** — within ~2x of C and roughly at
+  JS-JIT level. The LLVM -O2 pipeline does its job when the code stays in
+  registers.
+- **Call-heavy int code (fib)** — ~6x C, in JS-engine territory. Cost:
+  a GC safepoint check per call plus conservative-GC codegen constraints.
+- **Object float math (nbody)** — ~10x C. The gap is not the field math:
+  `Vector.<T>` element reads are runtime calls on boxed storage, and GC
+  safepoints in inner loops block loop-invariant hoisting.
+- **Allocation churn (binarytrees)** — ~8x C, and the JIT runtimes beat
+  everyone (generational collectors love this workload). Our conservative
+  mark-sweep with size-class pooling holds memory flat but pays per-object
+  bookkeeping.
+- **Strings** — ~12x C. Every operation transcodes UTF-16 storage to UTF-8
+  and back inside the runtime; that is the whole gap.
+
+**Each gap maps to a planned optimization, in impact order:** unboxed
+`Vector.<Number>`/`Vector.<int>` storage, string ops that stay in UTF-16,
+allocation fast path + safepoint hoisting out of inner loops, and
+generational collection. None require language changes.
+
+**Fairness notes:** same algorithm and structure in every language,
+idiomatic-simple, no SIMD/threads/arena tricks anywhere. Java is timed as
+a process like everything else, so its short benchmarks carry JVM startup
+(~30-80 ms) — its steady-state throughput on binarytrees still wins
+outright. TypeScript is not a separate row: it erases to the same JS these
+engines run.
+
+## Versions
+""")
+for r in RUNTIMES:
+    md.append(f"- {LABEL[r]}: `{versions[r]}`")
+md.append("")
+open("REPORT.md", "w").write("\n".join(md))
+
+# ---------------- report.html ----------------
+ORANGE = "#E85C0F"; DARK = "#241B14"; CREAM = "#FFFDF9"; AMBER = "#FFAE3D"
+rows_html = ""
+for b in BENCHES:
+    best = min(data[b][r][0] for r in RUNTIMES)
+    worst = max(data[b][r][0] for r in RUNTIMES)
+    bars = ""
+    for r in RUNTIMES:
+        m = data[b][r][0]
+        pct = max(2, m / worst * 100)
+        color = ORANGE if r == "volentscript" else "#B9AC9E"
+        weight = "700" if r == "volentscript" else "400"
+        bars += f"""
+      <div class="row"><span class="lang" style="font-weight:{weight}">{LABEL[r]}</span>
+        <span class="track"><span class="bar" style="width:{pct:.1f}%;background:{color}"></span></span>
+        <span class="val">{fmt(m)}<em>{m/data[b]['c'][0]:.1f}x C</em></span></div>"""
+    title, tests = DESC[b]
+    rows_html += f"""
+  <section>
+    <h2>{b}</h2>
+    <p class="sub">{title} &mdash; tests {tests}</p>
+    {bars}
+  </section>"""
+
+html = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VolentScript benchmarks</title>
+<style>
+  :root {{ color-scheme: light; }}
+  * {{ box-sizing: border-box; margin: 0; }}
+  body {{ font: 16px/1.55 -apple-system, "Segoe UI", sans-serif; background: {CREAM}; color: {DARK}; max-width: 860px; margin: 0 auto; padding: 40px 20px 80px; }}
+  h1 {{ font-size: 34px; letter-spacing: -0.5px; }}
+  h1 span {{ color: {ORANGE}; }}
+  .meta {{ color: #7A6E60; margin: 8px 0 34px; font-size: 14px; }}
+  section {{ margin: 34px 0; }}
+  h2 {{ font-size: 20px; border-bottom: 3px solid {ORANGE}; display: inline-block; padding-bottom: 2px; }}
+  .sub {{ color: #7A6E60; font-size: 14px; margin: 6px 0 14px; }}
+  .row {{ display: flex; align-items: center; gap: 10px; margin: 5px 0; }}
+  .lang {{ width: 130px; font-size: 14px; text-align: right; flex: none; }}
+  .track {{ flex: 1; background: #F0E7DC; border-radius: 4px; height: 20px; overflow: hidden; }}
+  .bar {{ display: block; height: 100%; border-radius: 4px; }}
+  .val {{ width: 130px; font-size: 13px; font-variant-numeric: tabular-nums; flex: none; }}
+  .val em {{ color: #9A8C7C; font-style: normal; margin-left: 6px; font-size: 12px; }}
+  .notes {{ background: #F7F3EC; border-left: 4px solid {AMBER}; padding: 14px 18px; border-radius: 0 8px 8px 0; margin-top: 40px; font-size: 15px; }}
+  .notes h3 {{ margin-bottom: 8px; }}
+  .notes li {{ margin: 6px 0 6px 18px; }}
+  code {{ background: #F0E7DC; padding: 1px 5px; border-radius: 4px; font-size: 90%; }}
+  footer {{ margin-top: 44px; color: #9A8C7C; font-size: 13px; }}
+  a {{ color: {ORANGE}; }}
+</style></head><body>
+<h1>Volent<span>Script</span> benchmarks</h1>
+<p class="meta">{date} &middot; {machine} &middot; hyperfine, 2 warmup + 5 timed runs, mean process wall time (startup included) &middot; identical outputs verified across all runtimes before timing &middot; <a href="https://github.com/ZlatanOmerovic/volentscript/tree/main/benchmarks">sources &amp; runner</a></p>
+{rows_html}
+<div class="notes">
+  <h3>Reading the numbers honestly</h3>
+  <ul>
+    <li><b>Tight numeric loops</b> (mandelbrot): within ~2x of C, at JS-JIT level — LLVM -O2 works when code stays in registers.</li>
+    <li><b>Call-heavy code</b> (fib): ~6x C — a GC safepoint check per call, plus conservative-GC codegen constraints.</li>
+    <li><b>Object float math</b> (nbody): ~10x C — <code>Vector.&lt;T&gt;</code> element reads are runtime calls on boxed storage; safepoints block loop hoisting.</li>
+    <li><b>Allocation churn</b> (binarytrees): ~8x C; generational JIT collectors win this workload outright.</li>
+    <li><b>Strings</b>: ~12x C — every operation transcodes UTF-16 &harr; UTF-8 inside the runtime.</li>
+  </ul>
+  <p style="margin-top:10px">Each gap maps to a planned optimization: unboxed numeric Vectors, UTF-16-native string ops, allocation fast path + safepoint hoisting, generational GC. None require language changes. Same idiomatic-simple algorithm in every language; Java timed as a process like everything else (its binarytrees throughput still wins). TypeScript is not a separate row — it erases to the same JS.</p>
+</div>
+<footer>VolentScript — ActionScript 3, revived. Native, ahead-of-time, and entirely of its own will.</footer>
+</body></html>"""
+open("report.html", "w").write(html)
+print("REPORT.md + report.html written")

@@ -241,6 +241,12 @@ impl<'a> Checker<'a> {
         };
         let index = self.coerce(index, Ty::Number, span);
         let value = self.coerce(value, elem, span);
+        if matches!(object.ty, Ty::Vector(_)) {
+            // Vector elements are non-nullable (SPECS §4.3: the reified
+            // element type has no `?`; use Array for nullable storage) —
+            // this is what lets element reads type non-null.
+            self.check_null_flow(&value, elem, false, "Vector element", span);
+        }
         TExpr {
             ty: elem,
             span,
@@ -263,7 +269,10 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|e| {
                 let checked = self.expr(e);
-                self.coerce(checked, elem_ty, e.span)
+                let coerced = self.coerce(checked, elem_ty, e.span);
+                // Non-nullable elements (see seq_index_write).
+                self.check_null_flow(&coerced, elem_ty, false, "Vector element", e.span);
+                coerced
             })
             .collect();
         TExpr {

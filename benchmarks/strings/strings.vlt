@@ -1,0 +1,9 @@
+var text:String = "the quick brown fox jumps over the lazy dog";
+var checksum:int = 0;
+for (var i:int = 0; i < 60000; i++) {
+    var joined:String = text.split(" ").join("-");
+    checksum += joined.indexOf("fox");
+    checksum += joined.toUpperCase().length;
+    checksum += joined.replace("quick", "slow").lastIndexOf("o");
+}
+trace(checksum);

@@ -143,6 +143,15 @@ volentscript parse tool.vlt                 # AST dump
 Debug aids: `VS_DUMP_IR=1` (pre-optimization LLVM module),
 `VS_DUMP_IR_OPT=1` (post-pipeline), `VS_GC_LOG=1` (per-collection stats).
 
+## Benchmarks
+
+First public numbers (Apple M4, hyperfine, identical verified outputs) live
+in [`benchmarks/REPORT.md`](benchmarks/REPORT.md) — VolentScript vs C, Rust,
+Go, Java, Node, Bun and Deno, with an honest reading of every gap and the
+optimization each one maps to. Highlights: within ~2x of C on tight numeric
+loops; 6-12x behind on allocation/string-heavy code (boxed Vector storage
+and UTF transcoding — both on the roadmap). Reproduce: `benchmarks/run.sh`.
+
 ## Examples
 
 Eight ready-to-run projects live in [`examples/`](examples/README.md) —

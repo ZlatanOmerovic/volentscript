@@ -78,6 +78,37 @@ impl<'a> Checker<'a> {
             | TExprKind::NewDate(_)
             | TExprKind::NamespaceVal(_)
             | TExprKind::NewNamespace(_) => false,
+            // A captured variable's nullability is its origin local's
+            // (walk the capture chain up the enclosing-function stack).
+            TExprKind::CaptureGet(slot) => {
+                let mut depth = self.fn_stack.len() - 1;
+                let mut slot = *slot;
+                loop {
+                    match self.functions[self.fn_stack[depth]].captures.get(slot) {
+                        Some(CapSrc::ParentCapture(i)) => {
+                            let i = *i;
+                            if depth == 0 {
+                                return true;
+                            }
+                            depth -= 1;
+                            slot = i;
+                        }
+                        Some(CapSrc::ParentLocal(l)) => {
+                            if depth == 0 {
+                                return true;
+                            }
+                            return self.functions[self.fn_stack[depth - 1]]
+                                .locals
+                                .get(l.0 as usize)
+                                .is_none_or(|loc| loc.nullable);
+                        }
+                        None => return true,
+                    }
+                }
+            }
+            // Vector.<T> elements are non-nullable by construction (all
+            // writes flow-checked); Array elements are `*`.
+            TExprKind::Index(recv, _) => !matches!(recv.ty, Ty::Vector(_)),
             TExprKind::LocalGet(id) => {
                 let fn_index = *self.fn_stack.last().expect("fn");
                 let local = &self.functions[fn_index].locals[id.0 as usize];

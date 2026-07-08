@@ -19,3 +19,7 @@
 /examples/*/client
 /examples/*/smtpd
 /examples/*/send
+
+# Benchmark build products (results + reports are tracked)
+/benchmarks/bin/
+/benchmarks/*/[a-z]*.class

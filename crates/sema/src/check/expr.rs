@@ -502,19 +502,51 @@ impl<'a> Checker<'a> {
         value: &'a ast::Expr,
         span: Span,
     ) -> TExpr {
-        // Compound assignment on properties needs receiver temps (P4's
-        // lowering); locals only for now.
+        // Compound assignment on properties/elements desugars to
+        // read-op-write. There is no temp machinery, so the receiver is
+        // checked twice — restricted to side-effect-free receivers
+        // (`b.x += e`, `this.n += e`, `a[i] += e` with a simple index),
+        // which is the idiomatic set. `f().x += e` needs a temporary.
         if op != AssignOp::Assign && !matches!(target.kind, ExprKind::Ident(_)) {
-            return self.not_implemented(
-                span,
-                "compound assignment to properties is not implemented until Phase 4",
-            );
+            let ok = match &target.kind {
+                ExprKind::Member(obj, _) | ExprKind::NsMember(obj, _, _) => effect_free(obj),
+                ExprKind::Index(obj, index) => effect_free(obj) && effect_free(index),
+                _ => false,
+            };
+            if !ok {
+                return self.not_implemented(
+                    span,
+                    "compound assignment needs a side-effect-free target                      (assign the receiver to a variable first)",
+                );
+            }
+            let Some(bin_op) = compound_op(op) else {
+                return self.error_expr(span);
+            };
+            let read = self.expr(target);
+            let rhs = self.expr(value);
+            let combined = self.binary_typed(bin_op, read, rhs, span);
+            return self.assign_impl(target, Rhs::Checked(combined), span);
         }
+        self.assign_impl_op(op, target, Rhs::Ast(value), span)
+    }
+
+    /// Plain-assignment entry with a pre-checked RHS.
+    fn assign_impl(&mut self, target: &'a ast::Expr, rhs: Rhs<'a>, span: Span) -> TExpr {
+        self.assign_impl_op(AssignOp::Assign, target, rhs, span)
+    }
+
+    fn assign_impl_op(
+        &mut self,
+        op: AssignOp,
+        target: &'a ast::Expr,
+        value: Rhs<'a>,
+        span: Span,
+    ) -> TExpr {
         match &target.kind {
             ExprKind::Ident(name) => {
                 let Some(sym) = self.lookup(name) else {
                     // Unqualified field/static of the enclosing class.
-                    let checked = self.expr(value);
+                    let checked = self.take_rhs(value);
                     if let Some(result) = self.implicit_member_write(name, checked, span) {
                         return result;
                     }
@@ -543,7 +575,7 @@ impl<'a> Checker<'a> {
                             format!("`{name}` is not assignable"),
                             span,
                         );
-                        self.expr(value);
+                        self.take_rhs(value);
                         return self.error_expr(span);
                     }
                 };
@@ -573,15 +605,15 @@ impl<'a> Checker<'a> {
             ExprKind::NsMember(object, ns, name) => {
                 let Some(mangled) = self.qualify(ns, name, span) else {
                     self.expr(object);
-                    self.expr(value);
+                    self.take_rhs(value);
                     return self.error_expr(span);
                 };
                 let object = self.expr(object);
                 if let Ty::Class(class) = object.ty {
-                    let checked = self.expr(value);
+                    let checked = self.take_rhs(value);
                     return self.class_member_write(object, class, &mangled, checked, span);
                 }
-                self.expr(value);
+                self.take_rhs(value);
                 self.error(
                     ErrorCode::UNKNOWN_PROPERTY,
                     format!("`{ns}::{name}` needs a class-typed receiver"),
@@ -595,26 +627,26 @@ impl<'a> Checker<'a> {
                     && !self.is_shadowed(recv)
                     && let Some(class) = self.ident_as_class(recv)
                 {
-                    let checked = self.expr(value);
+                    let checked = self.take_rhs(value);
                     return self.static_write(class, name, checked, span);
                 }
                 let object = self.expr(object);
                 match object.ty {
                     Ty::Class(class) => {
-                        let checked = self.expr(value);
+                        let checked = self.take_rhs(value);
                         return self.class_member_write(object, class, name, checked, span);
                     }
                     Ty::Iface(iface) => {
-                        let checked = self.expr(value);
+                        let checked = self.take_rhs(value);
                         return self.iface_member_write(object, iface, name, checked, span);
                     }
                     Ty::Array | Ty::Vector(_) => {
-                        let checked = self.expr(value);
+                        let checked = self.take_rhs(value);
                         return self.seq_member_write(object, name, checked, span);
                     }
                     _ => {}
                 }
-                let value_checked = self.expr(value);
+                let value_checked = self.take_rhs(value);
                 if object.ty == Ty::Any || object.ty == Ty::Error {
                     let value_checked = self.coerce_to_any(value_checked);
                     let ty = value_checked.ty;
@@ -644,7 +676,7 @@ impl<'a> Checker<'a> {
             ExprKind::Index(object, index) => {
                 let object = self.expr(object);
                 let index = self.expr(index);
-                let value_checked = self.expr(value);
+                let value_checked = self.take_rhs(value);
                 if matches!(object.ty, Ty::Array | Ty::Vector(_)) {
                     return self.seq_index_write(object, index, value_checked, span);
                 }
@@ -671,9 +703,17 @@ impl<'a> Checker<'a> {
             }
             _ => {
                 // Parser already rejected other targets.
-                self.expr(value);
+                self.take_rhs(value);
                 self.error_expr(span)
             }
+        }
+    }
+
+    /// Checks (or unwraps) an assignment RHS.
+    fn take_rhs(&mut self, r: Rhs<'a>) -> TExpr {
+        match r {
+            Rhs::Ast(e) => self.expr(e),
+            Rhs::Checked(t) => t,
         }
     }
 
@@ -685,11 +725,11 @@ impl<'a> Checker<'a> {
         target_ty: Ty,
         target: LocalId,
         cap_slot: Option<usize>,
-        value: &'a ast::Expr,
+        value: Rhs<'a>,
         span: Span,
     ) -> TExpr {
         let bin_op = match op {
-            AssignOp::Assign => return self.expr(value),
+            AssignOp::Assign => return self.take_rhs(value),
             AssignOp::Add => BinaryOp::Add,
             AssignOp::Sub => BinaryOp::Sub,
             AssignOp::Mul => BinaryOp::Mul,
@@ -708,7 +748,7 @@ impl<'a> Checker<'a> {
             None => mk(target_ty, span, TExprKind::LocalGet(target)),
             Some(slot) => mk(target_ty, span, TExprKind::CaptureGet(slot)),
         };
-        let rhs = self.expr(value);
+        let rhs = self.take_rhs(value);
         self.binary_typed(bin_op, current, rhs, span)
     }
 
@@ -1239,6 +1279,49 @@ impl<'a> Checker<'a> {
             kind: TExprKind::Coerce(Coercion::ToAny, Box::new(e)),
         }
     }
+}
+
+/// An assignment RHS: unchecked AST, or already checked (compound
+/// desugaring pre-combines the value).
+enum Rhs<'a> {
+    Ast(&'a ast::Expr),
+    Checked(TExpr),
+}
+
+/// Whether re-checking this expression twice is observably safe
+/// (compound-assignment desugaring; ES3 evaluates the reference once,
+/// which is equivalent for these shapes).
+fn effect_free(e: &ast::Expr) -> bool {
+    match &e.kind {
+        ExprKind::Ident(_)
+        | ExprKind::This
+        | ExprKind::Int(_)
+        | ExprKind::UInt(_)
+        | ExprKind::Number(_)
+        | ExprKind::Str(_) => true,
+        ExprKind::Member(o, _) => effect_free(o),
+        _ => false,
+    }
+}
+
+/// The binary operator behind `op=` (None only for plain `=`).
+fn compound_op(op: AssignOp) -> Option<BinaryOp> {
+    Some(match op {
+        AssignOp::Assign => return None,
+        AssignOp::Add => BinaryOp::Add,
+        AssignOp::Sub => BinaryOp::Sub,
+        AssignOp::Mul => BinaryOp::Mul,
+        AssignOp::Div => BinaryOp::Div,
+        AssignOp::Rem => BinaryOp::Rem,
+        AssignOp::Shl => BinaryOp::Shl,
+        AssignOp::Shr => BinaryOp::Shr,
+        AssignOp::Ushr => BinaryOp::Ushr,
+        AssignOp::BitAnd => BinaryOp::BitAnd,
+        AssignOp::BitOr => BinaryOp::BitOr,
+        AssignOp::BitXor => BinaryOp::BitXor,
+        AssignOp::LogAnd => BinaryOp::LogAnd,
+        AssignOp::LogOr => BinaryOp::LogOr,
+    })
 }
 
 fn mk(ty: Ty, span: Span, kind: TExprKind) -> TExpr {

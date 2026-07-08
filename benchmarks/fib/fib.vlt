@@ -1,0 +1,4 @@
+function fib(n:int):int {
+    return n < 2 ? n : fib(n - 1) + fib(n - 2);
+}
+trace(fib(35));
