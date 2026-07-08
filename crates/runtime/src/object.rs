@@ -44,8 +44,11 @@ pub struct VsClassDesc {
     /// Byte offset of the expando-map slot for `dynamic` classes
     /// (SPECS §3.2); `u32::MAX` = sealed.
     pub expando_off: u32,
-    /// Padding.
-    pub _pad3: u32,
+    /// Number of namespaced members in the reflection table (P16).
+    pub member_count: u32,
+    /// Reflection table: `member_count` `VsMemberInfo` entries
+    /// (namespace.rs layout contract).
+    pub members: *const u8,
 }
 
 /// Expando storage: association list preserving insertion order (AS3-ish

@@ -150,5 +150,13 @@ sockets close on GC sweep. `&&`/`||` conditions now propagate null
 narrowing (`while (line != null && line != "quit")`). Verified with a
 native echo server/client pair over loopback on macOS and Linux.
 
-Remaining (backlog): runtime Namespace values, Cranelift backend.
-Phase plan: SPECS §11.
+P16 made namespaces first-class (ES4 draft): `Namespace` values from
+declared namespaces or `new Namespace(uri)`, interned by URI (so `==`
+is URI identity), `.uri`/`toString`, boxing/`is`/`typeof`, and
+**runtime-computed qualification** — `obj.q::name` reads, calls, bound
+methods, and virtual dispatch resolve at runtime through per-class
+reflection tables the backend emits into the class descriptor (field
+offsets + boxed-ABI method wrappers). Missing members throw catchable
+ReferenceError.
+
+Remaining (backlog): Cranelift backend. Phase plan: SPECS §11.

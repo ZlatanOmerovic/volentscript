@@ -29,6 +29,7 @@ fn tag_from(raw: u32) -> Tag {
         11 => Tag::RegExp,
         12 => Tag::Date,
         13 => Tag::Socket,
+        14 => Tag::Namespace,
         _ => Tag::Undefined,
     }
 }
@@ -503,10 +504,27 @@ pub unsafe extern "C" fn vs_any_equals(a: *const VsAny, b: *const VsAny) -> u32 
     // SAFETY: caller contract.
     let (a, b) = unsafe { (*a, *b) };
     let undef_or_null = |t: Tag| matches!(t, Tag::Undefined | Tag::Null);
+    let same_tag = a.tag() == b.tag();
     let result = if undef_or_null(a.tag()) || undef_or_null(b.tag()) {
         undef_or_null(a.tag()) && undef_or_null(b.tag())
     } else if a.tag() == Tag::String && b.tag() == Tag::String {
         conv::any_strict_equals(a, b)
+    } else if same_tag
+        && matches!(
+            a.tag(),
+            Tag::Object
+                | Tag::Array
+                | Tag::Vector
+                | Tag::Function
+                | Tag::RegExp
+                | Tag::Date
+                | Tag::Socket
+                | Tag::Namespace
+        )
+    {
+        // Reference identity (§11.9.3 step 13); namespaces are interned by
+        // URI, so pointer identity IS URI identity (ES4).
+        a.data == b.data
     } else {
         // Mixed/numeric: compare as numbers (§11.9.3 steps 5-21 collapse to
         // ToNumber on both sides for the primitive-only P3 universe).
@@ -2679,4 +2697,113 @@ pub unsafe extern "C" fn vs_any_as_ptr(v: *const VsAny, tag: u32) -> *const u8 {
     } else {
         std::ptr::null()
     }
+}
+
+// --- namespaces (ES4 first-class, SPECS §5 P16) -------------------------------
+
+use crate::namespace::{self, VsNamespace};
+
+/// Interns a namespace by URI (codegen literal bytes).
+///
+/// # Safety
+/// `uri` points to `len` valid UTF-8 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_namespace_intern(uri: *const u8, len: u32) -> *const VsNamespace {
+    // SAFETY: caller contract.
+    let uri =
+        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(uri, len as usize)) };
+    namespace::intern(uri)
+}
+
+/// `new Namespace(uri)` with a runtime String operand.
+///
+/// # Safety
+/// `uri` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_namespace_new(uri: *const VsString) -> *const VsNamespace {
+    // SAFETY: caller contract.
+    let uri = unsafe { string::deref(uri) }
+        .map(|s| s.to_rust())
+        .unwrap_or_default();
+    namespace::intern(&uri)
+}
+
+/// `q.uri`.
+///
+/// # Safety
+/// `ns` null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_namespace_uri(ns: *const VsNamespace) -> *const VsString {
+    if ns.is_null() {
+        exc::throw_error(exc::ErrorKind::Type, "null Namespace");
+    }
+    // SAFETY: caller contract.
+    unsafe { (*ns).uri }
+}
+
+/// Runtime-qualified read `obj.q::name` (receiver boxed; ReferenceError
+/// when absent).
+///
+/// # Safety
+/// Pointers live; `name` points to `name_len` UTF-8 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_ns_get(
+    recv: *const VsAny,
+    ns: *const VsNamespace,
+    name: *const u8,
+    name_len: u32,
+    out: *mut VsAny,
+) {
+    // SAFETY: caller contract.
+    let (recv, name) = unsafe {
+        (
+            *recv,
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(name, name_len as usize)),
+        )
+    };
+    if ns.is_null() {
+        exc::throw_error(exc::ErrorKind::Type, "null Namespace qualifier");
+    }
+    if recv.tag() != Tag::Object {
+        exc::throw_error(
+            exc::ErrorKind::Type,
+            &format!("`::{name}` needs a class instance receiver"),
+        );
+    }
+    // SAFETY: caller contract.
+    unsafe { namespace::get(recv.as_object_ptr(), &*ns, name, out) }
+}
+
+/// Runtime-qualified call `obj.q::name(args)`.
+///
+/// # Safety
+/// Pointers live; `args` points to `argc` boxed values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_ns_call(
+    recv: *const VsAny,
+    ns: *const VsNamespace,
+    name: *const u8,
+    name_len: u32,
+    argc: u32,
+    args: *const VsAny,
+    out: *mut VsAny,
+) {
+    // SAFETY: caller contract.
+    let (recv, name) = unsafe {
+        (
+            *recv,
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(name, name_len as usize)),
+        )
+    };
+    if ns.is_null() {
+        exc::throw_error(exc::ErrorKind::Type, "null Namespace qualifier");
+    }
+    if recv.tag() != Tag::Object {
+        exc::throw_error(
+            exc::ErrorKind::Type,
+            &format!("`::{name}()` needs a class instance receiver"),
+        );
+    }
+    // SAFETY: caller contract.
+    unsafe { namespace::call(recv.as_object_ptr(), &*ns, name, argc, args, out) }
 }

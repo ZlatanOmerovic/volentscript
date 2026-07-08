@@ -119,6 +119,7 @@ pub fn lower(program: &sema::TProgram) -> Result<Program, Vec<Diagnostic>> {
                     .map(|i| i as u32)
             })
             .collect(),
+            namespace_uris: program.namespace_uris.clone(),
             vectors: {
                 let mut lo2 = Lowerer {
                     program,
@@ -220,6 +221,7 @@ impl Lowerer<'_> {
             sema::Ty::RegExp => Ty::RegExp,
             sema::Ty::Date => Ty::Date,
             sema::Ty::Socket | sema::Ty::ServerSocket => Ty::Socket,
+            sema::Ty::Namespace => Ty::Namespace,
             sema::Ty::Error => {
                 // Sema fails the build before lowering on real errors.
                 unreachable!("error type survived sema")
@@ -403,6 +405,41 @@ impl Lowerer<'_> {
                 ifaces,
                 to_string,
                 is_dynamic: info.is_dynamic,
+                ns_members: {
+                    // Reflection rows for runtime-qualified access: own
+                    // namespaced fields + every namespaced vtable entry
+                    // (chain walk stops at the first match, so child
+                    // tables win; Virtual wrappers keep dispatch dynamic).
+                    let mut rows = Vec::new();
+                    for f in &info.fields {
+                        if let Some((ns, raw)) = split_ns_name(&f.name) {
+                            rows.push(NsMemberInfo {
+                                ns,
+                                name: raw,
+                                field_slot: Some(f.slot as u32),
+                                field_ty: Some(self.ty(f.ty, span)),
+                                vslot: None,
+                            });
+                        }
+                    }
+                    let registry = &self.program.registry;
+                    let info = &registry.classes[index];
+                    for (vslot, m) in info.vtable.iter().enumerate() {
+                        if m.kind != sema::VKind::Method {
+                            continue;
+                        }
+                        if let Some((ns, raw)) = split_ns_name(&m.name) {
+                            rows.push(NsMemberInfo {
+                                ns,
+                                name: raw,
+                                field_slot: None,
+                                field_ty: None,
+                                vslot: Some(vslot as u32),
+                            });
+                        }
+                    }
+                    rows
+                },
                 statics,
             });
         }
@@ -566,6 +603,19 @@ impl Lowerer<'_> {
             E::RegExp(pat, flags) => ExprKind::RegExpLit(pat.clone(), flags.clone()),
             E::NewRegExp(args) => ExprKind::NewRegExp(args.iter().map(|a| self.expr(a)).collect()),
             E::NewDate(args) => ExprKind::NewDate(args.iter().map(|a| self.expr(a)).collect()),
+            E::NamespaceVal(id) => ExprKind::NamespaceVal(*id),
+            E::NewNamespace(uri) => ExprKind::NewNamespace(Box::new(self.expr(uri))),
+            E::NsGet(recv, q, name) => ExprKind::NsGet(
+                Box::new(self.expr(recv)),
+                Box::new(self.expr(q)),
+                name.clone(),
+            ),
+            E::NsCall(recv, q, name, args) => ExprKind::NsCall(
+                Box::new(self.expr(recv)),
+                Box::new(self.expr(q)),
+                name.clone(),
+                args.iter().map(|a| self.expr(a)).collect(),
+            ),
             E::Bool(v) => ExprKind::Bool(*v),
             E::Null => ExprKind::Null,
             E::Undefined => ExprKind::Undefined,
@@ -591,6 +641,9 @@ impl Lowerer<'_> {
             E::Member(receiver, name) => {
                 if receiver.ty == sema::Ty::String && name == "length" {
                     ExprKind::StrLen(Box::new(self.expr(receiver)))
+                } else if receiver.ty == sema::Ty::Namespace {
+                    // Only `uri` exists (sema member table).
+                    ExprKind::NsUri(Box::new(self.expr(receiver)))
                 } else if matches!(receiver.ty, sema::Ty::Socket | sema::Ty::ServerSocket) {
                     // Only `localPort` exists (sema member table).
                     ExprKind::CallSocket(SocketOp::LocalPort, vec![self.expr(receiver)])
@@ -718,6 +771,15 @@ impl Lowerer<'_> {
                         sema::Ty::RegExp => Conv::AnyToRegExp,
                         sema::Ty::Date => Conv::AnyToDate,
                         sema::Ty::Socket | sema::Ty::ServerSocket => Conv::AnyToSocket,
+                        // Unchecked in v1: a Namespace-typed slot only
+                        // ever holds interned namespaces.
+                        sema::Ty::Namespace => {
+                            return self.gated_expr(
+                                span,
+                                ty,
+                                "checked `*` to Namespace coercion (declare the variable as Namespace)",
+                            );
+                        }
                         _ => {
                             return self.gated_expr(
                                 span,
@@ -1358,6 +1420,15 @@ impl Lowerer<'_> {
                     kind: ExprKind::CallRegex(op, operands),
                 }
             }
+            sema::Ty::Namespace => {
+                // toString() = the canonical URI (ES4 §Namespace).
+                debug_assert_eq!(name, "toString");
+                Expr {
+                    ty,
+                    span,
+                    kind: ExprKind::NsUri(Box::new(self.expr(receiver))),
+                }
+            }
             sema::Ty::Socket | sema::Ty::ServerSocket => {
                 let op = match name {
                     "write" => SocketOp::Write,
@@ -1492,6 +1563,14 @@ fn local_get(id: LocalId, ty: Ty, span: Span) -> Expr {
     }
 }
 
+/// Splits a sema-mangled namespaced member name `#ns{id}::raw` into
+/// (namespace id, raw name); None for ordinary members.
+fn split_ns_name(name: &str) -> Option<(u32, String)> {
+    let rest = name.strip_prefix("#ns")?;
+    let (id, raw) = rest.split_once("::")?;
+    Some((id.parse().ok()?, raw.to_string()))
+}
+
 /// Unboxes an Any expression into `ty` (ES3 §9 conversions).
 fn coerce_any_to(e: Expr, ty: Ty, span: Span) -> Expr {
     let _ = span;
@@ -1509,7 +1588,9 @@ fn coerce_any_to(e: Expr, ty: Ty, span: Span) -> Expr {
         Ty::RegExp => Conv::AnyToRegExp,
         Ty::Date => Conv::AnyToDate,
         Ty::Socket => Conv::AnyToSocket,
-        Ty::Function | Ty::Void => return e,
+        // `*` → Namespace has no checked coercion in v1 (rare; use a
+        // typed variable from the start).
+        Ty::Namespace | Ty::Function | Ty::Void => return e,
     };
     Expr {
         ty,

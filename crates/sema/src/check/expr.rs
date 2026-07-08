@@ -120,14 +120,36 @@ impl<'a> Checker<'a> {
                 let object = self.expr(object);
                 self.member_read(object, name, span)
             }
-            // `e.ns::name` — statically qualified member (SPECS §5).
+            // `e.ns::name` — statically qualified when `ns` is a declared
+            // namespace; a Namespace-typed binding qualifies at runtime
+            // through the class reflection tables (SPECS §5 P16).
             ExprKind::NsMember(object, ns, name) => {
-                let Some(mangled) = self.qualify(ns, name, span) else {
+                if self.namespaces.contains_key(ns) && !self.is_shadowed(ns) {
+                    let Some(mangled) = self.qualify(ns, name, span) else {
+                        self.expr(object);
+                        return self.error_expr(span);
+                    };
+                    let object = self.expr(object);
+                    return self.member_read(object, &mangled, span);
+                }
+                let qual = self.ident(ns, span);
+                if qual.ty != Ty::Namespace {
                     self.expr(object);
+                    self.error(
+                        ErrorCode::NOT_A_TYPE,
+                        format!("`{ns}` is neither a namespace nor a Namespace value"),
+                        span,
+                    );
                     return self.error_expr(span);
-                };
+                }
                 let object = self.expr(object);
-                self.member_read(object, &mangled, span)
+                self.check_null_deref(&object, span);
+                let object = self.coerce_to_any(object);
+                mk(
+                    Ty::Any,
+                    span,
+                    TExprKind::NsGet(Box::new(object), Box::new(qual), name.clone()),
+                )
             }
             ExprKind::Index(object, index) => {
                 let object = self.expr(object);
@@ -171,6 +193,11 @@ impl<'a> Checker<'a> {
                 // Unqualified class members / statics of the enclosing class.
                 if let Some(member) = self.implicit_member(name, span) {
                     return member;
+                }
+                if let Some(&id) = self.namespaces.get(name) {
+                    // A declared namespace as a value (ES4 first-class
+                    // namespaces; identity = canonical URI).
+                    return mk(Ty::Namespace, span, TExprKind::NamespaceVal(id));
                 }
                 if self.fn_template_index(name).is_some() {
                     self.error(
@@ -742,6 +769,31 @@ impl<'a> Checker<'a> {
         }
         // `e.ns::m(...)` — qualified method call (SPECS §5).
         if let ExprKind::NsMember(object, ns, method) = &callee.kind {
+            if !self.namespaces.contains_key(ns) || self.is_shadowed(ns) {
+                // Runtime-computed qualifier (Namespace value, P16).
+                let qual = self.ident(ns, span);
+                if qual.ty != Ty::Namespace {
+                    self.expr(object);
+                    for a in args {
+                        self.expr(a);
+                    }
+                    self.error(
+                        ErrorCode::NOT_A_TYPE,
+                        format!("`{ns}` is neither a namespace nor a Namespace value"),
+                        span,
+                    );
+                    return self.error_expr(span);
+                }
+                let object = self.expr(object);
+                self.check_null_deref(&object, span);
+                let object = self.coerce_to_any(object);
+                let args = self.args_to_any(args);
+                return mk(
+                    Ty::Any,
+                    span,
+                    TExprKind::NsCall(Box::new(object), Box::new(qual), method.clone(), args),
+                );
+            }
             let Some(mangled) = self.qualify(ns, method, span) else {
                 self.expr(object);
                 for a in args {

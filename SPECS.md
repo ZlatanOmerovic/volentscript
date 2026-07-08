@@ -207,12 +207,13 @@ Not implemented (v1), and not part of the language proper:
 - E4X / XML literals (`<foo/>` as syntax) — **deferred**, optional later phase.
   `XML`/`XMLList` as *classes* may come back as a library, but XML-as-syntax is
   not a v1 goal.
-- Runtime namespaces as first-class *values* (custom `namespace` objects,
-  runtime-computed qualification, the `Namespace` class) — **deferred**.
-  P12 implements the *static* subset: `namespace` declarations (URI
-  identity), namespaced class members, compile-time `ns::name`
-  qualification, and `use namespace` — resolved entirely at compile time
-  with no runtime representation.
+- Runtime namespaces: P12 implements the static subset (`namespace`
+  declarations with URI identity, namespaced members, compile-time
+  `ns::name`, `use namespace`); P16 adds the first-class layer —
+  `Namespace` values interned by URI, `new Namespace(uri)`, `.uri`, and
+  runtime-computed `obj.q::name` qualification via per-class reflection
+  tables in the descriptor (fields box by type tag; methods dispatch
+  through boxed-ABI wrappers). Runtime `use namespace` remains out.
 - `Proxy`, `flash.utils.*`, AMF, `ByteArray`-as-Flash-API (a plain byte buffer
   type may exist in the runtime, but not the Flash `ByteArray` surface).
 

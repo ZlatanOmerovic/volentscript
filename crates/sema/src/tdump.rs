@@ -214,6 +214,28 @@ impl Dumper {
             TExprKind::Number(v) => self.line(format!("{header}Number {v}")),
             TExprKind::Str(v) => self.line(format!("{header}Str {v:?}")),
             TExprKind::RegExp(pat, flags) => self.line(format!("{header}RegExp /{pat}/{flags}")),
+            TExprKind::NamespaceVal(id) => self.line(format!("{header}Namespace #{id}")),
+            TExprKind::NewNamespace(uri) => {
+                self.line(format!("{header}NewNamespace"));
+                self.indented(|d| d.expr(uri));
+            }
+            TExprKind::NsGet(recv, q, name) => {
+                self.line(format!("{header}NsGet ::{name}"));
+                self.indented(|d| {
+                    d.expr(recv);
+                    d.expr(q);
+                });
+            }
+            TExprKind::NsCall(recv, q, name, args) => {
+                self.line(format!("{header}NsCall ::{name}"));
+                self.indented(|d| {
+                    d.expr(recv);
+                    d.expr(q);
+                    for a in args {
+                        d.expr(a);
+                    }
+                });
+            }
             TExprKind::NewDate(args) => {
                 self.line(format!("{header}NewDate"));
                 self.indented(|d| {

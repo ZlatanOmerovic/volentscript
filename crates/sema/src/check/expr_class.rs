@@ -678,6 +678,30 @@ impl<'a> Checker<'a> {
                 };
             }
         }
+        // `new Namespace(uri)` (ES4 first-class namespaces, SPECS §5).
+        if let ExprKind::Ident(name) = &callee.kind {
+            if name == "Namespace" && !self.is_shadowed(name) {
+                if args.len() != 1 {
+                    self.error(
+                        ErrorCode::WRONG_ARG_COUNT,
+                        "Namespace(uri:String) takes exactly 1 argument",
+                        span,
+                    );
+                    for a in args {
+                        self.expr(a);
+                    }
+                    return self.error_expr(span);
+                }
+                let uri = self.expr(&args[0]);
+                let sp = uri.span;
+                let uri = self.coerce(uri, Ty::String, sp);
+                return TExpr {
+                    ty: Ty::Namespace,
+                    span,
+                    kind: TExprKind::NewNamespace(Box::new(uri)),
+                };
+            }
+        }
         // `new Date(...)` (§15.9.3): 0-7 Number components. String
         // parsing (`new Date("...")`) is backlog.
         if let ExprKind::Ident(name) = &callee.kind {

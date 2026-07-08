@@ -59,6 +59,15 @@ pub fn check(program: &ast::Program) -> CheckOutcome {
             registry: checker.registry,
             vectors: checker.vector_insts,
             entry_main: checker.entry_main,
+            namespace_uris: {
+                let mut uris: Vec<String> = (0..checker.ns_count)
+                    .map(|id| format!("vs:private:{id}"))
+                    .collect();
+                for (uri, &id) in &checker.ns_uris {
+                    uris[id as usize] = uri.clone();
+                }
+                uris
+            },
         }),
         diagnostics: checker.diagnostics,
     }
@@ -753,7 +762,8 @@ impl<'a> Checker<'a> {
             (Int | UInt | Number, Number) => Some(Some(Coercion::ToNumber)),
             (
                 Null,
-                String | Function | RegExp | Date | Socket | ServerSocket | Class(_) | Iface(_),
+                String | Function | RegExp | Date | Socket | ServerSocket | Namespace | Class(_)
+                | Iface(_),
             ) => Some(None),
             // Widening reference conversions are representation no-ops
             // (SPECS §4.5 nominal subtyping). Narrowing needs `as`/a cast

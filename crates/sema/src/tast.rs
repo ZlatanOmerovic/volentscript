@@ -33,6 +33,9 @@ pub struct TProgram {
     /// The top-level `main` function, when declared (SPECS §7: invoked
     /// after top-level statements; an int return becomes the exit code).
     pub entry_main: Option<FnId>,
+    /// Canonical namespace URIs, index = namespace id (SPECS §5;
+    /// URI-less declarations get a private `vs:private:{id}` URI).
+    pub namespace_uris: Vec<String>,
 }
 
 /// The id of the synthesized top-level script function.
@@ -277,6 +280,14 @@ pub enum TExprKind {
     /// `new Date(...)` (§15.9.3): 0 args = now, 1 = millis, 2-7 = local
     /// civil components (all Numbers).
     NewDate(Vec<TExpr>),
+    /// A declared namespace used as a value: namespace id.
+    NamespaceVal(u32),
+    /// `new Namespace(uri)`.
+    NewNamespace(Box<TExpr>),
+    /// Runtime-qualified read `obj.q::name` (receiver, qualifier).
+    NsGet(Box<TExpr>, Box<TExpr>, String),
+    /// Runtime-qualified call `obj.q::name(args)` (args boxed).
+    NsCall(Box<TExpr>, Box<TExpr>, String, Vec<TExpr>),
     /// `this` inside an instance member.
     This,
     /// `new C(args)` — allocate, init fields, run constructor.

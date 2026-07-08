@@ -72,7 +72,7 @@ pub fn any_truthy(v: VsAny) -> bool {
             let f = f64::from_bits(v.data);
             f != 0.0 && !f.is_nan()
         }
-        Tag::RegExp | Tag::Date | Tag::Socket => v.data != 0,
+        Tag::RegExp | Tag::Date | Tag::Socket | Tag::Namespace => v.data != 0,
         Tag::String => {
             // SAFETY: String-tagged payloads always hold a live VsString.
             unsafe { crate::string::deref(v.as_string_ptr()) }.is_some_and(|s| s.len > 0)
@@ -152,6 +152,15 @@ pub fn any_to_display(v: VsAny) -> String {
             }
         }
         Tag::Socket => "[object Socket]".to_string(),
+        Tag::Namespace => {
+            // SAFETY: Namespace payloads are interned live objects.
+            unsafe {
+                let ns = &*(v.data as *const crate::namespace::VsNamespace);
+                crate::string::deref(ns.uri)
+                    .map(|s| s.to_rust())
+                    .unwrap_or_default()
+            }
+        }
     }
 }
 
@@ -164,7 +173,13 @@ pub fn any_typeof(v: VsAny) -> &'static str {
         Tag::Boolean => "boolean",
         Tag::Int | Tag::UInt | Tag::Number => "number",
         Tag::String => "string",
-        Tag::Object | Tag::Array | Tag::Vector | Tag::RegExp | Tag::Date | Tag::Socket => "object",
+        Tag::Object
+        | Tag::Array
+        | Tag::Vector
+        | Tag::RegExp
+        | Tag::Date
+        | Tag::Socket
+        | Tag::Namespace => "object",
         Tag::Function => "function",
     }
 }
@@ -187,6 +202,7 @@ pub fn any_is(v: VsAny, target: Tag) -> bool {
         Tag::RegExp => v.tag() == Tag::RegExp,
         Tag::Date => v.tag() == Tag::Date,
         Tag::Socket => v.tag() == Tag::Socket,
+        Tag::Namespace => v.tag() == Tag::Namespace,
         Tag::Null | Tag::Undefined | Tag::Object | Tag::Array | Tag::Vector => false,
     }
 }

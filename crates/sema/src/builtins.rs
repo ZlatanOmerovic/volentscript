@@ -144,6 +144,7 @@ pub fn type_name(name: &str) -> Option<Ty> {
         "Date" => Ty::Date,
         "Socket" => Ty::Socket,
         "ServerSocket" => Ty::ServerSocket,
+        "Namespace" => Ty::Namespace,
         _ => return None,
     })
 }
@@ -543,6 +544,10 @@ pub fn member(receiver: Ty, name: &str) -> Option<Member> {
         (Ty::Socket | Ty::ServerSocket, "close") => Method(sig(&[], 0, Ty::Void)),
         (Ty::Socket | Ty::ServerSocket, "localPort") => Property(Ty::Int),
         (Ty::ServerSocket, "accept") => Method(sig(&[], 0, Ty::Socket)),
+
+        // Namespace values (ES4 draft; SPECS §5 P16).
+        (Ty::Namespace, "uri") => Property(Ty::String),
+        (Ty::Namespace, "toString") => Method(sig(&[], 0, Ty::String)),
         // String.as:182,194
         (Ty::String, "toLowerCase") => Method(sig(&[], 0, Ty::String)),
         (Ty::String, "toUpperCase") => Method(sig(&[], 0, Ty::String)),

@@ -66,7 +66,11 @@ impl<'a> Checker<'a> {
                     // Socket reads return null at EOF (SPECS §6).
                     || (recv.ty == Ty::Socket && (name == "readLine" || name == "read"))
             }
-            TExprKind::RegExp(..) | TExprKind::NewRegExp(_) | TExprKind::NewDate(_) => false,
+            TExprKind::RegExp(..)
+            | TExprKind::NewRegExp(_)
+            | TExprKind::NewDate(_)
+            | TExprKind::NamespaceVal(_)
+            | TExprKind::NewNamespace(_) => false,
             TExprKind::LocalGet(id) => {
                 let fn_index = *self.fn_stack.last().expect("fn");
                 let local = &self.functions[fn_index].locals[id.0 as usize];

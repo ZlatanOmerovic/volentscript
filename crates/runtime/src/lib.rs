@@ -22,6 +22,7 @@ mod date;
 mod exc;
 pub(crate) mod ffi;
 mod gc;
+mod namespace;
 mod natives;
 mod object;
 mod regexp;

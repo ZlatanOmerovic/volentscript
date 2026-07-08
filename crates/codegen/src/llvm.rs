@@ -39,6 +39,7 @@ mod tag {
     pub const REGEXP: u32 = 11;
     pub const DATE: u32 = 12;
     pub const SOCKET: u32 = 13;
+    pub const NAMESPACE: u32 = 14;
 }
 
 /// LLVM implementor of [`Backend`].
@@ -87,6 +88,7 @@ impl Backend for LlvmBackend {
             .map(|(i, f)| cx.declare_function(i, f))
             .collect();
         cx.classes = build_class_artifacts(&cx, program, &fns, &machine.get_target_data());
+        emit_ns_member_tables(&cx, program, &fns, &machine.get_target_data());
         for (f, decl) in program.functions.iter().zip(&fns) {
             FnCx::emit(&cx, &fns, program, f, *decl);
         }
@@ -215,6 +217,8 @@ enum Val<'ctx> {
     Dat(PointerValue<'ctx>),
     /// Socket pointer (possibly null).
     Sock(PointerValue<'ctx>),
+    /// Namespace value (interned, effectively never null).
+    Ns(PointerValue<'ctx>),
     /// Pointer to an entry-block alloca holding a `{i32, i64}` box.
     Any(PointerValue<'ctx>),
     Void,
@@ -238,7 +242,8 @@ impl<'ctx> Cx<'ctx> {
             | Ty::Function
             | Ty::RegExp
             | Ty::Date
-            | Ty::Socket => self.ptr().into(),
+            | Ty::Socket
+            | Ty::Namespace => self.ptr().into(),
             Ty::Any => self.any_ty.into(),
             Ty::Void => unreachable!("void has no storage"),
         }
@@ -421,7 +426,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     | Ty::Function
                     | Ty::RegExp
                     | Ty::Date
-                    | Ty::Socket => cx.ptr().const_null().into(),
+                    | Ty::Socket
+                    | Ty::Namespace => cx.ptr().const_null().into(),
                     Ty::Any => cx.any_ty.const_zero().into(), // tag 0 = undefined
                     Ty::Void => unreachable!(),
                 };
@@ -481,7 +487,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             | Ty::Function
             | Ty::RegExp
             | Ty::Date
-            | Ty::Socket => b
+            | Ty::Socket
+            | Ty::Namespace => b
                 .build_return(Some(&self.cx.ptr().const_null()))
                 .expect("ret"),
             Ty::Any => b
@@ -942,6 +949,44 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
     }
 
     /// Registers the prelude Error descriptors with the runtime.
+    /// Interns a namespace literal by URI (runtime keeps identity).
+    fn intern_namespace(&mut self, uri: &str) -> Val<'ctx> {
+        let cx = self.cx;
+        let (g, len) = self.utf8_lit(uri, "nsuri");
+        let f = cx.runtime_fn(
+            "vs_namespace_intern",
+            Some(cx.ptr().into()),
+            &[cx.ptr().into(), cx.context.i32_type().into()],
+        );
+        let call = self
+            .cx
+            .builder
+            .build_call(f, &[g.into(), len.into()], "ns")
+            .expect("call");
+        Val::Ns(
+            call.try_as_basic_value()
+                .basic()
+                .expect("value")
+                .into_pointer_value(),
+        )
+    }
+
+    /// A UTF-8 string literal global + its length constant.
+    fn utf8_lit(&mut self, text: &str, name: &str) -> (PointerValue<'ctx>, IntValue<'ctx>) {
+        let g = self
+            .cx
+            .builder
+            .build_global_string_ptr(text, name)
+            .expect("global");
+        (
+            g.as_pointer_value(),
+            self.cx
+                .context
+                .i32_type()
+                .const_int(text.len() as u64, false),
+        )
+    }
+
     /// GC safepoint call (gc.rs: collection happens only here). The
     /// declaration carries `memory(inaccessiblemem: readwrite)` +
     /// `nounwind`: the collector only frees memory the program can no
@@ -987,7 +1032,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     | Ty::Function
                     | Ty::RegExp
                     | Ty::Date
-                    | Ty::Socket => 1,
+                    | Ty::Socket
+                    | Ty::Namespace => 1,
                     Ty::Int | Ty::UInt | Ty::Number | Ty::Boolean | Ty::Void => continue,
                 };
                 let g = cx.classes[ci].statics[si];
@@ -1085,6 +1131,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             Ty::RegExp => Val::Reg(cx.ptr().const_null()),
             Ty::Date => Val::Dat(cx.ptr().const_null()),
             Ty::Socket => Val::Sock(cx.ptr().const_null()),
+            Ty::Namespace => Val::Ns(cx.ptr().const_null()),
             Ty::Any => {
                 let slot = self.entry_alloca(cx.any_ty, "undef");
                 self.cx
@@ -1307,6 +1354,148 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             }
             ExprKind::CallDate(f, operands) => self.call_date(*f, operands),
             ExprKind::CallSocket(op, operands) => self.call_socket(*op, operands),
+            ExprKind::NamespaceVal(id) => {
+                let uri = &self.program.namespace_uris[*id as usize].clone();
+                self.intern_namespace(uri)
+            }
+            ExprKind::NewNamespace(uri) => {
+                let u = self.str_arg(uri);
+                let f = cx.runtime_fn(
+                    "vs_namespace_new",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[u.into()], "ns")
+                    .expect("call");
+                Val::Ns(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            ExprKind::NsUri(q) => {
+                let p = match self.expr(q) {
+                    Val::Ns(p) => p,
+                    _ => unreachable!("NsUri operand"),
+                };
+                let f = cx.runtime_fn(
+                    "vs_namespace_uri",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(f, &[p.into()], "uri")
+                    .expect("call");
+                Val::Str(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
+            ExprKind::NsGet(recv, q, name) => {
+                let recv_p = self.as_any_ptr(recv);
+                let q = match self.expr(q) {
+                    Val::Ns(p) => p,
+                    _ => unreachable!("qualifier"),
+                };
+                let (name_g, name_len) = self.utf8_lit(name, "nsn");
+                let out = self.entry_alloca(cx.any_ty, "nsget");
+                let i32t = cx.context.i32_type();
+                let f = cx.runtime_fn(
+                    "vs_ns_get",
+                    None,
+                    &[
+                        cx.ptr().into(),
+                        cx.ptr().into(),
+                        cx.ptr().into(),
+                        i32t.into(),
+                        cx.ptr().into(),
+                    ],
+                );
+                self.cx
+                    .builder
+                    .build_call(
+                        f,
+                        &[
+                            recv_p.into(),
+                            q.into(),
+                            name_g.into(),
+                            name_len.into(),
+                            out.into(),
+                        ],
+                        "",
+                    )
+                    .expect("call");
+                Val::Any(out)
+            }
+            ExprKind::NsCall(recv, q, name, args) => {
+                let recv_p = self.as_any_ptr(recv);
+                let q = match self.expr(q) {
+                    Val::Ns(p) => p,
+                    _ => unreachable!("qualifier"),
+                };
+                let (name_g, name_len) = self.utf8_lit(name, "nsn");
+                let i32t = cx.context.i32_type();
+                let argc = args.len() as u32;
+                let arr_ty = cx.any_ty.array_type(argc.max(1));
+                let arr = self.entry_alloca(arr_ty, "nsargs");
+                for (i, a) in args.iter().enumerate() {
+                    let p = self.as_any_ptr(a);
+                    let v = self
+                        .cx
+                        .builder
+                        .build_load(cx.any_ty, p, "arg")
+                        .expect("load");
+                    let slot = unsafe {
+                        self.cx.builder.build_in_bounds_gep(
+                            arr_ty,
+                            arr,
+                            &[i32t.const_zero(), i32t.const_int(i as u64, false)],
+                            "slot",
+                        )
+                    }
+                    .expect("gep");
+                    self.cx.builder.build_store(slot, v).expect("store");
+                }
+                let out = self.entry_alloca(cx.any_ty, "nscall");
+                let f = cx.runtime_fn(
+                    "vs_ns_call",
+                    None,
+                    &[
+                        cx.ptr().into(),
+                        cx.ptr().into(),
+                        cx.ptr().into(),
+                        i32t.into(),
+                        i32t.into(),
+                        cx.ptr().into(),
+                        cx.ptr().into(),
+                    ],
+                );
+                self.cx
+                    .builder
+                    .build_call(
+                        f,
+                        &[
+                            recv_p.into(),
+                            q.into(),
+                            name_g.into(),
+                            name_len.into(),
+                            i32t.const_int(u64::from(argc), false).into(),
+                            arr.into(),
+                            out.into(),
+                        ],
+                        "",
+                    )
+                    .expect("call");
+                Val::Any(out)
+            }
             ExprKind::Str(s) => {
                 let global = self
                     .cx
@@ -2324,7 +2513,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 | Ty::Function
                 | Ty::RegExp
                 | Ty::Date
-                | Ty::Socket,
+                | Ty::Socket
+                | Ty::Namespace,
                 Val::Str(p),
             ) => p.into(),
             (
@@ -2335,7 +2525,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 | Val::Fun(p)
                 | Val::Reg(p)
                 | Val::Dat(p)
-                | Val::Sock(p),
+                | Val::Sock(p)
+                | Val::Ns(p),
             ) => p.into(),
             _ => self.materialize(v),
         }
@@ -2440,7 +2631,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
         let vt = self
             .cx
             .builder
-            .build_struct_gep(rtti_ty, desc, 10, "vt")
+            .build_struct_gep(rtti_ty, desc, 11, "vt")
             .expect("gep");
         let slot_ptr = unsafe {
             self.cx.builder.build_in_bounds_gep(
@@ -2644,6 +2835,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 | Ty::RegExp
                 | Ty::Date
                 | Ty::Socket
+                | Ty::Namespace
         ) {
             if let Val::Str(p)
             | Val::Obj(p)
@@ -2652,7 +2844,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             | Val::Fun(p)
             | Val::Reg(p)
             | Val::Dat(p)
-            | Val::Sock(p) = v
+            | Val::Sock(p)
+            | Val::Ns(p) = v
             {
                 self.cx.builder.build_store(slot, p).expect("store");
                 return;
@@ -2685,7 +2878,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             | Val::Fun(p)
             | Val::Reg(p)
             | Val::Dat(p)
-            | Val::Sock(p) => p.into(),
+            | Val::Sock(p)
+            | Val::Ns(p) => p.into(),
             Val::Any(p) => self
                 .cx
                 .builder
@@ -2709,6 +2903,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             Ty::RegExp => Val::Reg(v.into_pointer_value()),
             Ty::Date => Val::Dat(v.into_pointer_value()),
             Ty::Socket => Val::Sock(v.into_pointer_value()),
+            Ty::Namespace => Val::Ns(v.into_pointer_value()),
             Ty::Any => {
                 let slot = self.entry_alloca(self.cx.any_ty, "anyv");
                 self.cx.builder.build_store(slot, v).expect("store");
@@ -3069,6 +3264,14 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                 );
                 self.cx.builder.build_call(rf, &[p.into()], "re2s")
             }
+            Val::Ns(p) => {
+                let rf = cx.runtime_fn(
+                    "vs_namespace_uri",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into()],
+                );
+                self.cx.builder.build_call(rf, &[p.into()], "ns2s")
+            }
             Val::Sock(_) => {
                 let lit = self
                     .cx
@@ -3243,7 +3446,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             | Val::Fun(p)
             | Val::Reg(p)
             | Val::Dat(p)
-            | Val::Sock(p) => {
+            | Val::Sock(p)
+            | Val::Ns(p) => {
                 let full_tag = match v {
                     Val::Obj(_) => tag::OBJECT,
                     Val::Arr(_) => tag::ARRAY,
@@ -3251,6 +3455,7 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                     Val::Reg(_) => tag::REGEXP,
                     Val::Dat(_) => tag::DATE,
                     Val::Sock(_) => tag::SOCKET,
+                    Val::Ns(_) => tag::NAMESPACE,
                     _ => tag::VECTOR,
                 };
                 // null pointers box as the null value.
@@ -3325,7 +3530,8 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
             | Val::Fun(p)
             | Val::Reg(p)
             | Val::Dat(p)
-            | Val::Sock(p) => self
+            | Val::Sock(p)
+            | Val::Ns(p) => self
                 .cx
                 .builder
                 .build_is_not_null(p, "objtrue")
@@ -4360,6 +4566,30 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
                         .into_pointer_value(),
                 )
             }
+            Ty::Namespace => {
+                // Sema gates `*` → Namespace coercions; only `as` reaches
+                // here through tag matching.
+                let f = cx.runtime_fn(
+                    "vs_any_as_ptr",
+                    Some(cx.ptr().into()),
+                    &[cx.ptr().into(), cx.context.i32_type().into()],
+                );
+                let call = self
+                    .cx
+                    .builder
+                    .build_call(
+                        f,
+                        &[p.into(), cx.context.i32_type().const_int(14, false).into()],
+                        "nsv",
+                    )
+                    .expect("call");
+                Val::Ns(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("value")
+                        .into_pointer_value(),
+                )
+            }
             Ty::Socket => {
                 let f = cx.runtime_fn(
                     "vs_any_to_socket",
@@ -5310,7 +5540,8 @@ fn build_class_artifacts<'ctx>(
                 ptr.into(),       // ifaces
                 ptr.into(),       // to_string
                 i32t.into(),      // expando byte offset (u32::MAX = sealed)
-                i32t.into(),      // pad3
+                i32t.into(),      // namespaced-member count (P16)
+                ptr.into(),       // member table (VsMemberInfo entries)
                 vtable_ty.into(), // vtable
             ],
             false,
@@ -5422,6 +5653,19 @@ fn build_class_artifacts<'ctx>(
             .iter()
             .map(|f| fns[f.0 as usize].as_global_value().as_pointer_value())
             .collect();
+        // Reflection table global: declared here so the descriptor can
+        // point at it; rows are filled by emit_ns_member_tables once the
+        // class artifacts (and thus Virtual wrappers) exist.
+        let members_ptr: PointerValue = if class.ns_members.is_empty() {
+            ptr.const_null()
+        } else {
+            let g = cx.module.add_global(
+                member_info_ty(cx).array_type(class.ns_members.len() as u32),
+                None,
+                &format!("vs_members{index}"),
+            );
+            g.as_pointer_value()
+        };
         let init = art.rtti_ty.const_named_struct(&[
             i32t.const_int(index as u64, false).into(),
             i32t.const_zero().into(),
@@ -5432,7 +5676,8 @@ fn build_class_artifacts<'ctx>(
             ifaces_ptr.into(),
             to_string_ptr.into(),
             i32t.const_int(u64::from(art.expando_off), false).into(),
-            i32t.const_zero().into(),
+            i32t.const_int(class.ns_members.len() as u64, false).into(),
+            members_ptr.into(),
             ptr.const_array(&vtable_entries).into(),
         ]);
         global.set_initializer(&init);
@@ -6043,6 +6288,118 @@ enum WrapTarget {
 
 /// Synthesizes `fn(env, this, argc, args, out)` forwarding to the target
 /// (closure ABI — see runtime/src/closure.rs).
+/// The VsMemberInfo row type (namespace.rs layout contract).
+fn member_info_ty<'ctx>(cx: &Cx<'ctx>) -> inkwell::types::StructType<'ctx> {
+    let i32t = cx.context.i32_type();
+    let i64t = cx.context.i64_type();
+    let ptr = cx.ptr();
+    cx.context.struct_type(
+        &[
+            ptr.into(),
+            ptr.into(),
+            i32t.into(),
+            i32t.into(),
+            i64t.into(),
+        ],
+        false,
+    )
+}
+
+/// Fills the per-class reflection tables (declared during artifact
+/// building): field offsets from the instance layout, method rows through
+/// Virtual wrappers — which need `cx.classes`, hence this separate pass.
+fn emit_ns_member_tables<'ctx>(
+    cx: &Cx<'ctx>,
+    program: &mir::Program,
+    fns: &[FunctionValue<'ctx>],
+    td: &inkwell::targets::TargetData,
+) {
+    let i32t = cx.context.i32_type();
+    let i64t = cx.context.i64_type();
+    let ptr = cx.ptr();
+    let member_ty = member_info_ty(cx);
+    let str_ty = cx.context.struct_type(&[i32t.into(), ptr.into()], false);
+    let make_str = |text: &str, sym: &str| -> PointerValue<'ctx> {
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let data: Vec<IntValue> = units
+            .iter()
+            .map(|&u| cx.context.i16_type().const_int(u64::from(u), false))
+            .collect();
+        let dg = cx.module.add_global(
+            cx.context.i16_type().array_type(units.len() as u32),
+            None,
+            &format!("{sym}_data"),
+        );
+        dg.set_initializer(&cx.context.i16_type().const_array(&data));
+        dg.set_constant(true);
+        let g = cx.module.add_global(str_ty, None, sym);
+        g.set_initializer(&str_ty.const_named_struct(&[
+            i32t.const_int(units.len() as u64, false).into(),
+            dg.as_pointer_value().into(),
+        ]));
+        g.set_constant(true);
+        g.as_pointer_value()
+    };
+    for (index, class) in program.classes.iter().enumerate() {
+        if class.ns_members.is_empty() {
+            continue;
+        }
+        let rows: Vec<inkwell::values::StructValue> = class
+            .ns_members
+            .iter()
+            .enumerate()
+            .map(|(mi, m)| {
+                let uri = make_str(
+                    &program.namespace_uris[m.ns as usize],
+                    &format!("vs_nsuri{index}_{mi}"),
+                );
+                let name = make_str(&m.name, &format!("vs_nsname{index}_{mi}"));
+                let (kind, type_tag, payload): (u64, u64, IntValue) =
+                    if let (Some(slot), Some(fty)) = (m.field_slot, m.field_ty) {
+                        // Slot i lives at struct field i+1 (header word 0).
+                        let off = td
+                            .offset_of_element(&cx.classes[index].instance_ty, slot + 1)
+                            .unwrap_or(0);
+                        (
+                            0,
+                            u64::from(ty_tag_reflect(fty)),
+                            i64t.const_int(off, false),
+                        )
+                    } else {
+                        let vslot = m.vslot.expect("method row");
+                        let w = build_wrapper(
+                            cx,
+                            fns,
+                            program,
+                            WrapTarget::Virtual {
+                                class: index as u32,
+                                vslot: vslot as usize,
+                            },
+                        );
+                        (
+                            1,
+                            0,
+                            w.as_global_value().as_pointer_value().const_to_int(i64t),
+                        )
+                    };
+                member_ty.const_named_struct(&[
+                    uri.into(),
+                    name.into(),
+                    i32t.const_int(kind, false).into(),
+                    i32t.const_int(type_tag, false).into(),
+                    payload.into(),
+                ])
+            })
+            .collect();
+        let g = cx
+            .module
+            .get_global(&format!("vs_members{index}"))
+            .expect("declared member table");
+        g.set_initializer(&member_ty.const_array(&rows));
+        g.set_constant(true);
+    }
+}
+
 fn build_wrapper<'ctx>(
     cx: &Cx<'ctx>,
     fns: &[FunctionValue<'ctx>],
@@ -6207,7 +6564,7 @@ fn build_wrapper<'ctx>(
             let rtti_ty = cx.classes[class as usize].rtti_ty;
             let vt = cx
                 .builder
-                .build_struct_gep(rtti_ty, desc, 10, "vt")
+                .build_struct_gep(rtti_ty, desc, 11, "vt")
                 .expect("gep");
             let slot_ptr = unsafe {
                 cx.builder.build_in_bounds_gep(
@@ -6355,6 +6712,26 @@ fn contains_try(stmts: &[mir::Stmt]) -> bool {
     })
 }
 
+/// VsAny tag a field slot boxes to (reflection tables; 0 = `*` slot).
+fn ty_tag_reflect(ty: Ty) -> u32 {
+    match ty {
+        Ty::Any | Ty::Void => 0,
+        Ty::Boolean => 2,
+        Ty::Int => 3,
+        Ty::UInt => 4,
+        Ty::Number => 5,
+        Ty::String => 6,
+        Ty::Object(_) | Ty::Iface(_) => 7,
+        Ty::Array => 8,
+        Ty::Vector(_) => 9,
+        Ty::Function => 10,
+        Ty::RegExp => 11,
+        Ty::Date => 12,
+        Ty::Socket => 13,
+        Ty::Namespace => 14,
+    }
+}
+
 fn ty_tag(ty: Ty) -> u32 {
     match ty {
         Ty::Int => tag::INT,
@@ -6365,6 +6742,7 @@ fn ty_tag(ty: Ty) -> u32 {
         Ty::RegExp => tag::REGEXP,
         Ty::Date => tag::DATE,
         Ty::Socket => tag::SOCKET,
+        Ty::Namespace => tag::NAMESPACE,
         // Class/interface/sequence targets dispatch through dedicated
         // runtime calls, never through core tags.
         Ty::Any

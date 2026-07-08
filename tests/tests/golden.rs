@@ -339,3 +339,12 @@ fn sockets_echo() {
     assert_eq!(server_out.status.code(), Some(0));
     let _ = std::fs::remove_dir_all(&out_dir);
 }
+
+/// The Phase 16 milestone (SPECS §5): first-class Namespace values —
+/// URI-interned identity, runtime-computed qualification through the
+/// class reflection tables, virtual dispatch, bound methods,
+/// ReferenceError on missing members.
+#[test]
+fn namespace_values() {
+    run_golden("nsvalues");
+}

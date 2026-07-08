@@ -29,6 +29,8 @@ pub enum Tag {
     Date = 12,
     /// Socket / ServerSocket; payload = VsSocket pointer.
     Socket = 13,
+    /// Namespace value; payload = VsNamespace pointer (interned).
+    Namespace = 14,
 }
 
 /// A boxed dynamic value (`*`). 16 bytes, passed/returned by value.
@@ -183,6 +185,7 @@ impl VsAny {
             11 => Tag::RegExp,
             12 => Tag::Date,
             13 => Tag::Socket,
+            14 => Tag::Namespace,
             _ => Tag::Undefined,
         }
     }

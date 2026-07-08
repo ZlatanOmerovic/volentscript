@@ -45,6 +45,8 @@ pub enum Ty {
     Socket,
     /// TCP listener (`ServerSocket.bind` / `accept`).
     ServerSocket,
+    /// First-class namespace value (ES4 draft; URI identity, SPECS §5).
+    Namespace,
     /// The AS3 `Function` type: callable, signature unchecked
     /// (AS3's `Function` class carries no signature).
     Function,
@@ -76,6 +78,7 @@ impl Ty {
                 | Ty::Date
                 | Ty::Socket
                 | Ty::ServerSocket
+                | Ty::Namespace
         )
     }
 }
@@ -101,6 +104,7 @@ impl fmt::Display for Ty {
             Ty::Date => "Date",
             Ty::Socket => "Socket",
             Ty::ServerSocket => "ServerSocket",
+            Ty::Namespace => "Namespace",
             Ty::Error => "<error>",
         })
     }

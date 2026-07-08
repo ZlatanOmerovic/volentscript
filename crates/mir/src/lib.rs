@@ -50,6 +50,8 @@ pub enum Ty {
     /// Socket / ServerSocket pointer (SPECS §6 I/O; one runtime type,
     /// sema keeps the two nominal types apart).
     Socket,
+    /// Namespace value (ES4 draft first-class namespaces; URI identity).
+    Namespace,
 }
 
 /// Index of a function in [`Program::functions`].
@@ -75,6 +77,9 @@ pub struct Program {
     /// Vector instantiations: index = `Ty::Vector` payload, value =
     /// element type.
     pub vectors: Vec<Ty>,
+    /// Canonical namespace URIs; index = namespace id (declared-URI
+    /// namespaces share ids; private ones get `vs:private:{id}`).
+    pub namespace_uris: Vec<String>,
     /// Class indices of the prelude Error hierarchy, in runtime
     /// registration order: Error, TypeError, RangeError, ReferenceError,
     /// ArgumentError, SyntaxError. Codegen registers their descriptors at
@@ -106,6 +111,9 @@ pub struct Class {
     pub to_string: Option<FnId>,
     /// `dynamic class` (SPECS §3.2): instances carry an expando slot.
     pub is_dynamic: bool,
+    /// Namespaced members declared in this class (reflection table for
+    /// runtime-computed `obj.q::name` qualification).
+    pub ns_members: Vec<NsMemberInfo>,
     /// Static field storage types.
     pub statics: Vec<Ty>,
 }
@@ -284,6 +292,22 @@ pub enum DateFn {
     /// Indexed string form: 0 toString, 1 toDateString, 2 toTimeString,
     /// 6 toUTCString (avmplus numbering).
     Format(u32),
+}
+
+/// One namespaced member for the runtime reflection table (member names
+/// arrive from sema mangled `#ns{id}::raw`; lowering splits them).
+#[derive(Debug)]
+pub struct NsMemberInfo {
+    /// Namespace id (index into [`Program::namespace_uris`]).
+    pub ns: u32,
+    /// Raw (unmangled) member name.
+    pub name: String,
+    /// Field slot index (`Class::slots`) — mutually exclusive with vslot.
+    pub field_slot: Option<u32>,
+    /// Field type (present with `field_slot`; drives boxing).
+    pub field_ty: Option<Ty>,
+    /// Vtable slot for methods.
+    pub vslot: Option<u32>,
 }
 
 /// Socket instance operations (SPECS §6 I/O; runtime socket.rs).
@@ -601,4 +625,16 @@ pub enum ExprKind {
     CallDate(DateFn, Vec<Expr>),
     /// Socket instance operation; receiver is operand 0.
     CallSocket(SocketOp, Vec<Expr>),
+    /// A namespace value: index into [`Program::namespace_uris`].
+    NamespaceVal(u32),
+    /// `new Namespace(uri)`; the arg is a String.
+    NewNamespace(Box<Expr>),
+    /// Runtime-qualified read `obj.q::name` → boxed value (operands:
+    /// receiver object, Namespace qualifier); the name is inline.
+    NsGet(Box<Expr>, Box<Expr>, String),
+    /// Runtime-qualified call `obj.q::name(args)` → boxed result
+    /// (operands: receiver, qualifier, then the boxed args).
+    NsCall(Box<Expr>, Box<Expr>, String, Vec<Expr>),
+    /// `q.uri` / `q.toString()` — a namespace's canonical URI.
+    NsUri(Box<Expr>),
 }
