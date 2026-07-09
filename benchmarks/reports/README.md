@@ -2,6 +2,8 @@
 
 One entry per run — open any date to see that day's full report.
 
+- **2026-07-09-p29** — [report](2026-07-09-p29.html) · [markdown](2026-07-09-p29.md) · [raw](2026-07-09-p29.json)
+- **2026-07-09** — [report](2026-07-09.html) · [markdown](2026-07-09.md) · [raw](2026-07-09.json)
 - **2026-07-08-p28** — [report](2026-07-08-p28.html) · [markdown](2026-07-08-p28.md) · [raw](2026-07-08-p28.json)
 - **2026-07-08-p27a** — [report](2026-07-08-p27a.html) · [markdown](2026-07-08-p27a.md) · [raw](2026-07-08-p27a.json)
 - **2026-07-08-p25** — [report](2026-07-08-p25.html) · [markdown](2026-07-08-p25.md) · [raw](2026-07-08-p25.json)

@@ -84,10 +84,16 @@ md.append("""
   the helpers: it inlines to a literal, so the helpers are not
   closure-converted and `evalA` inlines — no parameter-threading workaround
   needed.
-- **Object float math (nbody)** — ~10x C. Note this uses `Vector.<Body>`
-  (object elements), so P23's unboxing does not apply; the gap is
-  per-`Body` field access across pointers plus `Math.sqrt`, neither
-  vectorized.
+- **Object float math (nbody)** — ~2.8x C, down from ~10x. The gap was
+  never the arithmetic (`Math.sqrt` already lowers to the hardware `fsqrt`
+  intrinsic); it was that each `Body` field access emitted an opaque
+  `vs_null_check` runtime *call* — ~24 per inner iteration, all redundant,
+  each pinning the field loads so LLVM couldn't hoist them. P29 inlines the
+  null test (branch to a cold throw), which lets the optimizer prove the
+  receiver non-null, drop the redundant checks, and hoist the loads:
+  1680 -> 485 ms in a clean A/B (3.46x). A general win — every object-field
+  access in every program. Still uses boxed `Vector.<Body>`, so unboxed
+  value storage remains a future lever.
 - **Allocation churn (binarytrees)** — ~1.8x C, down from ~8x after P27
   Part A replaced the per-object `BTreeMap` registry with per-size-class
   bump arenas and 16-byte inline block headers: allocation is now a pointer
@@ -110,13 +116,15 @@ md.append("""
   iteration. Encoding was only ~a quarter of the original gap — the rest was
   allocation/GC churn, the same cost P27 attacks in binarytrees.
 
-**Remaining gaps map to planned optimizations, in impact order:** a
-non-moving generational nursery (P27 Part B) for the binarytrees/strings
-allocation churn that the JITs still win, and module-level global storage so
-mutable top-level `var`s stop closure-converting their readers (P25 already
-did this for `const`s). fib's ~6x is the call ABI itself and nbody's ~10x is
-per-field pointer chasing plus `Math.sqrt`, neither a collector nor a closure
-issue. None require language changes.
+**Remaining gaps map to planned optimizations, in impact order:** parallel
+marking landed (P28) but is memory-bandwidth bound; the binarytrees/strings
+allocation churn the JITs still win needs either a work-stealing mark queue or
+better allocator locality (a non-moving generational nursery was built and
+measured a regression — see the repo's `P27B_MEASUREMENT.md`). fib's ~6x is
+now the dominant compute gap: `int`-typed arithmetic is evaluated in `double`
+and coerced back (ES §9.5 ToInt32), where it could specialize to native `i32`
+when the result is consumed as `int` — a codegen change, not a language one.
+None require language changes.
 
 **Fairness notes:** same algorithm and structure in every language,
 idiomatic-simple, no SIMD/threads/arena tricks anywhere. Java is timed as
@@ -192,7 +200,7 @@ html = f"""<!doctype html>
   <ul>
     <li><b>Tight numeric loops</b> (mandelbrot): within ~2x of C, at JS-JIT level — LLVM -O2 works when code stays in registers.</li>
     <li><b>Call-heavy code</b> (fib): ~6x C — a GC safepoint check per call, plus conservative-GC codegen constraints.</li>
-    <li><b>Object float math</b> (nbody): ~10x C — <code>Vector.&lt;T&gt;</code> element reads are runtime calls on boxed storage; safepoints block loop hoisting.</li>
+    <li><b>Object float math</b> (nbody): ~2.8x C, down from ~10x — P29 inlined the per-field null check (was an opaque call that blocked load hoisting); 3.46x on this row in isolation.</li>
     <li><b>Allocation churn</b> (binarytrees): ~1.8x C, down from ~8x — P27 bump arenas replaced the per-object registry (3.68x on this binary); P28 parallelized the mark phase (~9% more, bandwidth-bound). Generational JIT collectors still win it outright.</li>
     <li><b>Strings</b>: ~8.6x C, down from ~13x and now ahead of Java — UTF-16-native ops (P26) plus the P27 allocation fast path; the churn from ~12 short-lived strings per iteration is the remaining gap.</li>
   </ul>
