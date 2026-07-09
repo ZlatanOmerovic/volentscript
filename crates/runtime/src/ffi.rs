@@ -642,6 +642,18 @@ pub unsafe extern "C" fn vs_null_check(obj: *const u8) {
     }
 }
 
+/// Cold path for the *inline* null check the backend emits at field/method
+/// accesses: the compiled code tests the pointer itself (letting LLVM prove
+/// non-nullness and drop redundant checks) and branches here only on null.
+/// Never returns.
+///
+/// # Safety
+/// Always safe; diverges unconditionally.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_null_throw() -> ! {
+    conv::type_error("null reference (property access on null object)")
+}
+
 /// ToString for a class instance (used by string concatenation).
 ///
 /// # Safety

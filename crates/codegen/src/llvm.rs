@@ -2669,13 +2669,34 @@ impl<'a, 'ctx> FnCx<'a, 'ctx> {
     }
 
     fn null_check(&mut self, obj: PointerValue<'ctx>) {
-        let f = self
-            .cx
-            .runtime_fn("vs_null_check", None, &[self.cx.ptr().into()]);
-        self.cx
-            .builder
-            .build_call(f, &[obj.into()], "")
-            .expect("call");
+        // Inline the null test rather than calling `vs_null_check`. The
+        // fall-through (`ok`) path proves `obj` non-null to LLVM, so GVN drops
+        // redundant and loop-invariant checks and the guarded field loads
+        // become CSE/hoist-eligible — an opaque call would be re-run at every
+        // access and pin every dependent load (measured: ~24 such calls per
+        // nbody inner iteration). Null branches to a cold, noreturn throw.
+        let cx = self.cx;
+        let is_null = cx.builder.build_is_null(obj, "isnull").expect("isnull");
+        let func = self.function;
+        let npe = cx.context.append_basic_block(func, "npe");
+        let ok = cx.context.append_basic_block(func, "npe.ok");
+        cx.builder
+            .build_conditional_branch(is_null, npe, ok)
+            .expect("br");
+        cx.builder.position_at_end(npe);
+        let f = cx.runtime_fn("vs_null_throw", None, &[]);
+        for name in ["noreturn", "cold"] {
+            f.add_attribute(
+                inkwell::attributes::AttributeLoc::Function,
+                cx.context.create_enum_attribute(
+                    inkwell::attributes::Attribute::get_named_enum_kind_id(name),
+                    0,
+                ),
+            );
+        }
+        cx.builder.build_call(f, &[], "").expect("call");
+        cx.builder.build_unreachable().expect("unreachable");
+        cx.builder.position_at_end(ok);
     }
 
     /// Pointer to instance slot `slot` using the owning class's layout.
